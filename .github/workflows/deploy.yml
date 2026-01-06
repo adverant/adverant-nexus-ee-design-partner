@@ -1,0 +1,138 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/**'
+      - 'k8s/**'
+      - 'Dockerfile'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy'
+        required: true
+        default: 'nexus-ee-design'
+        type: choice
+        options:
+          - nexus-ee-design
+          - all
+
+env:
+  DEPLOY_SERVER: 157.173.102.118
+  DEPLOY_USER: root
+  REGISTRY: localhost:5000
+  K8S_NAMESPACE: nexus
+  REPO_PATH: /root/adverant-nexus-ee-design-partner
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.NEXUS_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.DEPLOY_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Detect changed services
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "services=${{ github.event.inputs.service }}" >> $GITHUB_OUTPUT
+          else
+            # Check for changes in services directory
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E "^services/" | cut -d'/' -f2 | sort -u | tr '\n' ' ')
+            if [ -z "$CHANGED" ]; then
+              CHANGED="nexus-ee-design"
+            fi
+            echo "services=$CHANGED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pull latest code on server
+        run: |
+          ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_SERVER }} << 'ENDSSH'
+            cd ${{ env.REPO_PATH }} || {
+              echo "Cloning repository..."
+              git clone https://github.com/adverant/adverant-nexus-ee-design-partner.git ${{ env.REPO_PATH }}
+              cd ${{ env.REPO_PATH }}
+            }
+            git fetch origin
+            git reset --hard origin/main
+            git clean -fd
+          ENDSSH
+
+      - name: Build and deploy service
+        run: |
+          for SERVICE in ${{ steps.changes.outputs.services }}; do
+            echo "Building and deploying: $SERVICE"
+
+            ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_SERVER }} << ENDSSH
+              cd ${{ env.REPO_PATH }}/services/$SERVICE
+
+              # Generate build metadata
+              BUILD_ID="${SERVICE}-$(date +%Y%m%d)-$(openssl rand -hex 4)"
+              BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              GIT_COMMIT=$(git rev-parse --short HEAD)
+              GIT_BRANCH=$(git branch --show-current)
+              VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
+
+              echo "Build ID: \$BUILD_ID"
+              echo "Git Commit: \$GIT_COMMIT"
+              echo "Version: \$VERSION"
+
+              # Build Docker image
+              docker build \
+                --build-arg BUILD_ID="\$BUILD_ID" \
+                --build-arg BUILD_TIMESTAMP="\$BUILD_TIMESTAMP" \
+                --build-arg GIT_COMMIT="\$GIT_COMMIT" \
+                --build-arg GIT_BRANCH="\$GIT_BRANCH" \
+                --build-arg VERSION="\$VERSION" \
+                --no-cache \
+                -t ${{ env.REGISTRY }}/$SERVICE:\$BUILD_ID \
+                -t ${{ env.REGISTRY }}/$SERVICE:latest \
+                .
+
+              # Push to local registry
+              docker push ${{ env.REGISTRY }}/$SERVICE:\$BUILD_ID
+              docker push ${{ env.REGISTRY }}/$SERVICE:latest
+
+              # Deploy to Kubernetes
+              k3s kubectl set image deployment/$SERVICE \
+                $SERVICE=${{ env.REGISTRY }}/$SERVICE:\$BUILD_ID \
+                -n ${{ env.K8S_NAMESPACE }} || \
+              k3s kubectl apply -f ../../k8s/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
+
+              # Wait for rollout
+              k3s kubectl rollout status deployment/$SERVICE -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+
+              echo "✅ Deployed $SERVICE with build \$BUILD_ID"
+          ENDSSH
+          done
+
+      - name: Verify deployment
+        run: |
+          ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_SERVER }} << 'ENDSSH'
+            echo "=== Deployment Status ==="
+            k3s kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=nexus-ee-design
+
+            echo ""
+            echo "=== Build Info ==="
+            POD=$(k3s kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=nexus-ee-design -o jsonpath='{.items[0].metadata.name}')
+            k3s kubectl exec -n ${{ env.K8S_NAMESPACE }} $POD -- env | grep NEXUS_ || echo "Build info not available yet"
+          ENDSSH
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment failed! Check logs above for details."

@@ -1,0 +1,53 @@
+{
+  "name": "adverant-nexus-ee-design-partner",
+  "version": "1.0.0",
+  "description": "End-to-end hardware/software development automation platform with Claude Code orchestration, KiCad WASM integration, multi-LLM validation, and comprehensive simulation suite",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "ui"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=services/nexus-ee-design",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "clean": "npm run clean --workspaces && rm -rf node_modules",
+    "docker:build": "echo 'ERROR: Docker builds must be done on remote server (157.173.102.118)' && exit 1",
+    "deploy": "echo 'Use /build-deploy skill for deployments' && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adverant/adverant-nexus-ee-design-partner.git"
+  },
+  "keywords": [
+    "eda",
+    "pcb",
+    "kicad",
+    "electronic-design",
+    "hardware-development",
+    "firmware",
+    "simulation",
+    "spice",
+    "thermal-analysis",
+    "signal-integrity",
+    "claude-code",
+    "ai-orchestration",
+    "multi-agent"
+  ],
+  "author": "Adverant Inc.",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/adverant/adverant-nexus-ee-design-partner/issues"
+  },
+  "homepage": "https://github.com/adverant/adverant-nexus-ee-design-partner#readme",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

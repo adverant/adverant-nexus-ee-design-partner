@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+    "baseUrl": ".",
+    "paths": {
+      "@services/*": ["services/nexus-ee-design/src/services/*"],
+      "@api/*": ["services/nexus-ee-design/src/api/*"],
+      "@types/*": ["services/nexus-ee-design/src/types/*"],
+      "@utils/*": ["services/nexus-ee-design/src/utils/*"],
+      "@skills/*": ["services/nexus-ee-design/src/skills/*"]
+    }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/dist",
+    "coverage",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
+}

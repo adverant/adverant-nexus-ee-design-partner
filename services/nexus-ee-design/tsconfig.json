@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "baseUrl": "./src",
+    "paths": {
+      "@api/*": ["api/*"],
+      "@services/*": ["services/*"],
+      "@types/*": ["types/*"],
+      "@utils/*": ["utils/*"],
+      "@skills/*": ["skills/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
+}

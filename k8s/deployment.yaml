@@ -1,0 +1,290 @@
+# Nexus EE Design Partner - Kubernetes Deployment
+#
+# End-to-end hardware/software development automation platform
+# with Claude Code orchestration and multi-LLM validation.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-ee-design
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: plugin
+    app.kubernetes.io/part-of: nexus-plugins
+    app.kubernetes.io/managed-by: nexus-deployment-controller
+    api.adverant.ai/plugin-id: "nexus-ee-design"
+    api.adverant.ai/execution-mode: "mcp_container"
+  annotations:
+    api.adverant.ai/description: "EE Design Partner - End-to-end hardware/software development"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-ee-design
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus-ee-design
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: plugin
+        api.adverant.ai/plugin-id: "nexus-ee-design"
+        api.adverant.ai/type: plugin
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+
+      containers:
+        - name: nexus-ee-design
+          image: localhost:5000/nexus-ee-design:latest
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            - name: NEXUS_PLUGIN_ID
+              value: "nexus-ee-design"
+            - name: NEXUS_PLUGIN_NAME
+              value: "EE Design Partner"
+            - name: NEXUS_PLUGIN_VERSION
+              value: "1.0.0"
+            - name: NEXUS_EXECUTION_MODE
+              value: "mcp_container"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: "info"
+
+            # Python configuration
+            - name: PYTHON_PATH
+              value: "/opt/venv/bin/python3"
+            - name: PYTHON_SCRIPTS_DIR
+              value: "/app/python-scripts"
+
+            # Storage
+            - name: TEMP_DIR
+              value: "/tmp/ee-design"
+            - name: PROJECTS_DIR
+              value: "/data/projects"
+            - name: OUTPUT_DIR
+              value: "/data/output"
+
+            # Service URLs
+            - name: NEXUS_GRAPHRAG_URL
+              value: "http://nexus-graphrag.nexus.svc.cluster.local:9000"
+            - name: NEXUS_MAGEAGENT_URL
+              value: "http://nexus-mageagent.nexus.svc.cluster.local:9010"
+            - name: NEXUS_SANDBOX_URL
+              value: "http://nexus-sandbox.nexus.svc.cluster.local:9020"
+            - name: NEXUS_FILEPROCESS_URL
+              value: "http://nexus-fileprocess.nexus.svc.cluster.local:9030"
+            - name: NEXUS_SKILLS_ENGINE_URL
+              value: "http://nexus-skills-engine.nexus.svc.cluster.local:9040"
+
+            # Layout configuration
+            - name: LAYOUT_MAX_ITERATIONS
+              value: "100"
+            - name: LAYOUT_CONVERGENCE_THRESHOLD
+              value: "0.1"
+            - name: LAYOUT_TARGET_SCORE
+              value: "95"
+            - name: ENABLED_AGENTS
+              value: "conservative,aggressive_compact,thermal_optimized,emi_optimized,dfm_optimized"
+
+            # Simulation configuration
+            - name: MAX_CONCURRENT_SIMS
+              value: "4"
+            - name: SIM_TIMEOUT_SECONDS
+              value: "3600"
+
+            # API Keys from secrets
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: anthropic-api-key
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: openrouter-api-key
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+              ephemeral-storage: "500Mi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+              ephemeral-storage: "20Gi"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop:
+                - ALL
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: ee-design-data
+              mountPath: /data
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: "2Gi"
+        - name: ee-design-data
+          persistentVolumeClaim:
+            claimName: nexus-ee-design-data
+
+      terminationGracePeriodSeconds: 60
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-ee-design
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/component: plugin
+    app.kubernetes.io/part-of: nexus-plugins
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nexus-ee-design
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+
+---
+# Persistent Volume Claim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-ee-design-data
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: local-path
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nexus-ee-design-hpa
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/part-of: nexus-plugins
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nexus-ee-design
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nexus-ee-design-pdb
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/part-of: nexus-plugins
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-ee-design

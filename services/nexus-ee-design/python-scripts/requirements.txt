@@ -1,0 +1,43 @@
+# KiCad Automation Dependencies
+# For schematic and PCB file manipulation
+
+# S-expression parsing (KiCad file format)
+sexpdata>=1.0.0
+
+# Gerber file handling
+pygerber>=2.0.0
+
+# Image processing
+Pillow>=10.0.0
+
+# PDF generation
+reportlab>=4.0.0
+
+# SVG processing
+cairosvg>=2.7.0
+
+# Scientific computing (for simulations)
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Plotting
+matplotlib>=3.7.0
+
+# Data handling
+pandas>=2.0.0
+
+# HTTP client
+requests>=2.31.0
+
+# JSON schema validation
+jsonschema>=4.19.0
+
+# YAML handling
+PyYAML>=6.0.1
+
+# RF/Signal Integrity (optional)
+scikit-rf>=0.30.0
+
+# Async support
+aiohttp>=3.9.0
+aiofiles>=23.2.0

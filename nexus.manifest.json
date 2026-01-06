@@ -1,0 +1,346 @@
+{
+  "$schema": "https://api.adverant.ai/schemas/nexus-plugin-manifest-v1.json",
+  "id": "nexus-ee-design",
+  "name": "EE Design Partner",
+  "displayName": "EE Design Partner",
+  "version": "1.0.0",
+  "description": "End-to-end hardware/software development automation platform with Claude Code orchestration, KiCad WASM integration, multi-LLM validation, and comprehensive simulation suite",
+  "author": {
+    "name": "Adverant Inc.",
+    "email": "engineering@adverant.ai",
+    "url": "https://adverant.ai"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adverant/adverant-nexus-ee-design-partner"
+  },
+  "keywords": [
+    "eda",
+    "pcb",
+    "kicad",
+    "schematic",
+    "electronic-design",
+    "hardware-development",
+    "firmware",
+    "simulation",
+    "spice",
+    "thermal-analysis",
+    "signal-integrity",
+    "rf",
+    "emc",
+    "claude-code",
+    "ai-orchestration",
+    "multi-agent",
+    "ralph-loop"
+  ],
+  "categories": [
+    "engineering",
+    "hardware",
+    "electronics",
+    "simulation",
+    "code-generation"
+  ],
+  "visibility": "organization",
+  "status": "beta",
+  "executionMode": "mcp_container",
+  "runtime": {
+    "engine": "node",
+    "version": ">=20.0.0"
+  },
+  "entrypoint": {
+    "type": "http",
+    "port": 8080,
+    "healthCheck": "/health",
+    "readinessCheck": "/ready",
+    "livenessCheck": "/live"
+  },
+  "api": {
+    "version": "v1",
+    "basePath": "/api/v1",
+    "documentation": "/api/docs",
+    "openapi": "/api/openapi.json"
+  },
+  "websocket": {
+    "enabled": true,
+    "path": "/ws",
+    "events": [
+      "simulation:started",
+      "simulation:progress",
+      "simulation:completed",
+      "simulation:failed",
+      "layout:started",
+      "layout:iteration",
+      "layout:completed",
+      "layout:failed",
+      "validation:started",
+      "validation:result",
+      "validation:completed",
+      "firmware:generated",
+      "gerber:exported"
+    ]
+  },
+  "ui": {
+    "enabled": true,
+    "path": "/ui",
+    "framework": "react",
+    "entry": "/ui/index.html",
+    "components": [
+      {
+        "name": "terminal",
+        "description": "Claude Code terminal integration",
+        "type": "iframe"
+      },
+      {
+        "name": "project-browser",
+        "description": "VSCode-like GitHub repo browser",
+        "type": "panel"
+      },
+      {
+        "name": "kicad-viewer",
+        "description": "KiCad WASM schematic and PCB editor",
+        "type": "tab"
+      },
+      {
+        "name": "simulation-panel",
+        "description": "Simulation waveforms and results",
+        "type": "panel"
+      },
+      {
+        "name": "validation-panel",
+        "description": "DRC/ERC/Multi-LLM validation results",
+        "type": "panel"
+      },
+      {
+        "name": "3d-viewer",
+        "description": "Three.js PCB 3D visualization",
+        "type": "tab"
+      }
+    ]
+  },
+  "skills": {
+    "master": "ee-design-partner",
+    "triggers": ["/ee-design", "/eda", "/hardware"],
+    "subSkills": [
+      "research-paper",
+      "patent-search",
+      "requirements-gen",
+      "ee-architecture",
+      "component-select",
+      "bom-optimize",
+      "power-budget",
+      "schematic-gen",
+      "schematic-review",
+      "netlist-gen",
+      "simulate-spice",
+      "simulate-thermal",
+      "simulate-si",
+      "simulate-rf",
+      "simulate-emc",
+      "simulate-reliability",
+      "pcb-layout",
+      "pcb-review",
+      "stackup-design",
+      "via-optimize",
+      "gerber-gen",
+      "dfm-check",
+      "vendor-quote",
+      "panelize",
+      "firmware-gen",
+      "hal-gen",
+      "driver-gen",
+      "rtos-config",
+      "build-setup",
+      "test-gen",
+      "hil-setup",
+      "test-procedure",
+      "coverage-analysis",
+      "manufacture",
+      "assembly-guide",
+      "quality-check",
+      "traceability",
+      "debug-assist",
+      "service-manual",
+      "rma-process",
+      "firmware-update"
+    ]
+  },
+  "mcp": {
+    "enabled": true,
+    "tools": [
+      {
+        "name": "generate_schematic",
+        "description": "Generate schematic from requirements and architecture"
+      },
+      {
+        "name": "parse_kicad_schematic",
+        "description": "Parse existing KiCad schematic files"
+      },
+      {
+        "name": "generate_pcb_layout",
+        "description": "Generate PCB layout with competing agent tournament"
+      },
+      {
+        "name": "run_spice_simulation",
+        "description": "Run SPICE circuit simulation"
+      },
+      {
+        "name": "run_thermal_simulation",
+        "description": "Run thermal analysis simulation"
+      },
+      {
+        "name": "run_signal_integrity",
+        "description": "Run signal integrity analysis"
+      },
+      {
+        "name": "run_emc_simulation",
+        "description": "Run RF/EMC simulation"
+      },
+      {
+        "name": "export_gerbers",
+        "description": "Export Gerber and drill files"
+      },
+      {
+        "name": "generate_firmware",
+        "description": "Generate firmware scaffolding for target MCU"
+      },
+      {
+        "name": "generate_hal",
+        "description": "Generate HAL layer code"
+      },
+      {
+        "name": "generate_driver",
+        "description": "Generate component driver from datasheet"
+      },
+      {
+        "name": "validate_design",
+        "description": "Run multi-LLM validation on design artifacts"
+      },
+      {
+        "name": "get_vendor_quote",
+        "description": "Get PCB manufacturing quote from vendors"
+      }
+    ],
+    "prompts": [
+      {
+        "name": "design_review",
+        "description": "Comprehensive design review prompt"
+      },
+      {
+        "name": "optimization_suggestions",
+        "description": "Get AI suggestions for design optimization"
+      }
+    ],
+    "resources": [
+      {
+        "name": "component_library",
+        "description": "Component symbol and footprint library"
+      },
+      {
+        "name": "design_rules",
+        "description": "DRC rules and constraints"
+      }
+    ]
+  },
+  "dependencies": {
+    "services": [
+      {
+        "name": "nexus-graphrag",
+        "version": ">=1.0.0",
+        "required": true,
+        "purpose": "Memory and knowledge graph"
+      },
+      {
+        "name": "nexus-mageagent",
+        "version": ">=1.0.0",
+        "required": false,
+        "purpose": "Multi-agent orchestration"
+      },
+      {
+        "name": "nexus-sandbox",
+        "version": ">=1.0.0",
+        "required": false,
+        "purpose": "Code execution"
+      }
+    ],
+    "external": [
+      {
+        "name": "openrouter",
+        "purpose": "Gemini 2.5 Pro for validation",
+        "required": true
+      },
+      {
+        "name": "anthropic",
+        "purpose": "Claude API for primary LLM",
+        "required": true
+      }
+    ]
+  },
+  "resources": {
+    "requests": {
+      "cpu": "500m",
+      "memory": "1Gi",
+      "ephemeralStorage": "500Mi"
+    },
+    "limits": {
+      "cpu": "4000m",
+      "memory": "8Gi",
+      "ephemeralStorage": "20Gi"
+    }
+  },
+  "volumes": [
+    {
+      "name": "projects",
+      "mountPath": "/data/projects",
+      "size": "50Gi",
+      "persistent": true
+    },
+    {
+      "name": "output",
+      "mountPath": "/data/output",
+      "size": "20Gi",
+      "persistent": true
+    },
+    {
+      "name": "tmp",
+      "mountPath": "/tmp",
+      "size": "5Gi",
+      "persistent": false
+    }
+  ],
+  "environment": {
+    "required": [
+      "NEXUS_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "OPENROUTER_API_KEY"
+    ],
+    "optional": [
+      "NEXUS_GRAPHRAG_URL",
+      "NEXUS_MAGEAGENT_URL",
+      "NGSPICE_PATH",
+      "OPENFOAM_PATH",
+      "OPENEMS_PATH",
+      "MAX_CONCURRENT_SIMS",
+      "LAYOUT_MAX_ITERATIONS",
+      "LAYOUT_TARGET_SCORE"
+    ]
+  },
+  "security": {
+    "runAsNonRoot": true,
+    "readOnlyRootFilesystem": false,
+    "allowPrivilegeEscalation": false,
+    "capabilities": {
+      "drop": ["ALL"]
+    }
+  },
+  "metrics": {
+    "enabled": true,
+    "path": "/metrics",
+    "port": 8080
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "outputs": ["stdout"]
+  }
+}
