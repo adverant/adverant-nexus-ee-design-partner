@@ -1,0 +1,42 @@
+# SKiDL Schematic Generator Plugin - Python Dependencies
+# Production-ready requirements for circuit description and validation
+
+# Core SKiDL - Circuit description DSL with built-in ERC
+skidl>=2.0.0
+
+# KiCad Schematic API - For schematic file manipulation
+# Note: This provides S-expression generation and validation
+kicad-sch-api>=0.5.0
+
+# S-expression parsing (KiCad file format foundation)
+sexpdata>=1.0.0
+
+# Scientific computing for calculations
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Plotting for waveform visualization
+matplotlib>=3.7.0
+
+# SPICE interface for Level 4 validation
+PySpice>=1.5
+
+# KiCad Python scripting interface (optional, for direct KiCad integration)
+# kicad-python>=0.1.0  # Requires KiCad installation
+
+# Async support for parallel validation
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+
+# JSON schema validation for configuration
+jsonschema>=4.19.0
+
+# YAML handling for templates
+PyYAML>=6.0.1
+
+# Type checking
+mypy>=1.7.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

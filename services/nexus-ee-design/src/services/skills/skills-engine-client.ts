@@ -1,0 +1,547 @@
+/**
+ * Skills Engine Client
+ *
+ * Integrates EE Design Partner skills with the Nexus Skills Engine.
+ * Handles skill registration, search, and execution.
+ */
+
+import { EventEmitter } from 'events';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { v4 as uuidv4 } from 'uuid';
+import { logger } from '../../utils/logger';
+import { Skill, SkillCapability, SkillParameter, SkillExecution } from '../../types';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface SkillsEngineConfig {
+  apiUrl: string;
+  apiKey: string;
+  skillsDirectory: string;
+  autoRegister: boolean;
+  syncInterval: number; // ms
+}
+
+export interface SkillDefinition {
+  name: string;
+  displayName: string;
+  description: string;
+  version: string;
+  status: 'draft' | 'testing' | 'published' | 'deprecated';
+  visibility: 'private' | 'organization' | 'public';
+  allowedTools: string[];
+  triggers: string[];
+  capabilities: SkillCapability[];
+  subSkills?: string[];
+  content?: string; // Full markdown content
+}
+
+export interface SkillSearchResult {
+  skill: Skill;
+  relevance: number;
+  matchedOn: string[];
+}
+
+export interface SkillExecutionRequest {
+  skillName: string;
+  capability?: string;
+  parameters: Record<string, unknown>;
+  context?: {
+    projectId?: string;
+    userId?: string;
+    sessionId?: string;
+  };
+}
+
+export interface SkillExecutionResponse {
+  executionId: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  result?: unknown;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface RegistrationResult {
+  skillName: string;
+  success: boolean;
+  skillId?: string;
+  error?: string;
+}
+
+// ============================================================================
+// Skills Engine Client
+// ============================================================================
+
+export class SkillsEngineClient extends EventEmitter {
+  private config: SkillsEngineConfig;
+  private registeredSkills: Map<string, Skill>;
+  private syncTimer?: NodeJS.Timeout;
+
+  constructor(config: Partial<SkillsEngineConfig> = {}) {
+    super();
+    this.config = {
+      apiUrl: config.apiUrl || process.env.NEXUS_API_URL || 'https://api.adverant.ai',
+      apiKey: config.apiKey || process.env.NEXUS_API_KEY || '',
+      skillsDirectory: config.skillsDirectory || './skills',
+      autoRegister: config.autoRegister !== false,
+      syncInterval: config.syncInterval || 300000 // 5 minutes
+    };
+    this.registeredSkills = new Map();
+  }
+
+  /**
+   * Initialize the client and register all skills
+   */
+  async initialize(): Promise<void> {
+    logger.info('Initializing Skills Engine client');
+
+    // Load and register all skills from directory
+    if (this.config.autoRegister) {
+      await this.registerAllSkills();
+    }
+
+    // Start periodic sync
+    this.startSync();
+
+    this.emit('initialized');
+    logger.info('Skills Engine client initialized', {
+      skillCount: this.registeredSkills.size
+    });
+  }
+
+  /**
+   * Register all skills from the skills directory
+   */
+  async registerAllSkills(): Promise<RegistrationResult[]> {
+    const results: RegistrationResult[] = [];
+
+    try {
+      // Read all .md files from skills directory
+      const skillsPath = path.resolve(this.config.skillsDirectory);
+      const files = await fs.readdir(skillsPath);
+      const skillFiles = files.filter(f => f.endsWith('.md'));
+
+      logger.info('Found skill files', { count: skillFiles.length });
+
+      for (const file of skillFiles) {
+        const filePath = path.join(skillsPath, file);
+        const result = await this.registerSkillFromFile(filePath);
+        results.push(result);
+      }
+
+      // Log summary
+      const successCount = results.filter(r => r.success).length;
+      logger.info('Skill registration complete', {
+        total: results.length,
+        success: successCount,
+        failed: results.length - successCount
+      });
+
+    } catch (error) {
+      logger.error('Failed to register skills', { error });
+    }
+
+    return results;
+  }
+
+  /**
+   * Register a skill from a markdown file
+   */
+  async registerSkillFromFile(filePath: string): Promise<RegistrationResult> {
+    const fileName = path.basename(filePath);
+
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      const definition = this.parseSkillDefinition(content);
+
+      if (!definition) {
+        return {
+          skillName: fileName,
+          success: false,
+          error: 'Failed to parse skill definition'
+        };
+      }
+
+      return await this.registerSkill(definition);
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Failed to register skill from file', { filePath, error: errorMessage });
+
+      return {
+        skillName: fileName,
+        success: false,
+        error: errorMessage
+      };
+    }
+  }
+
+  /**
+   * Parse skill definition from markdown content
+   */
+  private parseSkillDefinition(content: string): SkillDefinition | null {
+    try {
+      // Extract YAML frontmatter
+      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!frontmatterMatch) {
+        return null;
+      }
+
+      const frontmatter = yaml.load(frontmatterMatch[1]) as Record<string, unknown>;
+
+      // Extract markdown content after frontmatter
+      const markdownContent = content.slice(frontmatterMatch[0].length).trim();
+
+      return {
+        name: frontmatter.name as string,
+        displayName: frontmatter.displayName as string,
+        description: frontmatter.description as string,
+        version: frontmatter.version as string,
+        status: frontmatter.status as SkillDefinition['status'],
+        visibility: frontmatter.visibility as SkillDefinition['visibility'],
+        allowedTools: frontmatter['allowed-tools'] as string[] || [],
+        triggers: frontmatter.triggers as string[] || [],
+        capabilities: (frontmatter.capabilities as SkillCapability[]) || [],
+        subSkills: frontmatter['sub-skills'] as string[] || undefined,
+        content: markdownContent
+      };
+
+    } catch (error) {
+      logger.error('Failed to parse skill definition', { error });
+      return null;
+    }
+  }
+
+  /**
+   * Register a skill with the Skills Engine
+   */
+  async registerSkill(definition: SkillDefinition): Promise<RegistrationResult> {
+    try {
+      // Build skill object
+      const skill: Skill = {
+        name: definition.name,
+        displayName: definition.displayName,
+        description: definition.description,
+        version: definition.version,
+        status: definition.status,
+        visibility: definition.visibility,
+        allowedTools: definition.allowedTools,
+        triggers: definition.triggers,
+        capabilities: definition.capabilities,
+        subSkills: definition.subSkills
+      };
+
+      // Register with API
+      const response = await this.callApi('POST', '/api/skills/register', {
+        skill,
+        content: definition.content,
+        embeddings: await this.generateEmbeddings(definition)
+      });
+
+      if (response.success) {
+        // Store locally
+        this.registeredSkills.set(skill.name, skill);
+
+        this.emit('skill:registered', { skill });
+        logger.info('Skill registered', { name: skill.name });
+
+        return {
+          skillName: skill.name,
+          success: true,
+          skillId: response.data.skillId
+        };
+      } else {
+        return {
+          skillName: skill.name,
+          success: false,
+          error: response.error?.message || 'Registration failed'
+        };
+      }
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Failed to register skill', {
+        name: definition.name,
+        error: errorMessage
+      });
+
+      return {
+        skillName: definition.name,
+        success: false,
+        error: errorMessage
+      };
+    }
+  }
+
+  /**
+   * Generate embeddings for skill searchability
+   */
+  private async generateEmbeddings(definition: SkillDefinition): Promise<{
+    nameEmbedding: number[];
+    descriptionEmbedding: number[];
+    contentEmbedding: number[];
+  }> {
+    // In production, call Voyage AI or similar for embeddings
+    // For now, return placeholder
+    return {
+      nameEmbedding: [],
+      descriptionEmbedding: [],
+      contentEmbedding: []
+    };
+  }
+
+  /**
+   * Search for skills by query
+   */
+  async searchSkills(query: string, options?: {
+    limit?: number;
+    category?: string;
+    phase?: string;
+  }): Promise<SkillSearchResult[]> {
+    try {
+      const response = await this.callApi('POST', '/api/skills/search', {
+        query,
+        limit: options?.limit || 10,
+        filters: {
+          category: options?.category,
+          phase: options?.phase,
+          plugin: 'ee-design-partner'
+        }
+      });
+
+      if (response.success) {
+        return response.data.results as SkillSearchResult[];
+      }
+
+      return [];
+
+    } catch (error) {
+      logger.error('Failed to search skills', { error });
+      return [];
+    }
+  }
+
+  /**
+   * Get a specific skill by name
+   */
+  async getSkill(name: string): Promise<Skill | null> {
+    // Check local cache first
+    if (this.registeredSkills.has(name)) {
+      return this.registeredSkills.get(name)!;
+    }
+
+    try {
+      const response = await this.callApi('GET', `/api/skills/${name}`);
+
+      if (response.success) {
+        const skill = response.data as Skill;
+        this.registeredSkills.set(skill.name, skill);
+        return skill;
+      }
+
+      return null;
+
+    } catch (error) {
+      logger.error('Failed to get skill', { name, error });
+      return null;
+    }
+  }
+
+  /**
+   * Execute a skill
+   */
+  async executeSkill(request: SkillExecutionRequest): Promise<SkillExecutionResponse> {
+    const executionId = uuidv4();
+
+    try {
+      this.emit('skill:execution:start', { executionId, request });
+
+      const response = await this.callApi('POST', '/api/skills/execute', {
+        executionId,
+        skillName: request.skillName,
+        capability: request.capability,
+        parameters: request.parameters,
+        context: request.context
+      });
+
+      if (response.success) {
+        const execution: SkillExecutionResponse = {
+          executionId,
+          status: response.data.status,
+          result: response.data.result,
+          startedAt: response.data.startedAt,
+          completedAt: response.data.completedAt
+        };
+
+        this.emit('skill:execution:complete', { execution });
+        return execution;
+      }
+
+      return {
+        executionId,
+        status: 'failed',
+        error: response.error?.message || 'Execution failed'
+      };
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      this.emit('skill:execution:error', { executionId, error: errorMessage });
+
+      return {
+        executionId,
+        status: 'failed',
+        error: errorMessage
+      };
+    }
+  }
+
+  /**
+   * Get all registered EE Design Partner skills
+   */
+  getRegisteredSkills(): Skill[] {
+    return Array.from(this.registeredSkills.values());
+  }
+
+  /**
+   * Get skills by category/phase
+   */
+  getSkillsByPhase(phase: string): Skill[] {
+    const phaseSkillMap: Record<string, string[]> = {
+      'ideation': ['research-paper', 'patent-search', 'market-analysis', 'requirements-gen'],
+      'architecture': ['ee-architecture', 'component-select', 'bom-optimize', 'power-budget'],
+      'schematic': ['schematic-gen', 'schematic-review', 'netlist-gen'],
+      'simulation': ['simulate-spice', 'simulate-thermal', 'simulate-si', 'simulate-rf', 'simulate-emc', 'simulate-stress', 'simulate-reliability'],
+      'pcb_layout': ['pcb-layout', 'pcb-review', 'stackup-design', 'via-optimize'],
+      'manufacturing': ['gerber-gen', 'dfm-check', 'vendor-quote', 'panelize'],
+      'firmware': ['firmware-gen', 'hal-gen', 'driver-gen', 'rtos-config', 'build-setup'],
+      'testing': ['test-gen', 'hil-setup', 'test-procedure', 'coverage-analysis'],
+      'production': ['manufacture', 'assembly-guide', 'quality-check', 'traceability'],
+      'field_support': ['debug-assist', 'service-manual', 'rma-process', 'firmware-update']
+    };
+
+    const skillNames = phaseSkillMap[phase] || [];
+    return skillNames
+      .map(name => this.registeredSkills.get(name))
+      .filter((s): s is Skill => s !== undefined);
+  }
+
+  /**
+   * Sync skills with the Skills Engine
+   */
+  private async syncSkills(): Promise<void> {
+    try {
+      const response = await this.callApi('GET', '/api/skills/sync', {
+        plugin: 'ee-design-partner'
+      });
+
+      if (response.success) {
+        // Update local cache
+        for (const skill of response.data.skills as Skill[]) {
+          this.registeredSkills.set(skill.name, skill);
+        }
+
+        this.emit('skills:synced', { count: this.registeredSkills.size });
+      }
+
+    } catch (error) {
+      logger.error('Failed to sync skills', { error });
+    }
+  }
+
+  /**
+   * Start periodic sync
+   */
+  private startSync(): void {
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+    }
+
+    this.syncTimer = setInterval(() => {
+      this.syncSkills();
+    }, this.config.syncInterval);
+  }
+
+  /**
+   * Stop periodic sync
+   */
+  stopSync(): void {
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = undefined;
+    }
+  }
+
+  /**
+   * Make API call to Skills Engine
+   */
+  private async callApi(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    endpoint: string,
+    body?: unknown
+  ): Promise<{
+    success: boolean;
+    data?: unknown;
+    error?: { code: string; message: string };
+  }> {
+    try {
+      const url = `${this.config.apiUrl}${endpoint}`;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apiKey}`
+      };
+
+      const options: RequestInit = {
+        method,
+        headers
+      };
+
+      if (body && method !== 'GET') {
+        options.body = JSON.stringify(body);
+      }
+
+      const response = await fetch(url, options);
+      const data = await response.json();
+
+      if (!response.ok) {
+        return {
+          success: false,
+          error: {
+            code: data.error?.code || 'API_ERROR',
+            message: data.error?.message || `HTTP ${response.status}`
+          }
+        };
+      }
+
+      return {
+        success: true,
+        data
+      };
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        success: false,
+        error: {
+          code: 'NETWORK_ERROR',
+          message: errorMessage
+        }
+      };
+    }
+  }
+
+  /**
+   * Cleanup
+   */
+  async shutdown(): Promise<void> {
+    this.stopSync();
+    this.registeredSkills.clear();
+    this.emit('shutdown');
+  }
+}
+
+export default SkillsEngineClient;

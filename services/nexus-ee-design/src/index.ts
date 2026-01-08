@@ -18,6 +18,8 @@ import { config } from './config.js';
 import { log } from './utils/logger.js';
 import { EEDesignError, handleError } from './utils/errors.js';
 import { createApiRoutes } from './api/routes.js';
+import { SkillsEngineClient } from './services/skills/skills-engine-client.js';
+import { setSkillsEngineClient, getSkillsEngineClient, clearSkillsEngineClient } from './state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -174,6 +176,27 @@ async function startServer(): Promise<void> {
     });
   });
 
+  // Initialize Skills Engine client
+  try {
+    const skillsClient = new SkillsEngineClient({
+      apiUrl: config.services.graphragUrl,
+      apiKey: process.env.NEXUS_API_KEY || '',
+      skillsDirectory: path.join(__dirname, '../../../skills'),
+      autoRegister: true,
+      syncInterval: 300000, // 5 minutes
+    });
+
+    await skillsClient.initialize();
+    setSkillsEngineClient(skillsClient);
+
+    log.info('Skills Engine client initialized', {
+      registeredSkills: skillsClient.getRegisteredSkills().length,
+    });
+  } catch (error) {
+    log.warn('Failed to initialize Skills Engine client', { error });
+    // Non-fatal - continue starting server
+  }
+
   // Start server
   httpServer.listen(config.port, () => {
     log.info(`EE Design Partner started`, {
@@ -193,6 +216,14 @@ async function startServer(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     log.info(`Received ${signal}, shutting down gracefully...`);
+
+    // Shutdown Skills Engine client
+    const skillsClient = getSkillsEngineClient();
+    if (skillsClient) {
+      await skillsClient.shutdown();
+      clearSkillsEngineClient();
+      log.info('Skills Engine client shutdown');
+    }
 
     io.close();
 

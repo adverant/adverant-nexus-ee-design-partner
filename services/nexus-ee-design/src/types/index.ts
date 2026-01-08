@@ -654,7 +654,7 @@ export interface LLMIssue {
   recommendation: string;
 }
 
-export interface ConsensusResult {
+export interface LegacyConsensusResult {
   finalScore: number;
   passed: boolean;
   agreementLevel: number; // 0-1, how much validators agreed
@@ -754,4 +754,138 @@ export interface SkillExecution {
   startedAt: string;
   completedAt?: string;
   duration?: number;
+}
+
+// ============================================================================
+// Extended PCB Layout Types (for Ralph Loop & Validation)
+// ============================================================================
+
+export interface BoardConstraints {
+  maxWidth: number;
+  maxHeight: number;
+  layerCount: number;
+  minTraceWidth?: number;
+  minClearance?: number;
+  minViaDiameter?: number;
+  minViaDrill?: number;
+  copperWeight?: number;
+  gridSize?: number;
+  minComponentSpacing?: number;
+  maxVoltage?: number;
+  impedanceControl?: boolean;
+  targetImpedance?: number;
+}
+
+export interface ComponentPlacement {
+  id: string;
+  componentId: string;
+  reference: string;
+  position: { x: number; y: number };
+  rotation: number;
+  layer: 'top' | 'bottom';
+  footprint?: {
+    name: string;
+    width: number;
+    height: number;
+  };
+  pads?: Pad[];
+}
+
+export interface Pad {
+  id: string;
+  name: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+  shape: 'circular' | 'rectangular' | 'oval';
+  drillSize?: number;
+}
+
+export interface ValidationResult {
+  passed: boolean;
+  score: number;
+  violations: ValidationViolation[];
+  summary: string;
+  details?: {
+    drc?: DomainValidationResult;
+    erc?: DomainValidationResult;
+    ipc2221?: DomainValidationResult;
+    signalIntegrity?: DomainValidationResult;
+    thermal?: DomainValidationResult;
+    dfm?: DomainValidationResult;
+    bestPractices?: DomainValidationResult;
+    testing?: DomainValidationResult;
+    [key: string]: DomainValidationResult | undefined;
+  };
+  timestamp: Date;
+  durationMs?: number;
+}
+
+export interface DomainValidationResult {
+  domain: string;
+  score: number;
+  maxScore: number;
+  violations: ValidationViolation[];
+  metrics: Record<string, number | string | boolean>;
+  passRate: number;
+}
+
+export interface ValidationViolation {
+  id: string;
+  domain: string;
+  severity: 'error' | 'warning' | 'info';
+  code: string;
+  message: string;
+  location?: {
+    x?: number;
+    y?: number;
+    layer?: string;
+    componentRef?: string;
+    netName?: string;
+  };
+  suggestion?: string;
+}
+
+// ============================================================================
+// Multi-LLM Validation Types (Enhanced)
+// ============================================================================
+
+export interface MultiLLMValidation {
+  id: string;
+  requestType: string;
+  validators: LLMValidatorResult[];
+  consensus: {
+    score: number;
+    confidence: number;
+    passed: boolean;
+    agreement: number;
+    conflicts: string[];
+  };
+  summary: string;
+  timestamp: Date;
+  durationMs: number;
+}
+
+export interface LLMValidatorResult {
+  name: string;
+  type: 'llm' | 'domain-expert';
+  score: number;
+  confidence: number;
+  issues: Array<{
+    severity: 'error' | 'warning' | 'info';
+    category: string;
+    description: string;
+    location?: string;
+    suggestion?: string;
+  }>;
+  recommendations: string[];
+  latencyMs: number;
+}
+
+export interface ConsensusResult {
+  score: number;
+  confidence: number;
+  agreement: number;
+  conflicts: string[];
+  validatorCount: number;
+  passed: boolean;
 }

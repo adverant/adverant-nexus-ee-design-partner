@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { ValidationError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
+import { getSkillsEngineClient } from '../state.js';
+import { createSkillsRoutes } from './skills-routes.js';
 
 // File upload configuration
 const upload = multer({
@@ -828,43 +830,44 @@ export function createApiRoutes(io: SocketIOServer): Router {
   });
 
   // ============================================================================
-  // Skills
+  // Skills Routes (mounted from skills-routes.ts)
   // ============================================================================
 
-  router.get('/skills', async (_req: Request, res: Response, next: NextFunction) => {
-    try {
-      // TODO: Return available skills
-      res.json({
-        success: true,
-        data: [],
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
+  // Mount skills routes if client is available
+  const skillsClient = getSkillsEngineClient();
+  if (skillsClient) {
+    router.use('/skills', createSkillsRoutes(skillsClient));
+    log.info('Skills routes mounted');
+  } else {
+    // Fallback skills routes when client not initialized
+    router.get('/skills', async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        res.json({
+          success: true,
+          data: [],
+          metadata: {
+            message: 'Skills Engine not initialized',
+          },
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
 
-  router.post('/skills/execute', validate(z.object({
-    skillName: z.string(),
-    input: z.record(z.unknown()),
-  })), async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const executionId = crypto.randomUUID();
-      log.info('Executing skill', {
-        executionId,
-        skillName: req.body.skillName,
-      });
-      // TODO: Execute skill
-      res.status(202).json({
-        success: true,
-        data: {
-          executionId,
-          status: 'pending',
-        },
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
+    router.post('/skills/execute', async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        res.status(503).json({
+          success: false,
+          error: {
+            code: 'SKILLS_ENGINE_UNAVAILABLE',
+            message: 'Skills Engine is not initialized',
+          },
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+  }
 
   return router;
 }

@@ -1,0 +1,158 @@
+{
+  "$schema": "https://api.adverant.ai/schemas/nexus-plugin-v1.json",
+  "id": "schematic-gen",
+  "name": "SKiDL Schematic Generator",
+  "displayName": "SKiDL-Based Schematic Generator",
+  "version": "1.0.0",
+  "description": "Production-ready schematic generation using SKiDL circuit description language with 4-level validation pipeline and expert agent review",
+  "author": {
+    "name": "Adverant Inc.",
+    "email": "engineering@adverant.ai",
+    "url": "https://adverant.ai"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adverant/adverant-nexus-ee-design-partner"
+  },
+  "keywords": [
+    "skidl",
+    "kicad",
+    "schematic",
+    "circuit-design",
+    "netlist",
+    "erc",
+    "validation",
+    "power-electronics",
+    "signal-integrity"
+  ],
+  "categories": [
+    "engineering",
+    "hardware",
+    "electronics",
+    "schematic-capture"
+  ],
+  "visibility": "organization",
+  "status": "beta",
+  "entrypoint": {
+    "typescript": "src/index.ts",
+    "python": "python-scripts/generate_all.py"
+  },
+  "runtime": {
+    "node": ">=20.0.0",
+    "python": ">=3.11"
+  },
+  "dependencies": {
+    "typescript": [
+      "uuid",
+      "events",
+      "zod"
+    ],
+    "python": [
+      "skidl>=2.0.0",
+      "kicad-sch-api>=0.5.0",
+      "sexpdata>=1.0.0",
+      "numpy>=1.24.0"
+    ]
+  },
+  "capabilities": [
+    "schematic-generate",
+    "schematic-validate",
+    "netlist-export",
+    "erc-check",
+    "expert-review"
+  ],
+  "triggers": [
+    "/schematic-gen",
+    "/skidl-gen",
+    "/skidl"
+  ],
+  "expertAgents": [
+    {
+      "id": "power-electronics-expert",
+      "name": "Dr. Elena Vasquez",
+      "role": "Power Electronics Specialist",
+      "expertise": [
+        "High-frequency switching converters",
+        "Gate driver design",
+        "SiC MOSFET applications",
+        "Bootstrap supply dimensioning",
+        "Dead-time calculation"
+      ]
+    },
+    {
+      "id": "signal-integrity-expert",
+      "name": "Dr. James Chen",
+      "role": "Signal Integrity Specialist",
+      "expertise": [
+        "High-speed PCB design",
+        "EMC",
+        "Current sensing",
+        "ADC interfaces",
+        "Kelvin connections"
+      ]
+    },
+    {
+      "id": "validation-expert",
+      "name": "Dr. Sarah Kim",
+      "role": "Validation & Verification Specialist",
+      "expertise": [
+        "ERC automation",
+        "Design rule checking",
+        "Formal circuit verification",
+        "Wire/component ratio analysis"
+      ]
+    }
+  ],
+  "validationPipeline": {
+    "levels": [
+      {
+        "level": 1,
+        "name": "SKiDL ERC",
+        "description": "Built-in SKiDL electrical rule checking",
+        "blocking": true
+      },
+      {
+        "level": 2,
+        "name": "kicad-sch-api Validation",
+        "description": "Schematic structure and connectivity validation",
+        "blocking": true,
+        "metrics": {
+          "wireComponentRatio": {
+            "minimum": 1.2,
+            "target": 1.5
+          }
+        }
+      },
+      {
+        "level": 3,
+        "name": "KiCad CLI ERC",
+        "description": "Native KiCad electrical rule check",
+        "blocking": true
+      },
+      {
+        "level": 4,
+        "name": "SPICE Verification",
+        "description": "Circuit simulation for functional verification",
+        "blocking": false
+      }
+    ]
+  },
+  "mcp": {
+    "enabled": true,
+    "tools": [
+      {
+        "name": "generate_schematic_skidl",
+        "description": "Generate schematic using SKiDL circuit description"
+      },
+      {
+        "name": "validate_schematic_multilevel",
+        "description": "Run 4-level validation pipeline"
+      },
+      {
+        "name": "run_expert_review",
+        "description": "Execute expert agent validation"
+      }
+    ]
+  }
+}

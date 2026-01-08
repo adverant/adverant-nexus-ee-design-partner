@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-inter: "Inter", system-ui, sans-serif;
+  --font-jetbrains-mono: "JetBrains Mono", monospace;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Terminal styling */
+.xterm {
+  padding: 8px;
+}
+
+.xterm-viewport {
+  background-color: #0f172a !important;
+}
+
+/* Panel resizer */
+.panel-resizer {
+  @apply bg-slate-700 hover:bg-primary-500 transition-colors;
+}
+
+/* Custom focus styles */
+*:focus-visible {
+  @apply outline-none ring-2 ring-primary-500 ring-offset-2 ring-offset-background-primary;
+}
+
+/* Animation utilities */
+@layer utilities {
+  .animate-in {
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  .glass-panel {
+    @apply bg-surface-primary/80 backdrop-blur-lg border border-slate-700/50;
+  }
+
+  .glow-border {
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.5),
+      0 0 20px rgba(59, 130, 246, 0.2);
+  }
+}
+
+/* Phase indicator colors */
+.phase-ideation {
+  @apply text-purple-400 border-purple-400;
+}
+.phase-architecture {
+  @apply text-blue-400 border-blue-400;
+}
+.phase-schematic {
+  @apply text-cyan-400 border-cyan-400;
+}
+.phase-simulation {
+  @apply text-teal-400 border-teal-400;
+}
+.phase-pcb-layout {
+  @apply text-green-400 border-green-400;
+}
+.phase-manufacturing {
+  @apply text-lime-400 border-lime-400;
+}
+.phase-firmware {
+  @apply text-yellow-400 border-yellow-400;
+}
+.phase-testing {
+  @apply text-orange-400 border-orange-400;
+}
+.phase-production {
+  @apply text-red-400 border-red-400;
+}
+.phase-field-support {
+  @apply text-pink-400 border-pink-400;
+}
+
+/* Validation status colors */
+.validation-passed {
+  @apply text-green-400 bg-green-400/10 border-green-400/30;
+}
+.validation-warning {
+  @apply text-yellow-400 bg-yellow-400/10 border-yellow-400/30;
+}
+.validation-failed {
+  @apply text-red-400 bg-red-400/10 border-red-400/30;
+}
+.validation-pending {
+  @apply text-slate-400 bg-slate-400/10 border-slate-400/30;
+}
