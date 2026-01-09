@@ -10,7 +10,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
+import { log as logger } from '../../utils/logger.js';
 import { Skill, SkillCapability, SkillParameter, SkillExecution } from '../../types';
 
 // ============================================================================
@@ -439,9 +439,10 @@ export class SkillsEngineClient extends EventEmitter {
         plugin: 'ee-design-partner'
       });
 
-      if (response.success) {
+      if (response.success && response.data) {
         // Update local cache
-        for (const skill of response.data.skills as Skill[]) {
+        const skills = (response.data as { skills?: Skill[] }).skills || [];
+        for (const skill of skills) {
           this.registeredSkills.set(skill.name, skill);
         }
 

@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""
+KiCad API Server - FastAPI endpoint for MAPOS pcbnew operations.
+
+This server provides REST API endpoints for:
+- Zone filling
+- Net assignment
+- DRC validation
+- Trace width adjustment
+- Full MAPOS optimization
+
+Designed to run in K8s with Xvfb sidecar for headless KiCad operations.
+
+Part of MAPOS (Multi-Agent PCB Optimization System) for the Nexus EE Design Partner plugin.
+"""
+
+import os
+import sys
+import json
+import shutil
+import subprocess
+import tempfile
+import asyncio
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+from enum import Enum
+
+# FastAPI imports
+try:
+    from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+    from fastapi.responses import JSONResponse, FileResponse
+    from pydantic import BaseModel, Field
+    import uvicorn
+except ImportError:
+    print("ERROR: FastAPI not installed. Run: pip install fastapi uvicorn python-multipart")
+    sys.exit(1)
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+DATA_DIR = Path(os.environ.get('MAPOS_DATA_DIR', '/data'))
+OUTPUT_DIR = Path(os.environ.get('MAPOS_OUTPUT_DIR', '/output'))
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+
+# Ensure directories exist
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ============================================================================
+# API Models
+# ============================================================================
+
+class OperationType(str, Enum):
+    ZONE_FILL = "zone_fill"
+    FIX_ZONE_NETS = "fix_zone_nets"
+    FIX_CLEARANCES = "fix_clearances"
+    REMOVE_DANGLING_VIAS = "remove_dangling_vias"
+    ASSIGN_ORPHAN_NETS = "assign_orphan_nets"
+    ADJUST_TRACE_WIDTH = "adjust_trace_width"
+    ADJUST_POWER_TRACES = "adjust_power_traces"
+    RUN_DRC = "run_drc"
+    FULL_OPTIMIZE = "full_optimize"
+    LLM_OPTIMIZE = "llm_optimize"
+    # New DRC fixers
+    FIX_SOLDER_MASK = "fix_solder_mask"
+    FIX_SILKSCREEN = "fix_silkscreen"
+    FIX_DFM = "fix_dfm"
+
+
+class OperationRequest(BaseModel):
+    """Request to run a pcbnew operation."""
+    pcb_filename: str = Field(..., description="PCB filename in /data directory")
+    operation: OperationType = Field(..., description="Operation to perform")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Operation parameters")
+    api_key: Optional[str] = Field(default=None, description="User's OpenRouter API key for LLM operations (multi-tenant)")
+
+
+class OperationResponse(BaseModel):
+    """Response from a pcbnew operation."""
+    success: bool
+    operation: str
+    result: Dict[str, Any]
+    duration_seconds: float
+    timestamp: str
+
+
+class DRCResult(BaseModel):
+    """DRC result summary."""
+    total_violations: int
+    errors: int
+    warnings: int
+    unconnected: int
+    violations_by_type: Dict[str, int]
+
+
+class OptimizationRequest(BaseModel):
+    """Request for full MAPOS optimization."""
+    pcb_filename: str = Field(..., description="PCB filename in /data directory")
+    target_violations: int = Field(default=100, description="Target violation count")
+    max_iterations: int = Field(default=5, description="Maximum optimization iterations")
+    use_llm: bool = Field(default=False, description="Use LLM-guided optimization")
+    api_key: Optional[str] = Field(default=None, description="User's OpenRouter API key for multi-tenant LLM access")
+
+
+class JobStatus(BaseModel):
+    """Background job status."""
+    job_id: str
+    status: str  # pending, running, completed, failed
+    progress: int
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+# ============================================================================
+# Application
+# ============================================================================
+
+app = FastAPI(
+    title="MAPOS KiCad API",
+    description="PCB optimization API for Nexus EE Design Partner plugin",
+    version="1.0.0"
+)
+
+# Background jobs storage
+jobs: Dict[str, JobStatus] = {}
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def run_python_script(script_name: str, args: List[str], timeout: int = 300, env: Dict[str, str] = None) -> Dict[str, Any]:
+    """Run a Python script and return the result.
+
+    Args:
+        script_name: Name of the Python script to run
+        args: Command line arguments for the script
+        timeout: Execution timeout in seconds
+        env: Custom environment variables (for multi-tenant API keys)
+    """
+    script_path = Path(__file__).parent / script_name
+
+    if not script_path.exists():
+        # Try /app directory (K8s deployment)
+        script_path = Path('/app') / script_name
+
+    if not script_path.exists():
+        return {'success': False, 'error': f'Script not found: {script_name}'}
+
+    # Use custom env if provided, otherwise default
+    run_env = env if env else {**os.environ, 'PYTHONUNBUFFERED': '1'}
+    if env and 'PYTHONUNBUFFERED' not in run_env:
+        run_env['PYTHONUNBUFFERED'] = '1'
+
+    try:
+        result = subprocess.run(
+            ['python3', str(script_path)] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=run_env
+        )
+
+        # Try to parse JSON output
+        output = result.stdout.strip()
+        try:
+            # Find JSON in output
+            if output.startswith('{'):
+                return json.loads(output)
+            else:
+                json_start = output.rfind('\n{')
+                if json_start >= 0:
+                    return json.loads(output[json_start + 1:])
+        except json.JSONDecodeError:
+            pass
+
+        return {
+            'success': result.returncode == 0,
+            'output': output,
+            'error': result.stderr if result.returncode != 0 else None
+        }
+
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'error': 'Operation timed out'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def run_kicad_cli(command: List[str], timeout: int = 120) -> Dict[str, Any]:
+    """Run kicad-cli command."""
+    try:
+        result = subprocess.run(
+            ['kicad-cli'] + command,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return {
+            'success': result.returncode == 0,
+            'output': result.stdout,
+            'error': result.stderr if result.returncode != 0 else None
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+# ============================================================================
+# API Endpoints
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/v1/operations")
+async def list_operations():
+    """List available pcbnew operations."""
+    return {
+        "operations": [
+            {
+                "name": op.value,
+                "description": {
+                    "zone_fill": "Fill all copper zones using ZONE_FILLER API",
+                    "fix_zone_nets": "Correct zone net assignments",
+                    "fix_clearances": "Update design settings clearances",
+                    "remove_dangling_vias": "Remove vias not connected to tracks",
+                    "assign_orphan_nets": "Assign nets to unconnected pads",
+                    "adjust_trace_width": "Modify trace widths for a specific net",
+                    "adjust_power_traces": "Widen all power traces",
+                    "run_drc": "Run DRC and return violations",
+                    "full_optimize": "Run full MAPOS optimization",
+                    "llm_optimize": "Run LLM-guided optimization",
+                    "fix_solder_mask": "Fix solder mask bridge violations (via tenting + bridge allowance)",
+                    "fix_silkscreen": "Fix silk over copper violations (move graphics to Fab layer)",
+                    "fix_dfm": "Run full DFM fix pipeline (mask + silk + footprint fixes)"
+                }.get(op.value, "")
+            }
+            for op in OperationType
+        ]
+    }
+
+
+@app.post("/v1/operation", response_model=OperationResponse)
+async def run_operation(request: OperationRequest):
+    """Run a single pcbnew operation."""
+    start_time = datetime.utcnow()
+
+    pcb_path = DATA_DIR / request.pcb_filename
+    if not pcb_path.exists():
+        raise HTTPException(status_code=404, detail=f"PCB file not found: {request.pcb_filename}")
+
+    result = {}
+
+    try:
+        if request.operation == OperationType.ZONE_FILL:
+            result = run_python_script('kicad_zone_filler.py', [str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.FIX_ZONE_NETS:
+            result = run_python_script('kicad_pcb_fixer.py', ['zone-nets', str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.FIX_CLEARANCES:
+            result = run_python_script('kicad_pcb_fixer.py', ['design-settings', str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.REMOVE_DANGLING_VIAS:
+            result = run_python_script('kicad_pcb_fixer.py', ['dangling-vias', str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.ASSIGN_ORPHAN_NETS:
+            result = run_python_script('kicad_net_assigner.py', [str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.ADJUST_TRACE_WIDTH:
+            net_name = request.params.get('net_name', 'GND')
+            width_mm = request.params.get('width_mm', 2.0)
+            result = run_python_script('kicad_trace_adjuster.py',
+                                       ['net', str(pcb_path), net_name, str(width_mm), '--json'])
+
+        elif request.operation == OperationType.ADJUST_POWER_TRACES:
+            width_mm = request.params.get('width_mm', 2.0)
+            result = run_python_script('kicad_trace_adjuster.py',
+                                       ['power', str(pcb_path), '--width', str(width_mm), '--json'])
+
+        elif request.operation == OperationType.RUN_DRC:
+            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+                drc_output = f.name
+
+            cli_result = run_kicad_cli(['pcb', 'drc', '--format', 'json', '--output', drc_output, str(pcb_path)])
+
+            if Path(drc_output).exists():
+                with open(drc_output) as f:
+                    drc_data = json.load(f)
+                Path(drc_output).unlink()
+
+                violations = drc_data.get('violations', [])
+                unconnected = drc_data.get('unconnected_items', [])
+
+                by_type = {}
+                errors = warnings = 0
+                for v in violations:
+                    vtype = v.get('type', 'unknown')
+                    by_type[vtype] = by_type.get(vtype, 0) + 1
+                    if v.get('severity') == 'error':
+                        errors += 1
+                    else:
+                        warnings += 1
+
+                result = {
+                    'success': True,
+                    'total_violations': len(violations) + len(unconnected),
+                    'errors': errors,
+                    'warnings': warnings,
+                    'unconnected': len(unconnected),
+                    'violations_by_type': by_type
+                }
+            else:
+                result = {'success': False, 'error': cli_result.get('error', 'DRC failed')}
+
+        elif request.operation == OperationType.FULL_OPTIMIZE:
+            target = request.params.get('target_violations', 100)
+            iterations = request.params.get('max_iterations', 5)
+            result = run_python_script('mapos_pcb_optimizer.py',
+                                       [str(pcb_path), '--target', str(target), '--iterations', str(iterations)])
+
+        elif request.operation == OperationType.LLM_OPTIMIZE:
+            # Multi-tenant: Use user's API key if provided, otherwise fall back to server key
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            if not user_api_key:
+                result = {'success': False, 'error': 'No API key provided. Set OPENROUTER_API_KEY or pass api_key in request.'}
+            else:
+                iterations = request.params.get('max_iterations', 3)
+                # Pass API key via environment for subprocess
+                env = {**os.environ, 'OPENROUTER_API_KEY': user_api_key}
+                result = run_python_script('llm_pcb_fixer.py',
+                                           [str(pcb_path), '--max-iterations', str(iterations)],
+                                           env=env)
+
+        elif request.operation == OperationType.FIX_SOLDER_MASK:
+            # Fix solder mask bridge violations via tenting and bridge allowance
+            pitch_threshold = request.params.get('pitch_threshold', 0.5)
+            mask_expansion = request.params.get('mask_expansion', 0.0508)
+            result = run_python_script('kicad_mask_fixer.py',
+                                       [str(pcb_path), '--no-backup',
+                                        '--pitch-threshold', str(pitch_threshold),
+                                        '--mask-expansion', str(mask_expansion),
+                                        '--json'])
+
+        elif request.operation == OperationType.FIX_SILKSCREEN:
+            # Fix silk over copper by moving graphics to Fab layer
+            offset = request.params.get('offset', 1.5)
+            result = run_python_script('kicad_silk_fixer.py',
+                                       [str(pcb_path), '--no-backup',
+                                        '--offset', str(offset),
+                                        '--json'])
+
+        elif request.operation == OperationType.FIX_DFM:
+            # Run full DFM fix pipeline (mask + silk + footprint fixes)
+            mask_margin = request.params.get('mask_margin', -0.03)
+            silk_offset = request.params.get('silk_offset', 1.5)
+            result = run_python_script('footprint_dfm_fixer.py',
+                                       [str(pcb_path),
+                                        '--mask-margin', str(mask_margin),
+                                        '--silk-offset', str(silk_offset)])
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown operation: {request.operation}")
+
+    except Exception as e:
+        result = {'success': False, 'error': str(e)}
+
+    duration = (datetime.utcnow() - start_time).total_seconds()
+
+    return OperationResponse(
+        success=result.get('success', False),
+        operation=request.operation.value,
+        result=result,
+        duration_seconds=duration,
+        timestamp=start_time.isoformat()
+    )
+
+
+@app.post("/v1/optimize")
+async def optimize_pcb(request: OptimizationRequest, background_tasks: BackgroundTasks):
+    """Start a full MAPOS optimization job."""
+    import uuid
+
+    job_id = str(uuid.uuid4())[:8]
+
+    jobs[job_id] = JobStatus(
+        job_id=job_id,
+        status="pending",
+        progress=0
+    )
+
+    async def run_optimization():
+        jobs[job_id].status = "running"
+
+        try:
+            pcb_path = DATA_DIR / request.pcb_filename
+            if not pcb_path.exists():
+                jobs[job_id].status = "failed"
+                jobs[job_id].error = f"PCB file not found: {request.pcb_filename}"
+                return
+
+            # Multi-tenant: Use user's API key if provided, otherwise fall back to server key
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            if request.use_llm and user_api_key:
+                env = {**os.environ, 'OPENROUTER_API_KEY': user_api_key}
+                result = run_python_script('llm_pcb_fixer.py', [
+                    str(pcb_path),
+                    '--max-iterations', str(request.max_iterations)
+                ], timeout=600, env=env)
+            elif request.use_llm and not user_api_key:
+                jobs[job_id].status = "failed"
+                jobs[job_id].error = "No API key provided for LLM optimization. Pass api_key in request or set OPENROUTER_API_KEY."
+                return
+            else:
+                result = run_python_script('mapos_pcb_optimizer.py', [
+                    str(pcb_path),
+                    '--target', str(request.target_violations),
+                    '--iterations', str(request.max_iterations)
+                ], timeout=600)
+
+            jobs[job_id].status = "completed" if result.get('success') else "failed"
+            jobs[job_id].result = result
+            jobs[job_id].progress = 100
+
+        except Exception as e:
+            jobs[job_id].status = "failed"
+            jobs[job_id].error = str(e)
+
+    background_tasks.add_task(run_optimization)
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/v1/job/{job_id}", response_model=JobStatus)
+async def get_job_status(job_id: str):
+    """Get status of a background optimization job."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return jobs[job_id]
+
+
+@app.post("/v1/upload")
+async def upload_pcb(file: UploadFile = File(...)):
+    """Upload a PCB file for processing."""
+    if not file.filename.endswith('.kicad_pcb'):
+        raise HTTPException(status_code=400, detail="File must be a .kicad_pcb file")
+
+    dest_path = DATA_DIR / file.filename
+
+    with open(dest_path, 'wb') as f:
+        content = await file.read()
+        f.write(content)
+
+    return {
+        "success": True,
+        "filename": file.filename,
+        "path": str(dest_path),
+        "size_bytes": dest_path.stat().st_size
+    }
+
+
+@app.get("/v1/download/{filename}")
+async def download_pcb(filename: str):
+    """Download a processed PCB file."""
+    file_path = DATA_DIR / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/octet-stream"
+    )
+
+
+@app.get("/v1/files")
+async def list_files():
+    """List PCB files in the data directory."""
+    files = []
+    for f in DATA_DIR.glob('*.kicad_pcb'):
+        files.append({
+            "filename": f.name,
+            "size_bytes": f.stat().st_size,
+            "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        })
+    return {"files": files}
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    """Run the API server."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='MAPOS KiCad API Server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=8080, help='Port to bind to')
+    parser.add_argument('--reload', action='store_true', help='Enable auto-reload')
+
+    args = parser.parse_args()
+
+    print(f"Starting MAPOS KiCad API Server on {args.host}:{args.port}")
+    print(f"Data directory: {DATA_DIR}")
+    print(f"Output directory: {OUTPUT_DIR}")
+    print(f"OpenRouter API: {'configured' if OPENROUTER_API_KEY else 'not configured'}")
+
+    uvicorn.run(
+        "kicad_api_server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload
+    )
+
+
+if __name__ == '__main__':
+    main()

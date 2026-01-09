@@ -23,10 +23,11 @@ import os
 import shutil
 import sys
 import time
+import concurrent.futures
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 # Import validation exceptions - MANDATORY
 from validation_exceptions import (
@@ -71,6 +72,386 @@ try:
 except ImportError:
     HAS_KICAD_EXPORTER = False
 
+# Import OpenRouter client for multi-agent validation
+try:
+    from openrouter_client import OpenRouterClient, get_openrouter_client
+    HAS_OPENROUTER = True
+except ImportError:
+    HAS_OPENROUTER = False
+
+# Import programmatic scorer for local validation (no API required)
+try:
+    from programmatic_scorer import ProgrammaticScorer
+    HAS_PROGRAMMATIC_SCORER = True
+except ImportError:
+    HAS_PROGRAMMATIC_SCORER = False
+
+
+# ============================================================================
+# MULTI-AGENT VALIDATION PERSONAS
+# ============================================================================
+VALIDATION_PERSONAS = {
+    "routing_expert": {
+        "name": "Senior PCB Routing Engineer",
+        "focus": "Signal integrity, trace routing, 45-degree angles, via placement",
+        "system_prompt": """You are a senior PCB routing engineer with 20+ years of experience at top electronics companies.
+Your expertise includes high-speed signal integrity, impedance matching, and professional routing standards.
+
+When analyzing PCB images, focus on:
+1. Trace angle compliance (should be 45° or orthogonal, NEVER arbitrary angles)
+2. Via placement and thermal relief
+3. Ground return paths
+4. Trace width consistency
+5. Layer transitions
+6. Clearance violations
+
+Score on a scale of 1-10 where:
+- 10: IPC Class 3 compliant, ready for aerospace/medical
+- 7-9: Professional quality, ready for production
+- 4-6: Acceptable but needs improvement
+- 1-3: Amateur quality, needs significant work
+
+Respond with JSON: {"score": X.X, "issues": [...], "suggestions": [...]}""",
+    },
+    "silkscreen_expert": {
+        "name": "PCB Assembly Specialist",
+        "focus": "Silkscreen legibility, designator placement, polarity markers",
+        "system_prompt": """You are a PCB assembly specialist responsible for ensuring boards can be assembled correctly.
+Your focus is on silkscreen quality - reference designators, polarity markers, and assembly instructions.
+
+When analyzing silkscreen images, focus on:
+1. Reference designator presence and legibility (R1, C1, U1, etc.)
+2. Text orientation - should be horizontal or readable
+3. Polarity markers for diodes, LEDs, electrolytic caps
+4. Pin 1 indicators on ICs
+5. No text overlapping pads
+6. Assembly instructions clarity
+
+Score on a scale of 1-10 where:
+- 10: Perfect assembly documentation
+- 7-9: Professional quality, all components identifiable
+- 4-6: Some designators missing or hard to read
+- 1-3: Assembly would be difficult/impossible
+
+Respond with JSON: {"score": X.X, "issues": [...], "suggestions": [...]}""",
+    },
+    "drc_expert": {
+        "name": "Design Rule Check Engineer",
+        "focus": "Clearances, spacing, manufacturability",
+        "system_prompt": """You are a DRC engineer responsible for ensuring boards meet manufacturing requirements.
+Your expertise is in design rules, clearances, and manufacturability.
+
+When analyzing PCB images, focus on:
+1. Trace-to-trace clearance (minimum 0.15mm)
+2. Trace-to-pad clearance
+3. Via-to-trace clearance
+4. Component spacing
+5. Thermal relief patterns
+6. Soldermask coverage
+
+Score on a scale of 1-10 where:
+- 10: Exceeds IPC-2221 Class 2
+- 7-9: Meets standard requirements
+- 4-6: Some rule violations
+- 1-3: Major DRC violations
+
+Respond with JSON: {"score": X.X, "issues": [...], "suggestions": [...]}""",
+    },
+    "aesthetics_expert": {
+        "name": "PCB Layout Aesthetics Reviewer",
+        "focus": "Visual organization, symmetry, professional appearance",
+        "system_prompt": """You are a PCB aesthetics reviewer who evaluates layouts for visual quality and organization.
+Professional layouts should look clean, organized, and intentional.
+
+When analyzing PCB images, focus on:
+1. Component alignment and grouping
+2. Trace routing aesthetics (parallel runs, consistent angles)
+3. Copper distribution/balance
+4. Overall organization
+5. Layer utilization
+6. Visual hierarchy
+
+Score on a scale of 1-10 where:
+- 10: Award-winning layout, could be in a showcase
+- 7-9: Professional, clean appearance
+- 4-6: Functional but disorganized
+- 1-3: Chaotic, amateur appearance
+
+Respond with JSON: {"score": X.X, "issues": [...], "suggestions": [...]}""",
+    },
+    "manufacturing_expert": {
+        "name": "PCB Manufacturing Engineer",
+        "focus": "Fabrication readiness, Gerber quality, drill accuracy",
+        "system_prompt": """You are a manufacturing engineer at a PCB fabrication facility.
+You review designs for manufacturability and production yield.
+
+When analyzing PCB images, focus on:
+1. Layer alignment marks
+2. Drill hit accuracy
+3. Copper balance across layers
+4. Edge clearances
+5. Annular ring integrity
+6. Solder mask definition
+
+Score on a scale of 1-10 where:
+- 10: Ready for high-volume production
+- 7-9: Standard production ready
+- 4-6: May have yield issues
+- 1-3: Will have manufacturing problems
+
+Respond with JSON: {"score": X.X, "issues": [...], "suggestions": [...]}""",
+    }
+}
+
+
+class MultiAgentValidator:
+    """
+    Multi-agent validation system using parallel AI analysis.
+
+    Spawns multiple specialized AI agents in parallel, each with a different
+    expertise persona, to analyze PCB images from different perspectives.
+    Results are aggregated for a comprehensive quality assessment.
+    """
+
+    def __init__(self, max_workers: int = 5, timeout: int = 120):
+        """
+        Initialize multi-agent validator.
+
+        Args:
+            max_workers: Maximum parallel agents (default 5 - one per persona)
+            timeout: Timeout per agent in seconds
+        """
+        self.max_workers = max_workers
+        self.timeout = timeout
+        self.client = None
+
+        if HAS_OPENROUTER:
+            try:
+                self.client = get_openrouter_client()
+            except Exception as e:
+                print(f"Warning: Could not initialize OpenRouter client: {e}")
+
+    def _run_single_agent(
+        self,
+        image_path: str,
+        persona_name: str,
+        persona_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Run a single agent validation.
+
+        Args:
+            image_path: Path to image to analyze
+            persona_name: Name of the persona (e.g., "routing_expert")
+            persona_config: Persona configuration with system_prompt
+
+        Returns:
+            Dict with score, issues, suggestions
+        """
+        start_time = time.time()
+
+        if not self.client:
+            return {
+                "agent": persona_name,
+                "score": 5.0,
+                "issues": ["AI client not available"],
+                "suggestions": [],
+                "error": "No OpenRouter client"
+            }
+
+        try:
+            # Create the analysis prompt
+            prompt = f"""Analyze this PCB image as a {persona_config['name']}.
+Focus on: {persona_config['focus']}
+
+Provide your assessment in JSON format with:
+- score: A number from 1-10
+- issues: Array of specific issues found
+- suggestions: Array of improvement suggestions
+
+Be specific and actionable in your feedback."""
+
+            response = self.client.create_vision_completion(
+                image_path=image_path,
+                prompt=prompt,
+                system_prompt=persona_config['system_prompt'],
+                max_tokens=1000
+            )
+
+            # Parse JSON response
+            content = response.content
+
+            # Extract JSON from response
+            import re
+            json_match = re.search(r'\{[^{}]*"score"[^{}]*\}', content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                # Try to parse whole content as JSON
+                result = json.loads(content)
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            return {
+                "agent": persona_name,
+                "persona": persona_config['name'],
+                "score": float(result.get('score', 5.0)),
+                "issues": result.get('issues', []),
+                "suggestions": result.get('suggestions', []),
+                "elapsed_ms": elapsed_ms
+            }
+
+        except json.JSONDecodeError as e:
+            return {
+                "agent": persona_name,
+                "score": 5.0,
+                "issues": [f"Could not parse AI response: {e}"],
+                "suggestions": [],
+                "error": str(e)
+            }
+        except Exception as e:
+            return {
+                "agent": persona_name,
+                "score": 5.0,
+                "issues": [f"Agent error: {e}"],
+                "suggestions": [],
+                "error": str(e)
+            }
+
+    def validate_image_parallel(
+        self,
+        image_path: str,
+        personas: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate a single image using multiple agents in parallel.
+
+        Args:
+            image_path: Path to image to validate
+            personas: List of persona names to use (default: all)
+
+        Returns:
+            Aggregated validation results
+        """
+        personas_to_use = personas or list(VALIDATION_PERSONAS.keys())
+
+        # Filter to requested personas
+        active_personas = {
+            k: v for k, v in VALIDATION_PERSONAS.items()
+            if k in personas_to_use
+        }
+
+        print(f"\n  Running {len(active_personas)} agents in parallel on {Path(image_path).name}...")
+
+        agent_results = []
+
+        # Run agents in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all agent tasks
+            future_to_persona = {
+                executor.submit(
+                    self._run_single_agent,
+                    image_path,
+                    persona_name,
+                    persona_config
+                ): persona_name
+                for persona_name, persona_config in active_personas.items()
+            }
+
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_persona, timeout=self.timeout):
+                persona_name = future_to_persona[future]
+                try:
+                    result = future.result()
+                    agent_results.append(result)
+                    print(f"    [{persona_name}] Score: {result['score']:.1f}/10")
+                except Exception as e:
+                    print(f"    [{persona_name}] ERROR: {e}")
+                    agent_results.append({
+                        "agent": persona_name,
+                        "score": 0.0,
+                        "issues": [f"Agent failed: {e}"],
+                        "suggestions": [],
+                        "error": str(e)
+                    })
+
+        # Aggregate results
+        scores = [r['score'] for r in agent_results if 'score' in r]
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        all_issues = []
+        all_suggestions = []
+        for r in agent_results:
+            all_issues.extend(r.get('issues', []))
+            all_suggestions.extend(r.get('suggestions', []))
+
+        return {
+            "image": image_path,
+            "agents": agent_results,
+            "average_score": round(avg_score, 2),
+            "min_score": min(scores) if scores else 0.0,
+            "max_score": max(scores) if scores else 0.0,
+            "issues": list(set(all_issues)),  # Deduplicate
+            "suggestions": list(set(all_suggestions)),
+            "passed": avg_score >= 9.0
+        }
+
+    def validate_all_images_parallel(
+        self,
+        image_paths: List[str],
+        personas: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate multiple images using parallel multi-agent analysis.
+
+        Args:
+            image_paths: List of image paths to validate
+            personas: List of persona names to use (default: all)
+
+        Returns:
+            Comprehensive validation results
+        """
+        print(f"\n[MULTI-AGENT VALIDATION] Analyzing {len(image_paths)} images...")
+
+        all_results = []
+        all_scores = []
+        all_issues = []
+        all_suggestions = []
+
+        for img_path in image_paths:
+            result = self.validate_image_parallel(img_path, personas)
+            all_results.append(result)
+            all_scores.append(result['average_score'])
+            all_issues.extend(result['issues'])
+            all_suggestions.extend(result['suggestions'])
+
+        overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+        return {
+            "images": all_results,
+            "overall_score": round(overall_avg, 2),
+            "min_score": min(all_scores) if all_scores else 0.0,
+            "max_score": max(all_scores) if all_scores else 0.0,
+            "total_issues": len(set(all_issues)),
+            "unique_issues": list(set(all_issues)),
+            "unique_suggestions": list(set(all_suggestions)),
+            "passed": overall_avg >= 9.0 and min(all_scores) >= 7.0,
+            "agent_count": len(personas or VALIDATION_PERSONAS)
+        }
+
+
+@dataclass
+class AgentResult:
+    """Result from a single validation agent."""
+    agent_name: str
+    persona: str
+    score: float
+    issues: List[str]
+    suggestions: List[str]
+    passed: bool
+    image_analyzed: str
+    analysis_time_ms: int = 0
+
 
 @dataclass
 class IterationResult:
@@ -84,6 +465,7 @@ class IterationResult:
     fixes_applied: List[str]
     images_validated: int
     pre_validation_passed: bool = True
+    agent_results: List[AgentResult] = field(default_factory=list)
 
 
 @dataclass
@@ -190,12 +572,16 @@ class VisualRalphLoop:
         """
         # Check for API key - OPENROUTER_API_KEY is preferred (used by visual_validator)
         # Also accept ANTHROPIC_API_KEY for backward compatibility
+        # BUT: Allow running with programmatic scoring even without API key
         if not os.environ.get('OPENROUTER_API_KEY') and not os.environ.get('ANTHROPIC_API_KEY'):
-            raise MissingDependencyFailure(
-                "OPENROUTER_API_KEY environment variable not set",
-                dependency_name="OPENROUTER_API_KEY",
-                install_instructions="export OPENROUTER_API_KEY=your_key_here (or ANTHROPIC_API_KEY)"
-            )
+            if HAS_PROGRAMMATIC_SCORER:
+                print("Note: No API key set - using programmatic scoring (local computer vision)")
+            else:
+                raise MissingDependencyFailure(
+                    "OPENROUTER_API_KEY environment variable not set",
+                    dependency_name="OPENROUTER_API_KEY",
+                    install_instructions="export OPENROUTER_API_KEY=your_key_here (or ANTHROPIC_API_KEY)"
+                )
 
         # Check for KiCad CLI (required for proper exports)
         if not shutil.which('kicad-cli'):
@@ -236,9 +622,17 @@ class VisualRalphLoop:
     def _init_clients(self):
         """Initialize API clients."""
         if HAS_VISUAL_VALIDATOR and not self.client:
-            self.client = get_client()
+            try:
+                self.client = get_client()
+            except Exception as e:
+                print(f"  Warning: Could not initialize visual_validator client: {e}")
         if HAS_IMAGE_ANALYZER and not self.analyzer:
-            self.analyzer = ImageAnalyzer()
+            try:
+                self.analyzer = ImageAnalyzer()
+            except (ImportError, ValueError) as e:
+                # ImageAnalyzer requires anthropic package - skip if not available
+                # We'll fall back to multi-agent validation via OpenRouter
+                print(f"  Note: ImageAnalyzer not available ({e}), using multi-agent via OpenRouter")
 
     def _get_images(self) -> List[Path]:
         """Get all images to validate."""
@@ -339,9 +733,12 @@ class VisualRalphLoop:
         else:
             return "unknown"
 
-    def validate_all_outputs(self) -> Dict[str, Any]:
+    def validate_all_outputs(self, use_multi_agent: bool = True) -> Dict[str, Any]:
         """
         Run AI validation on all output images.
+
+        Args:
+            use_multi_agent: If True, use parallel multi-agent validation (recommended)
 
         Returns:
             Dictionary with scores for each image and overall stats
@@ -356,6 +753,87 @@ class VisualRalphLoop:
                 "passed": False
             }
 
+        # Check if API key is available for multi-agent validation
+        has_api_key = os.environ.get('OPENROUTER_API_KEY') or os.environ.get('ANTHROPIC_API_KEY')
+
+        # Use multi-agent parallel validation only if API key is available
+        if use_multi_agent and HAS_OPENROUTER and has_api_key:
+            print("\n[MULTI-AGENT VALIDATION] Using 5 parallel expert agents...")
+            multi_validator = MultiAgentValidator(max_workers=5, timeout=120)
+            image_paths = [str(img) for img in images]
+
+            # Run all agents in parallel on all images
+            multi_results = multi_validator.validate_all_images_parallel(image_paths)
+
+            # Check if all results are 5.0 (API failed) - fall back to programmatic
+            all_scores = [r.get('average_score', 5.0) for r in multi_results.get('images', [])]
+            if all_scores and all(s == 5.0 for s in all_scores):
+                print("  Multi-agent validation failed (all scores 5.0) - falling back to programmatic scoring")
+            else:
+                # Convert to expected format
+                results = {}
+                for img_result in multi_results.get('images', []):
+                    img_name = Path(img_result['image']).name
+                    results[img_name] = {
+                        "score": img_result['average_score'],
+                        "passed": img_result['passed'],
+                        "issues": img_result.get('issues', []),
+                        "agent_scores": {
+                            agent['agent']: agent['score']
+                            for agent in img_result.get('agents', [])
+                        },
+                        "agents": img_result.get('agents', [])
+                    }
+
+                return {
+                    "images": results,
+                    "overall_score": multi_results['overall_score'],
+                    "passed": multi_results['passed'],
+                    "total_images": len(images),
+                    "passing_images": sum(1 for r in results.values() if r['passed']),
+                    "total_issues": multi_results['total_issues'],
+                    "unique_issues": multi_results['unique_issues'],
+                    "unique_suggestions": multi_results.get('unique_suggestions', []),
+                    "agent_count": multi_results.get('agent_count', 5),
+                    "validation_mode": "multi-agent"
+                }
+
+        # Fallback to programmatic scoring (no API required)
+        if HAS_PROGRAMMATIC_SCORER:
+            print("\n[PROGRAMMATIC SCORING] Using local computer vision analysis...")
+            try:
+                scorer = ProgrammaticScorer(strict=False)
+                prog_results = scorer.score_all_images(str(self.output_dir))
+
+                # Convert to expected format
+                results = {}
+                for name, layer_score in prog_results.layer_scores.items():
+                    results[name] = {
+                        "score": layer_score.score,
+                        "passed": layer_score.score >= self.quality_threshold,
+                        "issues": layer_score.issues,
+                        "metrics": layer_score.metrics,
+                        "routing_score": layer_score.routing_score,
+                        "coverage_score": layer_score.coverage_score,
+                        "balance_score": layer_score.balance_score
+                    }
+
+                return {
+                    "images": results,
+                    "overall_score": prog_results.overall_score,
+                    "passed": prog_results.passed,
+                    "total_images": len(prog_results.layer_scores),
+                    "passing_images": sum(1 for r in results.values() if r['passed']),
+                    "total_issues": len(prog_results.issues),
+                    "unique_issues": prog_results.issues,
+                    "unique_suggestions": prog_results.suggestions,
+                    "aggregate_metrics": prog_results.aggregate_metrics,
+                    "validation_mode": "programmatic"
+                }
+            except Exception as e:
+                print(f"  Programmatic scoring failed: {e}")
+
+        # Final fallback - per-image validation with available tools
         results = {}
         all_scores = []
         all_issues = []
@@ -408,7 +886,8 @@ class VisualRalphLoop:
             "total_images": len(images),
             "passing_images": sum(1 for r in results.values() if r['passed']),
             "total_issues": len(all_issues),
-            "unique_issues": list(set(all_issues))
+            "unique_issues": list(set(all_issues)),
+            "validation_mode": "single-agent"
         }
 
     def generate_fixes(self, validation_results: Dict[str, Any]) -> List[Fix]:

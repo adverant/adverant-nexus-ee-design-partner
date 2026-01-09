@@ -122,6 +122,64 @@ class PreValidator:
 
         self.strict = strict
 
+    def _validate_svg_content(self, svg_path: str, layer_type: str) -> PreValidationResult:
+        """
+        Validate SVG file content without PIL.
+
+        For SVG files, we check:
+        1. File size (should be reasonable)
+        2. Contains actual SVG elements (path, rect, circle, text, etc.)
+        3. Has enough content lines (not just header)
+        """
+        path = Path(svg_path)
+        file_size = path.stat().st_size
+        issues = []
+
+        # Read SVG content
+        with open(svg_path, 'r') as f:
+            content = f.read()
+
+        # Check file size
+        if file_size < 10000:
+            issues.append(f"SVG file too small ({file_size} bytes)")
+
+        # Count SVG drawing elements
+        drawing_elements = 0
+        for tag in ['path', 'rect', 'circle', 'line', 'polygon', 'polyline', 'text', 'g id=']:
+            drawing_elements += content.count(f'<{tag}')
+
+        # Check for actual content
+        if drawing_elements < 5:
+            issues.append(f"SVG has few drawing elements ({drawing_elements})")
+
+        # Estimate content density based on elements
+        content_density = min(1.0, drawing_elements / 100)
+
+        # For copper layers, check for path elements (traces)
+        if 'Cu' in layer_type or 'copper' in layer_type.lower():
+            paths = content.count('<path')
+            if paths < 3:
+                issues.append(f"Copper layer has only {paths} paths - may be missing traces")
+
+        # For silkscreen, check for text elements
+        if 'Silk' in layer_type or 'silkscreen' in layer_type.lower():
+            texts = content.count('<text')
+            if texts < 1:
+                issues.append("Silkscreen has no text elements")
+
+        passed = len(issues) == 0 or (file_size > 30000 and drawing_elements > 10)
+
+        return PreValidationResult(
+            image_path=svg_path,
+            layer_type=layer_type,
+            passed=passed,
+            file_size_bytes=file_size,
+            unique_colors=0,  # N/A for SVG
+            copper_coverage=None,
+            content_density=content_density,
+            issues=issues
+        )
+
     def validate_image_has_content(
         self,
         image_path: str,
@@ -146,6 +204,16 @@ class PreValidator:
                 f"Image file not found: {image_path}",
                 image_path=image_path
             )
+
+        # Handle SVG files separately (PIL doesn't support SVG)
+        if path.suffix.lower() == '.svg':
+            result = self._validate_svg_content(image_path, layer_type)
+            if self.strict and not result.passed and result.issues:
+                raise EmptyBoardFailure(
+                    f"SVG validation failed: {'; '.join(result.issues)}",
+                    image_path=image_path
+                )
+            return result
 
         issues = []
 
@@ -524,6 +592,7 @@ def main():
 
         if args.dir:
             results = validator.validate_all_images(args.dir)
+            all_passed = all(r.passed for r in results.values())
 
             if args.json:
                 output = {

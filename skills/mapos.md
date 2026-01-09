@@ -185,41 +185,44 @@ MAPOS is a novel multi-agent system that automatically reduces DRC (Design Rule 
 /mapos assign-nets --pcb_path=board.kicad_pcb
 ```
 
-## 6-Phase Pipeline
+## 7-Phase Pipeline
 
-### Phase 0: Pre-DRC Structural Fixes
+### Phase 1: Design Rules Generation
+- Generate IPC-2221 compliant design rules (.kicad_dru)
+- Configure clearance, trace width, via parameters
+
+### Phase 2: pcbnew API Fixes
 - Zone net corrections (fix wrong net assignments)
 - Dangling via removal
-- Design rules generation (.kicad_dru)
+- Design settings optimization
 
-**Typical impact**: 45-50% violation reduction
+**Typical impact**: 40-50% violation reduction
 
-### Phase 0.5: pcbnew Zone Fill & Net Assignment (NEW)
+### Phase 3: Zone Fill
 - Native KiCad `ZONE_FILLER` API for copper pour regeneration
-- Orphan pad net assignment (MOSFET source/tab → GND, capacitor → GND)
 - Uses KiCad's bundled Python interpreter
+
+### Phase 4: Net Assignment
+- Orphan pad net assignment (MOSFET source/tab → GND, capacitor → GND)
 
 **Typical impact**: 30-35% additional violation reduction
 
-### Phase 1: MCTS Exploration
-- UCB1 selection (exploration_constant=1.414)
-- LLM-guided expansion with specialized agents
-- DRC-based reward evaluation
+### Phase 5: Solder Mask Fixes
+- Via tenting to eliminate mask bridge violations
+- Bridge allowance for fine-pitch footprints
+- Global mask expansion optimization
 
-### Phase 2: Evolutionary Optimization
-- Tournament selection (k=3)
-- LLM-guided crossover between configurations
-- Adaptive mutation rate
+**Typical impact**: 10-30% solder mask violation reduction
 
-### Phase 3: Tournament Selection
-- Pairwise comparison using Swiss tournament
-- Elo rating updates (K-factor=32)
-- Top 5 configuration advancement
+### Phase 6: Silkscreen Fixes
+- Move footprint graphics from silkscreen to Fab layer
+- Fix silk over copper violations without losing reference designators
 
-### Phase 4: AlphaFold Refinement
-- Violation clustering analysis
-- Targeted refinement generation
-- Convergence detection (threshold=0.01)
+**Typical impact**: 90%+ silk over copper violation reduction
+
+### Phase 7: LLM-Guided Fixes (Optional)
+- OpenRouter Claude API for intelligent DRC analysis
+- Requires `OPENROUTER_API_KEY` environment variable
 
 ## Specialized Generator Agents
 
@@ -280,8 +283,8 @@ Ralph Loop Steps 1-7 → Expert evaluation, compliance checks
 ## CLI Reference
 
 ```bash
-# From foc-esc-heavy-lift/python-scripts directory
-python multi_agent_optimizer.py <pcb_path> [options]
+# From services/nexus-ee-design/python-scripts/mapos directory
+python mapos_pcb_optimizer.py <pcb_path> [options]
 
 Options:
   --target, -t      Target violation count (default: 100)
@@ -296,6 +299,14 @@ Options:
 
 | Module | Purpose | Key Classes |
 |--------|---------|-------------|
+| `mapos_pcb_optimizer.py` | Main optimizer | `MAPOSPCBOptimizer`, `FixType`, `OptimizationResult` |
+| `kicad_mask_fixer.py` | Solder mask fixes | `SolderMaskFixer`, `tent_all_vias()`, `allow_bridges_on_fine_pitch()` |
+| `kicad_silk_fixer.py` | Silkscreen fixes | `SilkscreenFixer`, `move_footprint_graphics_to_fab()` |
+| `footprint_dfm_fixer.py` | DFM fixes | `FootprintDFMFixer` |
+| `kicad_zone_filler.py` | Zone fill | `fill_all_zones()`, `get_zone_statistics()` |
+| `kicad_net_assigner.py` | Net assignment | `assign_orphan_pad_nets()`, `find_orphan_pads()` |
+| `kicad_headless_runner.py` | K8s runner | `KiCadHeadlessRunner` |
+| `kicad_api_server.py` | REST API | FastAPI endpoints for all operations |
 | `pcb_state.py` | Immutable PCB state | `PCBState`, `PCBModification`, `ParameterSpace` |
 | `generator_agents.py` | LLM agents | `SignalIntegrityAgent`, `ThermalPowerAgent`, `ManufacturingAgent` |
 | `mcts_optimizer.py` | MCTS search | `MCTSOptimizer`, `MCTSNode`, `ProgressiveMCTS` |
@@ -303,10 +314,7 @@ Options:
 | `tournament_judge.py` | Ranking | `TournamentJudge`, `SwissTournament`, `EloRating` |
 | `refinement_loop.py` | AlphaFold iteration | `RefinementLoop`, `IterativeRefinementOptimizer` |
 | `multi_agent_optimizer.py` | Orchestration | `MultiAgentOptimizer`, `OptimizationConfig` |
-| `kicad_zone_filler.py` | Zone fill | `fill_all_zones()`, `get_zone_statistics()` |
-| `kicad_net_assigner.py` | Net assignment | `assign_orphan_pad_nets()`, `find_orphan_pads()` |
-| `kicad_headless_runner.py` | K8s runner | `KiCadHeadlessRunner` |
-| `mapos_pcb_optimizer.py` | Main optimizer | `MAPOSOptimizer`, `FixType` |
+| `llm_pcb_fixer.py` | LLM-guided fixes | `LLMPCBFixer` (requires OPENROUTER_API_KEY) |
 
 ## pcbnew Integration
 

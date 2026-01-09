@@ -16,8 +16,8 @@ import {
   LLMValidatorResult,
   ConsensusResult
 } from '../../types';
-import { logger } from '../../utils/logger';
-import config from '../../config';
+import { log } from '../../utils/log.js';
+import { config } from '../../config.js';
 
 export interface ValidatorConfig {
   name: string;
@@ -146,7 +146,7 @@ export class ConsensusEngine extends EventEmitter {
       const validatorPromises = enabledValidators.map(validator =>
         this.runValidator(validator, request)
           .catch(error => {
-            logger.warn(`Validator ${validator.name} failed:`, error);
+            log.warn(`Validator ${validator.name} failed:`, error);
             return null;
           })
       );
@@ -290,7 +290,7 @@ export class ConsensusEngine extends EventEmitter {
     const openRouterKey = config.openRouterApiKey;
 
     if (!openRouterKey) {
-      logger.warn('OpenRouter API key not configured, using simulated response');
+      log.warn('OpenRouter API key not configured, using simulated response');
       return this.callClaudeValidator(validator, prompt, startTime);
     }
 
@@ -338,7 +338,7 @@ export class ConsensusEngine extends EventEmitter {
         latencyMs: Date.now() - startTime
       };
     } catch (error) {
-      logger.error('Gemini validator error:', error);
+      log.error('Gemini validator error:', error);
       // Fall back to simulated response
       return this.simulateLLMResponse(validator.name, prompt).then(response => ({
         validatorName: validator.name,
@@ -418,11 +418,11 @@ export class ConsensusEngine extends EventEmitter {
 
       // Check via sizes
       for (const via of layout.vias || []) {
-        if (via.diameter < 0.4) {
+        if (via.drill < 0.4) {
           issues.push({
             severity: 'warning' as const,
             category: 'DRC',
-            description: `Via diameter ${via.diameter}mm may be too small`,
+            description: `Via drill size ${via.drill}mm may be too small`,
             suggestion: 'Use standard 0.6mm via for better manufacturability'
           });
           score -= 2;
@@ -505,7 +505,7 @@ export class ConsensusEngine extends EventEmitter {
       // Check for high-speed signal requirements
       const traces = layout.traces || [];
       const highSpeedTraces = traces.filter(t => {
-        const name = (t.netName || '').toLowerCase();
+        const name = (t.netId || '').toLowerCase();
         return name.includes('clk') || name.includes('data') || name.includes('usb');
       });
 
@@ -516,7 +516,7 @@ export class ConsensusEngine extends EventEmitter {
           issues.push({
             severity: 'info' as const,
             category: 'Signal Integrity',
-            description: `High-speed trace ${trace.netName} may not meet 50Ω impedance`,
+            description: `High-speed trace ${trace.netId} may not meet 50Ω impedance`,
             suggestion: `Consider ${expectedWidth}mm width for controlled impedance`
           });
           score -= 3;
@@ -525,7 +525,7 @@ export class ConsensusEngine extends EventEmitter {
 
       // Check for ground plane
       const hasGroundPlane = (layout.zones || []).some(z =>
-        z.netName?.toLowerCase() === 'gnd'
+        z.netId?.toLowerCase() === 'gnd'
       );
 
       if (!hasGroundPlane && highSpeedTraces.length > 0) {
@@ -621,7 +621,7 @@ Be specific and actionable in your feedback.`;
         };
       }
     } catch {
-      logger.warn('Failed to parse LLM validation response as JSON');
+      log.warn('Failed to parse LLM validation response as JSON');
     }
 
     // Fallback: extract information from text
