@@ -7,8 +7,8 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
-import { ServiceError, ErrorCodes } from '../../utils/errors';
+import { log as logger } from '../../utils/logger.js';
+import { ValidationError } from '../../utils/errors.js';
 import {
   FirmwareProject,
   MCUTarget,
@@ -644,9 +644,9 @@ export class FirmwareGenerator extends EventEmitter {
 
       // Validate MCU support
       if (!this.config.supportedFamilies.includes(requirements.targetMcu.family)) {
-        throw new ServiceError(
+        throw new ValidationError(
           `Unsupported MCU family: ${requirements.targetMcu.family}`,
-          ErrorCodes.VALIDATION_ERROR,
+          'VALIDATION_ERROR',
           { supportedFamilies: this.config.supportedFamilies }
         );
       }
@@ -703,7 +703,7 @@ export class FirmwareGenerator extends EventEmitter {
         },
         drivers: this.buildDriverList(requirements),
         tasks: requirements.rtos ? this.buildTaskList(requirements) : [],
-        buildConfig: requirements.buildConfig || this.getDefaultBuildConfig(requirements.targetMcu.family),
+        buildConfig: { ...this.getDefaultBuildConfig(requirements.targetMcu.family), ...requirements.buildConfig } as BuildConfig,
         generatedFiles,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()

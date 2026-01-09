@@ -10,8 +10,40 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   PCBLayout,
   ValidationResult,
-  BoardConstraints
+  BoardConstraints,
+  Trace,
+  CopperZone,
+  Layer,
+  Component,
+  FootprintDimensions
 } from '../../../types';
+
+// Helper function to get net name from trace (uses netName if available, falls back to netId)
+function getNetName(trace: Trace): string {
+  return trace.netName || trace.netId || '';
+}
+
+// Helper function to get net name from zone (uses netName if available, falls back to netId)
+function getZoneNetName(zone: CopperZone): string {
+  return zone.netName || zone.netId || '';
+}
+
+// Helper function to get layers from layout (prefers direct layers, falls back to stackup.layers)
+function getLayers(layout: PCBLayout): Layer[] {
+  return layout.layers || layout.stackup?.layers || [];
+}
+
+// Helper function to get footprint dimensions from component
+function getFootprintDimensions(component: Component): { width: number; height: number } {
+  if (typeof component.footprint === 'object' && component.footprint !== null) {
+    return {
+      width: (component.footprint as FootprintDimensions).width || 0,
+      height: (component.footprint as FootprintDimensions).height || 0
+    };
+  }
+  // Default dimensions for string-only footprints
+  return { width: 0, height: 0 };
+}
 
 export interface ValidationDomain {
   name: string;
@@ -275,7 +307,7 @@ class DRCValidator extends DomainValidator {
           'DRC_TRACE_WIDTH',
           `Trace width ${trace.width}mm is below minimum ${constraints.minTraceWidth}mm`,
           'error',
-          { netName: trace.netName },
+          { netName: getNetName(trace) },
           `Increase trace width to at least ${constraints.minTraceWidth}mm`
         ));
         score -= 5;
@@ -292,10 +324,12 @@ class DRCValidator extends DomainValidator {
         const c2 = components[j];
 
         // Calculate edge-to-edge distance
+        const c1Dims = getFootprintDimensions(c1);
+        const c2Dims = getFootprintDimensions(c2);
         const dx = Math.abs(c1.position.x - c2.position.x) -
-                   ((c1.footprint?.width || 0) + (c2.footprint?.width || 0)) / 2;
+                   ((c1Dims.width || 0) + (c2Dims.width || 0)) / 2;
         const dy = Math.abs(c1.position.y - c2.position.y) -
-                   ((c1.footprint?.height || 0) + (c2.footprint?.height || 0)) / 2;
+                   ((c1Dims.height || 0) + (c2Dims.height || 0)) / 2;
         const clearance = Math.max(0, Math.min(dx, dy));
 
         if (clearance < minClearance && clearance < 0) {
@@ -340,9 +374,10 @@ class DRCValidator extends DomainValidator {
     // Check board boundary violations
     const margin = 1; // 1mm minimum from edge
     for (const c of components) {
+      const cDims = getFootprintDimensions(c);
       if (c.position.x < margin || c.position.y < margin ||
-          c.position.x + (c.footprint?.width || 0) > layout.boardOutline.width - margin ||
-          c.position.y + (c.footprint?.height || 0) > layout.boardOutline.height - margin) {
+          c.position.x + (cDims.width || 0) > layout.boardOutline.width - margin ||
+          c.position.y + (cDims.height || 0) > layout.boardOutline.height - margin) {
         violations.push(this.createViolation(
           'DRC_BOARD_EDGE',
           `Component ${c.reference} is too close to board edge`,
@@ -383,7 +418,7 @@ class ERCValidator extends DomainValidator {
     // Check for unconnected pins
     const connectedNets = new Set<string>();
     for (const trace of layout.traces || []) {
-      if (trace.netName) connectedNets.add(trace.netName);
+      if (getNetName(trace)) connectedNets.add(getNetName(trace));
     }
 
     // Check power net connectivity
@@ -398,7 +433,7 @@ class ERCValidator extends DomainValidator {
     // Check for floating pins (components without traces)
     for (const component of layout.components || []) {
       const hasConnection = layout.traces?.some(t =>
-        t.netName?.includes(component.reference)
+        getNetName(t)?.includes(component.reference)
       );
 
       // This is a simplified check - real ERC would check actual netlist
@@ -416,14 +451,14 @@ class ERCValidator extends DomainValidator {
 
     // Check for power-ground shorts (simplified)
     const powerTraces = layout.traces?.filter(t =>
-      t.netName?.toLowerCase().includes('vcc') ||
-      t.netName?.toLowerCase().includes('vdd') ||
-      t.netName?.toLowerCase().includes('power')
+      getNetName(t)?.toLowerCase().includes('vcc') ||
+      getNetName(t)?.toLowerCase().includes('vdd') ||
+      getNetName(t)?.toLowerCase().includes('power')
     ) || [];
 
     const groundTraces = layout.traces?.filter(t =>
-      t.netName?.toLowerCase().includes('gnd') ||
-      t.netName?.toLowerCase().includes('ground')
+      getNetName(t)?.toLowerCase().includes('gnd') ||
+      getNetName(t)?.toLowerCase().includes('ground')
     ) || [];
 
     // Check for traces that might short (simplified proximity check)
@@ -491,7 +526,7 @@ class IPC2221Validator extends DomainValidator {
     // Check conductor width for current capacity (1oz copper)
     const traces = layout.traces || [];
     for (const trace of traces) {
-      const estimatedCurrent = this.estimateTraceCurrent(trace.netName || '');
+      const estimatedCurrent = this.estimateTraceCurrent(getNetName(trace) || '');
       const requiredWidth = this.calculateRequiredWidth(estimatedCurrent, 10); // 10°C rise
 
       if (trace.width < requiredWidth) {
@@ -499,7 +534,7 @@ class IPC2221Validator extends DomainValidator {
           'IPC2221_CURRENT_CAPACITY',
           `Trace width ${trace.width}mm may be insufficient for estimated ${estimatedCurrent}A`,
           'warning',
-          { netName: trace.netName },
+          { netName: getNetName(trace) },
           `Consider widening to ${requiredWidth.toFixed(2)}mm for ${estimatedCurrent}A with 10°C rise`
         ));
         score -= 5;
@@ -507,14 +542,14 @@ class IPC2221Validator extends DomainValidator {
     }
 
     // Check PCB layer stack compliance
-    const layers = layout.layers || [];
+    const layers = getLayers(layout) || [];
     if (layers.length > 0) {
       // Check for proper ground/power plane distribution
       const copperLayers = layers.filter(l => l.type === 'copper');
       if (copperLayers.length >= 4) {
         // 4+ layer boards should have dedicated ground plane
         const hasGroundPlane = layout.zones?.some(z =>
-          z.netName?.toLowerCase() === 'gnd' && z.layer?.includes('In')
+          getZoneNetName(z)?.toLowerCase() === 'gnd' && z.layer?.includes('In')
         );
         if (!hasGroundPlane) {
           violations.push(this.createViolation(
@@ -537,7 +572,7 @@ class IPC2221Validator extends DomainValidator {
       metrics: {
         requiredSpacing,
         maxVoltage,
-        layerCount: layout.layers?.length || 0
+        layerCount: getLayers(layout)?.length || 0
       },
       passRate: violations.filter(v => v.severity === 'error').length === 0 ? 100 : 0
     };
@@ -600,15 +635,15 @@ class SignalIntegrityValidator extends DomainValidator {
 
     // Check for stub traces (unterminated high-speed signals)
     for (const trace of traces) {
-      if (this.isHighSpeedSignal(trace.netName || '')) {
+      if (this.isHighSpeedSignal(getNetName(trace) || '')) {
         const length = this.calculateTraceLength(trace);
         // Simplified stub check - real SI would use rise time
         if (length > 0 && length < 5) {
           violations.push(this.createViolation(
             'SI_STUB',
-            `Short trace stub on high-speed signal ${trace.netName}`,
+            `Short trace stub on high-speed signal ${getNetName(trace)}`,
             'info',
-            { netName: trace.netName },
+            { netName: getNetName(trace) },
             'Consider adding termination or removing stub'
           ));
           score -= 2;
@@ -618,7 +653,7 @@ class SignalIntegrityValidator extends DomainValidator {
 
     // Check controlled impedance traces
     const controlledImpedanceNets = traces.filter(t =>
-      this.isHighSpeedSignal(t.netName || '')
+      this.isHighSpeedSignal(getNetName(t) || '')
     );
 
     for (const trace of controlledImpedanceNets) {
@@ -628,7 +663,7 @@ class SignalIntegrityValidator extends DomainValidator {
           'SI_IMPEDANCE',
           `Trace width ${trace.width}mm may not meet 50Ω impedance target`,
           'info',
-          { netName: trace.netName },
+          { netName: getNetName(trace) },
           `Use ${expectedWidth.toFixed(2)}mm width for 50Ω impedance`
         ));
         score -= 3;
@@ -637,12 +672,12 @@ class SignalIntegrityValidator extends DomainValidator {
 
     // Check for right-angle traces on high-speed signals
     for (const trace of traces) {
-      if (this.isHighSpeedSignal(trace.netName || '') && this.hasRightAngles(trace)) {
+      if (this.isHighSpeedSignal(getNetName(trace) || '') && this.hasRightAngles(trace)) {
         violations.push(this.createViolation(
           'SI_RIGHT_ANGLE',
-          `High-speed trace ${trace.netName} has 90° corners`,
+          `High-speed trace ${getNetName(trace)} has 90° corners`,
           'warning',
-          { netName: trace.netName },
+          { netName: getNetName(trace) },
           'Use 45° chamfers or curves for high-speed routing'
         ));
         score -= 4;
@@ -651,7 +686,7 @@ class SignalIntegrityValidator extends DomainValidator {
 
     // Check return path continuity
     const hasGroundPlane = layout.zones?.some(z =>
-      z.netName?.toLowerCase() === 'gnd'
+      getZoneNetName(z)?.toLowerCase() === 'gnd'
     );
 
     if (!hasGroundPlane && controlledImpedanceNets.length > 0) {
@@ -683,7 +718,7 @@ class SignalIntegrityValidator extends DomainValidator {
     const pairs = new Map<string, [any, any]>();
 
     for (const trace of traces) {
-      const name = trace.netName || '';
+      const name = getNetName(trace) || '';
       if (name.endsWith('_P') || name.endsWith('_N') ||
           name.endsWith('+') || name.endsWith('-')) {
         const baseName = name.replace(/[_+-]?[PN+-]$/, '');
@@ -820,8 +855,9 @@ class ThermalValidator extends DomainValidator {
       const thermalVias = (layout.vias || []).filter(v => {
         const dx = Math.abs(v.position.x - component.position.x);
         const dy = Math.abs(v.position.y - component.position.y);
-        const w = component.footprint?.width || 5;
-        const h = component.footprint?.height || 5;
+        const dims = getFootprintDimensions(component);
+        const w = dims.width || 5;
+        const h = dims.height || 5;
         return dx < w && dy < h;
       });
 
@@ -971,10 +1007,12 @@ class DFMValidator extends DomainValidator {
 
         if (c1.layer !== c2.layer) continue;
 
+        const dims1 = getFootprintDimensions(c1);
+        const dims2 = getFootprintDimensions(c2);
         const dx = Math.abs(c1.position.x - c2.position.x) -
-                   ((c1.footprint?.width || 0) + (c2.footprint?.width || 0)) / 2;
+                   ((dims1.width || 0) + (dims2.width || 0)) / 2;
         const dy = Math.abs(c1.position.y - c2.position.y) -
-                   ((c1.footprint?.height || 0) + (c2.footprint?.height || 0)) / 2;
+                   ((dims1.height || 0) + (dims2.height || 0)) / 2;
         const spacing = Math.max(0, Math.min(dx, dy));
 
         if (spacing < minAssemblySpacing && spacing > 0) {
@@ -1171,7 +1209,7 @@ class TestingValidator extends DomainValidator {
       const ref = c.reference.toLowerCase();
       return ref.includes('jtag') || ref.includes('swd');
     }) || layout.traces?.some(t => {
-      const name = (t.netName || '').toLowerCase();
+      const name = (getNetName(t) || '').toLowerCase();
       return name.includes('tck') || name.includes('tms') || name.includes('tdi') || name.includes('tdo');
     });
 

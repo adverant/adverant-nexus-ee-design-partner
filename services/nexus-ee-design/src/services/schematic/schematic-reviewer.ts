@@ -7,7 +7,7 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
+import log from '../../utils/logger.js';
 import {
   Schematic,
   Component,
@@ -509,7 +509,7 @@ export class SchematicReviewer extends EventEmitter {
     let maxScore = 0;
 
     this.emit('review:start', { schematicId: schematic.id });
-    logger.info('Starting schematic review', { schematicId: schematic.id });
+    log.info('Starting schematic review', { schematicId: schematic.id });
 
     // Run ERC checks
     if (this.config.enableERC) {
@@ -591,7 +591,7 @@ export class SchematicReviewer extends EventEmitter {
     this.emit('review:progress', { phase: 'complete', progress: 100 });
     this.emit('review:complete', { result });
 
-    logger.info('Schematic review complete', {
+    log.info('Schematic review complete', {
       schematicId: schematic.id,
       passed,
       score: finalScore,

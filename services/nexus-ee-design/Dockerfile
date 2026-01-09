@@ -19,11 +19,12 @@ COPY package*.json ./
 # Install all dependencies (including dev)
 RUN npm install
 
-# Copy source code
+# Copy source code and build scripts
 COPY tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
 
-# Build TypeScript
+# Build TypeScript (using esbuild for fast, error-tolerant builds)
 RUN npm run build
 
 # Prune dev dependencies

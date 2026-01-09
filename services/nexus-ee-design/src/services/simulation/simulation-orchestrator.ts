@@ -7,8 +7,8 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
-import { ServiceError, ErrorCodes } from '../../utils/errors';
+import log from '../../utils/logger.js';
+import { ValidationError } from '../../utils/errors.js';
 import {
   Simulation,
   SimulationType,
@@ -322,7 +322,7 @@ export class SimulationOrchestrator extends EventEmitter {
   async submitSimulation(request: SimulationRequest): Promise<Simulation> {
     const simulationId = uuidv4();
 
-    logger.info('Submitting simulation', {
+    log.info('Submitting simulation', {
       simulationId,
       type: request.type,
       projectId: request.projectId
@@ -376,7 +376,7 @@ export class SimulationOrchestrator extends EventEmitter {
 
       this.activeJobs.set(job.id, job);
       this.runSimulation(job).catch(error => {
-        logger.error('Simulation failed', { jobId: job.id, error });
+        log.error('Simulation failed', { jobId: job.id, error });
       });
     }
 
@@ -391,7 +391,7 @@ export class SimulationOrchestrator extends EventEmitter {
     job.startTime = new Date();
 
     this.emit('simulation:started', { jobId: job.id });
-    logger.info('Starting simulation', { jobId: job.id, type: job.request.type });
+    log.info('Starting simulation', { jobId: job.id, type: job.request.type });
 
     try {
       let results: SimulationResults;
@@ -430,10 +430,9 @@ export class SimulationOrchestrator extends EventEmitter {
           break;
 
         default:
-          throw new ServiceError(
+          throw new ValidationError(
             `Unsupported simulation type: ${job.request.type}`,
-            ErrorCodes.VALIDATION_ERROR,
-            { type: job.request.type }
+            { operation: 'runSimulation', type: job.request.type }
           );
       }
 
@@ -476,7 +475,7 @@ export class SimulationOrchestrator extends EventEmitter {
    * Run SPICE simulation
    */
   private async runSPICESimulation(job: SimulationJob): Promise<SimulationResults> {
-    const config = job.request.input.parameters as SPICEConfig;
+    const config = job.request.input.parameters as unknown as SPICEConfig;
     const waveforms: Waveform[] = [];
     const metrics: Record<string, SimulationMetric> = {};
 
@@ -552,7 +551,7 @@ export class SimulationOrchestrator extends EventEmitter {
    * Run thermal simulation
    */
   private async runThermalSimulation(job: SimulationJob): Promise<SimulationResults> {
-    const config = job.request.input.parameters as ThermalConfig;
+    const config = job.request.input.parameters as unknown as ThermalConfig;
     const images: SimulationImage[] = [];
     const metrics: Record<string, SimulationMetric> = {};
 
@@ -632,7 +631,7 @@ export class SimulationOrchestrator extends EventEmitter {
    * Run signal integrity simulation
    */
   private async runSignalIntegritySimulation(job: SimulationJob): Promise<SimulationResults> {
-    const config = job.request.input.parameters as SignalIntegrityConfig;
+    const config = job.request.input.parameters as unknown as SignalIntegrityConfig;
     const waveforms: Waveform[] = [];
     const images: SimulationImage[] = [];
     const metrics: Record<string, SimulationMetric> = {};
@@ -744,7 +743,7 @@ export class SimulationOrchestrator extends EventEmitter {
    * Run RF/EMC simulation
    */
   private async runRFEMCSimulation(job: SimulationJob): Promise<SimulationResults> {
-    const config = job.request.input.parameters as RFEMCConfig;
+    const config = job.request.input.parameters as unknown as RFEMCConfig;
     const waveforms: Waveform[] = [];
     const images: SimulationImage[] = [];
     const metrics: Record<string, SimulationMetric> = {};

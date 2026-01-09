@@ -114,11 +114,17 @@ export interface SchematicSheet {
   nets: string[]; // Net IDs
 }
 
+export interface FootprintDimensions {
+  name: string;
+  width: number;
+  height: number;
+}
+
 export interface Component {
   id: string;
   reference: string; // e.g., "U1", "R1", "C1"
   value: string;
-  footprint: string;
+  footprint: string | FootprintDimensions; // Can be name or structured dimensions
   partNumber?: string;
   manufacturer?: string;
   description?: string;
@@ -190,7 +196,8 @@ export interface PCBLayout {
   filePath: string;
   boardOutline: BoardOutline;
   stackup: LayerStackup;
-  components: PlacedComponent[];
+  layers?: Layer[]; // Convenience accessor for stackup.layers
+  components: (PlacedComponent | ComponentPlacement)[]; // Allow either type for flexibility
   traces: Trace[];
   vias: Via[];
   zones: CopperZone[];
@@ -200,12 +207,29 @@ export interface PCBLayout {
   updatedAt: string;
 }
 
+export interface Fiducial {
+  id: string;
+  position: Position2D;
+  layer: 'top' | 'bottom';
+  diameter: number;
+}
+
+export interface ToolingHole {
+  id: string;
+  position: Position2D;
+  diameter: number;
+}
+
 export interface BoardOutline {
   width: number;
   height: number;
+  area?: number | string; // Calculated area, can be string for display
   shape: 'rectangular' | 'circular' | 'custom';
   polygon?: Position2D[];
   keepoutZones: KeepoutZone[];
+  fiducials?: Fiducial[];
+  toolingHoles?: ToolingHole[];
+  cornerRadius?: number; // For rounded rectangular boards
 }
 
 export interface KeepoutZone {
@@ -237,17 +261,20 @@ export type LayerType =
   | 'dielectric'
   | 'soldermask'
   | 'silkscreen'
-  | 'paste';
+  | 'paste'
+  | 'copper';
 
 export interface PlacedComponent extends Component {
   layer: 'top' | 'bottom';
   locked: boolean;
   placementScore?: number;
+  componentId?: string; // Reference to original component for compatibility with ComponentPlacement
 }
 
 export interface Trace {
   id: string;
   netId: string;
+  netName?: string; // Resolved net name for validation convenience
   layer: string;
   width: number;
   points: Position2D[];
@@ -260,6 +287,7 @@ export interface Via {
   type: ViaType;
   drill: number;
   pad: number;
+  diameter?: number; // Alternative to pad for compatibility
   startLayer: string;
   endLayer: string;
   netId?: string;
@@ -271,6 +299,7 @@ export type ViaType = 'through' | 'blind' | 'buried' | 'microvia';
 export interface CopperZone {
   id: string;
   netId: string;
+  netName?: string; // Resolved net name for validation convenience
   layer: string;
   polygon: Position2D[];
   fillType: 'solid' | 'hatched' | 'none';
@@ -827,6 +856,11 @@ export interface DomainValidationResult {
   violations: ValidationViolation[];
   metrics: Record<string, number | string | boolean>;
   passRate: number;
+  // Convenience properties for domain-specific results
+  maxTemperature?: number;
+  yieldEstimate?: number;
+  assemblyIssues?: number;
+  solderabilityScore?: number;
 }
 
 export interface ValidationViolation {

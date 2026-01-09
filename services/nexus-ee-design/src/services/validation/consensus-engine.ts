@@ -146,7 +146,7 @@ export class ConsensusEngine extends EventEmitter {
       const validatorPromises = enabledValidators.map(validator =>
         this.runValidator(validator, request)
           .catch(error => {
-            log.warn(`Validator ${validator.name} failed:`, error);
+            log.warn(`Validator ${validator.name} failed: ${error instanceof Error ? error.message : String(error)}`);
             return null;
           })
       );
@@ -287,7 +287,7 @@ export class ConsensusEngine extends EventEmitter {
     prompt: string,
     startTime: number
   ): Promise<ValidatorResponse> {
-    const openRouterKey = config.openRouterApiKey;
+    const openRouterKey = config.llm.openrouterApiKey;
 
     if (!openRouterKey) {
       log.warn('OpenRouter API key not configured, using simulated response');
@@ -321,7 +321,9 @@ export class ConsensusEngine extends EventEmitter {
         throw new Error(`OpenRouter API error: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
       const content = data.choices?.[0]?.message?.content || '';
 
       // Parse structured response
@@ -338,7 +340,7 @@ export class ConsensusEngine extends EventEmitter {
         latencyMs: Date.now() - startTime
       };
     } catch (error) {
-      log.error('Gemini validator error:', error);
+      log.error('Gemini validator error', error instanceof Error ? error : new Error(String(error)));
       // Fall back to simulated response
       return this.simulateLLMResponse(validator.name, prompt).then(response => ({
         validatorName: validator.name,

@@ -142,7 +142,7 @@ export class SkillsEngineClient extends EventEmitter {
       });
 
     } catch (error) {
-      logger.error('Failed to register skills', { error });
+      logger.error('Failed to register skills', error instanceof Error ? error : undefined);
     }
 
     return results;
@@ -170,7 +170,7 @@ export class SkillsEngineClient extends EventEmitter {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      logger.error('Failed to register skill from file', { filePath, error: errorMessage });
+      logger.error('Failed to register skill from file', error instanceof Error ? error : undefined, { filePath });
 
       return {
         skillName: fileName,
@@ -211,7 +211,7 @@ export class SkillsEngineClient extends EventEmitter {
       };
 
     } catch (error) {
-      logger.error('Failed to parse skill definition', { error });
+      logger.error('Failed to parse skill definition', error instanceof Error ? error : undefined);
       return null;
     }
   }
@@ -252,7 +252,7 @@ export class SkillsEngineClient extends EventEmitter {
         return {
           skillName: skill.name,
           success: true,
-          skillId: response.data.skillId
+          skillId: (response.data as { skillId: string }).skillId
         };
       } else {
         return {
@@ -264,9 +264,8 @@ export class SkillsEngineClient extends EventEmitter {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      logger.error('Failed to register skill', {
-        name: definition.name,
-        error: errorMessage
+      logger.error('Failed to register skill', error instanceof Error ? error : undefined, {
+        name: definition.name
       });
 
       return {
@@ -314,13 +313,13 @@ export class SkillsEngineClient extends EventEmitter {
       });
 
       if (response.success) {
-        return response.data.results as SkillSearchResult[];
+        return (response.data as { results: SkillSearchResult[] }).results;
       }
 
       return [];
 
     } catch (error) {
-      logger.error('Failed to search skills', { error });
+      logger.error('Failed to search skills', error instanceof Error ? error : undefined);
       return [];
     }
   }
@@ -346,7 +345,7 @@ export class SkillsEngineClient extends EventEmitter {
       return null;
 
     } catch (error) {
-      logger.error('Failed to get skill', { name, error });
+      logger.error('Failed to get skill', error instanceof Error ? error : undefined, { name });
       return null;
     }
   }
@@ -369,12 +368,18 @@ export class SkillsEngineClient extends EventEmitter {
       });
 
       if (response.success) {
+        const data = response.data as {
+          status: SkillExecutionResponse['status'];
+          result?: unknown;
+          startedAt?: string;
+          completedAt?: string;
+        };
         const execution: SkillExecutionResponse = {
           executionId,
-          status: response.data.status,
-          result: response.data.result,
-          startedAt: response.data.startedAt,
-          completedAt: response.data.completedAt
+          status: data.status,
+          result: data.result,
+          startedAt: data.startedAt,
+          completedAt: data.completedAt
         };
 
         this.emit('skill:execution:complete', { execution });
@@ -450,7 +455,7 @@ export class SkillsEngineClient extends EventEmitter {
       }
 
     } catch (error) {
-      logger.error('Failed to sync skills', { error });
+      logger.error('Failed to sync skills', error instanceof Error ? error : undefined);
     }
   }
 
@@ -506,7 +511,7 @@ export class SkillsEngineClient extends EventEmitter {
       }
 
       const response = await fetch(url, options);
-      const data = await response.json();
+      const data = await response.json() as { error?: { code?: string; message?: string } };
 
       if (!response.ok) {
         return {

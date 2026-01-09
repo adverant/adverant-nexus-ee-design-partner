@@ -7,8 +7,7 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
-import { ServiceError, ErrorCodes } from '../../utils/errors';
+import log from '../../utils/logger.js';
 import {
   Schematic,
   SchematicSheet,
@@ -406,7 +405,7 @@ export class SchematicGenerator extends EventEmitter {
 
     try {
       this.emit('generation:start', { projectName: requirements.projectName });
-      logger.info('Starting schematic generation', { projectName: requirements.projectName });
+      log.info('Starting schematic generation', { projectName: requirements.projectName });
 
       // Step 1: Analyze requirements and create block diagram
       this.emit('generation:progress', { phase: 'analysis', progress: 10 });
@@ -451,7 +450,7 @@ export class SchematicGenerator extends EventEmitter {
       this.emit('generation:progress', { phase: 'complete', progress: 100 });
       this.emit('generation:complete', { schematic });
 
-      logger.info('Schematic generation complete', {
+      log.info('Schematic generation complete', {
         projectName: requirements.projectName,
         componentCount: schematic.components.length,
         netCount: nets.length,
@@ -472,7 +471,7 @@ export class SchematicGenerator extends EventEmitter {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       errors.push(errorMessage);
-      logger.error('Schematic generation failed', { error: errorMessage });
+      log.error('Schematic generation failed', { error: errorMessage });
 
       this.emit('generation:error', { error: errorMessage });
 
@@ -1152,7 +1151,7 @@ export class SchematicGenerator extends EventEmitter {
     const fileName = `${projectName.replace(/\s+/g, '_').toLowerCase()}.kicad_sch`;
     const filePath = `${this.config.outputPath}/${fileName}`;
 
-    logger.info('Generated KiCad schematic file', { filePath, sheets: sheets.length, nets: nets.length });
+    log.info('Generated KiCad schematic file', { filePath, sheets: sheets.length, nets: nets.length });
 
     return filePath;
   }
