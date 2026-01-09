@@ -186,8 +186,8 @@ spec:
           emptyDir:
             sizeLimit: "2Gi"
         - name: ee-design-data
-          persistentVolumeClaim:
-            claimName: nexus-ee-design-data
+          emptyDir:
+            sizeLimit: "10Gi"
 
       terminationGracePeriodSeconds: 60
 
@@ -211,23 +211,6 @@ spec:
       port: 8080
       targetPort: 8080
       protocol: TCP
-
----
-# Persistent Volume Claim
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nexus-ee-design-data
-  namespace: nexus
-  labels:
-    app.kubernetes.io/name: nexus-ee-design
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 50Gi
-  storageClassName: local-path
 
 ---
 # Horizontal Pod Autoscaler
