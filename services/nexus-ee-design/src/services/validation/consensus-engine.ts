@@ -16,7 +16,7 @@ import {
   LLMValidatorResult,
   ConsensusResult
 } from '../../types';
-import { log } from '../../utils/log.js';
+import log from '../../utils/logger.js';
 import { config } from '../../config.js';
 
 export interface ValidatorConfig {
