@@ -23,6 +23,52 @@ async function findFilesRecursive(dir, matches = []) {
   return matches;
 }
 
+// Plugin to add .js extension to relative imports
+const addJsExtensionPlugin = {
+  name: 'add-js-extension',
+  setup(build) {
+    build.onEnd(async (result) => {
+      if (result.errors.length > 0) return;
+
+      // Process all output files
+      const processFile = async (dir) => {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await processFile(fullPath);
+          } else if (entry.isFile() && fullPath.endsWith('.js')) {
+            let content = await fs.promises.readFile(fullPath, 'utf8');
+            // Add .js extension to relative imports that don't have it
+            content = content.replace(
+              /from\s+["'](\.[^"']+)["']/g,
+              (match, importPath) => {
+                if (!importPath.endsWith('.js') && !importPath.endsWith('.json')) {
+                  return `from "${importPath}.js"`;
+                }
+                return match;
+              }
+            );
+            // Also handle import statements
+            content = content.replace(
+              /import\s+["'](\.[^"']+)["']/g,
+              (match, importPath) => {
+                if (!importPath.endsWith('.js') && !importPath.endsWith('.json')) {
+                  return `import "${importPath}.js"`;
+                }
+                return match;
+              }
+            );
+            await fs.promises.writeFile(fullPath, content);
+          }
+        }
+      };
+
+      await processFile(outDir);
+    });
+  }
+};
+
 async function build() {
   console.log('Building nexus-ee-design with esbuild...');
 
@@ -48,6 +94,7 @@ async function build() {
       outbase: srcDir,
       // Handle .js extensions in imports
       resolveExtensions: ['.ts', '.js'],
+      plugins: [addJsExtensionPlugin],
     });
 
     console.log('Build completed successfully!');
