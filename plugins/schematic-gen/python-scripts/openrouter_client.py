@@ -43,7 +43,8 @@ from validation_exceptions import MissingDependencyFailure
 
 
 # Model configuration - using Claude Opus 4.5 as specified
-CLAUDE_OPUS_MODEL = "anthropic/claude-opus-4-5-20251101"
+# OpenRouter uses simplified model IDs (not the full Anthropic model names)
+CLAUDE_OPUS_MODEL = "anthropic/claude-opus-4.5"
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 # Common .env file locations to check for API key

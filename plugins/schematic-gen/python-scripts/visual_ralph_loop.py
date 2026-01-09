@@ -188,12 +188,13 @@ class VisualRalphLoop:
         Raises:
             MissingDependencyFailure: If required dependency is missing
         """
-        # Check for API key
-        if not os.environ.get('ANTHROPIC_API_KEY'):
+        # Check for API key - OPENROUTER_API_KEY is preferred (used by visual_validator)
+        # Also accept ANTHROPIC_API_KEY for backward compatibility
+        if not os.environ.get('OPENROUTER_API_KEY') and not os.environ.get('ANTHROPIC_API_KEY'):
             raise MissingDependencyFailure(
-                "ANTHROPIC_API_KEY environment variable not set",
-                dependency_name="ANTHROPIC_API_KEY",
-                install_instructions="export ANTHROPIC_API_KEY=your_key_here"
+                "OPENROUTER_API_KEY environment variable not set",
+                dependency_name="OPENROUTER_API_KEY",
+                install_instructions="export OPENROUTER_API_KEY=your_key_here (or ANTHROPIC_API_KEY)"
             )
 
         # Check for KiCad CLI (required for proper exports)
