@@ -118,17 +118,19 @@ spec:
             - name: SIM_TIMEOUT_SECONDS
               value: "3600"
 
-            # API Keys from secrets
+            # API Keys from secrets (optional)
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: nexus-api-keys
                   key: anthropic-api-key
+                  optional: true
             - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: nexus-api-keys
                   key: openrouter-api-key
+                  optional: true
 
           resources:
             requests:
