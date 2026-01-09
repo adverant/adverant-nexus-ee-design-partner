@@ -1,0 +1,101 @@
+{
+  "test_id": "e2e-20260108-214625",
+  "test_name": "555 LED Driver",
+  "timestamp": "2026-01-08T21:46:32.692993",
+  "stages": [
+    {
+      "name": "1. Generate Netlist",
+      "passed": true,
+      "duration_ms": 234,
+      "output_files": [
+        "tests/e2e/test_output/netlists/led_driver.net"
+      ],
+      "errors": [],
+      "warnings": [],
+      "metrics": {
+        "components": 7,
+        "nets": 6
+      }
+    },
+    {
+      "name": "2. Convert to Schematic",
+      "passed": true,
+      "duration_ms": 36,
+      "output_files": [
+        "tests/e2e/test_output/schematics/led_driver.kicad_sch"
+      ],
+      "errors": [],
+      "warnings": [],
+      "metrics": {}
+    },
+    {
+      "name": "3. Generate PCB Layout",
+      "passed": true,
+      "duration_ms": 0,
+      "output_files": [
+        "tests/e2e/test_output/pcb/led_driver.kicad_pcb"
+      ],
+      "errors": [],
+      "warnings": [],
+      "metrics": {
+        "board_width_mm": 50,
+        "board_height_mm": 50,
+        "layer_count": 2
+      }
+    },
+    {
+      "name": "4. Export Images",
+      "passed": true,
+      "duration_ms": 6945,
+      "output_files": [
+        "tests/e2e/test_output/images/F_Cu.png",
+        "tests/e2e/test_output/images/B_Cu.png",
+        "tests/e2e/test_output/images/F_SilkS.png",
+        "tests/e2e/test_output/images/B_SilkS.png",
+        "tests/e2e/test_output/images/F_Mask.png",
+        "tests/e2e/test_output/images/B_Mask.png",
+        "tests/e2e/test_output/images/F_Paste.png",
+        "tests/e2e/test_output/images/B_Paste.png",
+        "tests/e2e/test_output/images/Edge_Cuts.png",
+        "tests/e2e/test_output/images/F_Fab.png",
+        "tests/e2e/test_output/images/B_Fab.png",
+        "tests/e2e/test_output/images/top_view.png",
+        "tests/e2e/test_output/images/bottom_view.png",
+        "tests/e2e/test_output/images/assembly_top.png",
+        "tests/e2e/test_output/images/assembly_bottom.png"
+      ],
+      "errors": [],
+      "warnings": [],
+      "metrics": {
+        "layer_count": 15
+      }
+    },
+    {
+      "name": "5. Multi-Agent Validation",
+      "passed": true,
+      "duration_ms": 0,
+      "output_files": [],
+      "errors": [],
+      "warnings": [
+        "Validation skipped by user request"
+      ],
+      "metrics": {}
+    },
+    {
+      "name": "6. Visual Validation",
+      "passed": true,
+      "duration_ms": 0,
+      "output_files": [],
+      "errors": [],
+      "warnings": [
+        "Visual validation skipped by user request"
+      ],
+      "metrics": {}
+    }
+  ],
+  "summary": {
+    "total_stages": 6,
+    "passed_stages": 6,
+    "total_duration_ms": 7215
+  }
+}
