@@ -4,19 +4,19 @@
  */
 
 import * as esbuild from 'esbuild';
-import { glob } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
 const srcDir = './src';
 const outDir = './dist';
 
-async function findFiles(pattern, dir) {
-  const matches = [];
-  const entries = await fs.promises.readdir(dir, { withFileTypes: true, recursive: true });
+async function findFilesRecursive(dir, matches = []) {
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.spec.ts')) {
-      const fullPath = path.join(entry.parentPath || entry.path, entry.name);
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await findFilesRecursive(fullPath, matches);
+    } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.spec.ts')) {
       matches.push(fullPath);
     }
   }
@@ -31,7 +31,7 @@ async function build() {
   await fs.promises.mkdir(outDir, { recursive: true });
 
   // Find all TypeScript files
-  const entryPoints = await findFiles('**/*.ts', srcDir);
+  const entryPoints = await findFilesRecursive(srcDir);
   console.log(`Found ${entryPoints.length} TypeScript files`);
 
   try {
