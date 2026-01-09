@@ -1,19 +1,94 @@
 /**
  * EE Design Partner - API Routes
  *
- * REST API endpoints for all phases of hardware/software development
+ * REST API endpoints for all phases of hardware/software development.
+ * Uses real repository implementations for database operations.
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 import multer from 'multer';
 import { z } from 'zod';
+import fs from 'fs/promises';
+import path from 'path';
 
-import { ValidationError } from '../utils/errors.js';
+import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
+
+// Repository imports
+import {
+  create as createProject,
+  findById as findProjectById,
+  findAll as findAllProjects,
+  update as updateProject,
+  deleteProject,
+  updateStatus as updateProjectStatus,
+  updatePhase as updateProjectPhase,
+  getPhases as getProjectPhases,
+  count as countProjects,
+  type CreateProjectInput,
+  type UpdateProjectInput,
+  type ProjectFilters,
+} from '../database/repositories/project-repository.js';
+
+import {
+  create as createSchematic,
+  findById as findSchematicById,
+  findByProject as findSchematicsByProject,
+  update as updateSchematic,
+  updateKicadContent as updateSchematicKicadContent,
+  updateValidation as updateSchematicValidation,
+  deleteSchematic,
+  type CreateSchematicInput,
+} from '../database/repositories/schematic-repository.js';
+
+import {
+  create as createPCBLayout,
+  findById as findPCBLayoutById,
+  findByProject as findPCBLayoutsByProject,
+  update as updatePCBLayout,
+  updateDrcResults,
+  updateMaposConfig,
+  getMaposIterations,
+  updateScores as updatePCBScores,
+  type CreatePCBLayoutInput,
+  type DRCResults,
+} from '../database/repositories/pcb-repository.js';
+
+import {
+  create as createSimulation,
+  findById as findSimulationById,
+  findByProject as findSimulationsByProject,
+  updateStatus as updateSimulationStatus,
+  complete as completeSimulation,
+  fail as failSimulation,
+  type CreateSimulationInput,
+  type SimulationFilters,
+} from '../database/repositories/simulation-repository.js';
+
+import {
+  create as createFirmware,
+  findById as findFirmwareById,
+  findByProject as findFirmwareByProject,
+  update as updateFirmware,
+  updateSourceFiles as updateFirmwareSourceFiles,
+  type CreateFirmwareInput,
+} from '../database/repositories/firmware-repository.js';
+
+// Configuration imports
+import {
+  PROJECT_TYPE_CONFIGURATIONS,
+  getAllProjectTypeSummaries,
+  getProjectTypeConfiguration,
+  getEnabledSimulations,
+  getEnabledLayoutAgents,
+} from '../config/project-type-configs.js';
+
+import { ProjectType } from '../types/project-types.js';
+import type { MCUFamily, SimulationType, ProjectPhase } from '../types/index.js';
 
 // File upload configuration
 const upload = multer({
@@ -28,6 +103,109 @@ const upload = multer({
     fileSize: config.storage.maxUploadSize,
   },
 });
+
+// MCU Families configuration
+const MCU_FAMILIES: Array<{
+  family: MCUFamily;
+  displayName: string;
+  description: string;
+  supportedRtos: string[];
+  toolchains: string[];
+}> = [
+  {
+    family: 'stm32',
+    displayName: 'STM32',
+    description: 'STMicroelectronics ARM Cortex-M and Cortex-A microcontrollers',
+    supportedRtos: ['freertos', 'zephyr', 'tirtos', 'none'],
+    toolchains: ['gcc-arm', 'armcc', 'iar'],
+  },
+  {
+    family: 'esp32',
+    displayName: 'ESP32',
+    description: 'Espressif ESP32/ESP32-S/ESP32-C series with WiFi and Bluetooth',
+    supportedRtos: ['freertos', 'none'],
+    toolchains: ['gcc-xtensa', 'gcc-riscv'],
+  },
+  {
+    family: 'ti_tms320',
+    displayName: 'TI TMS320',
+    description: 'Texas Instruments DSPs for motor control and signal processing',
+    supportedRtos: ['tirtos', 'freertos', 'none'],
+    toolchains: ['ti-cgt'],
+  },
+  {
+    family: 'infineon_aurix',
+    displayName: 'Infineon AURIX',
+    description: 'Infineon AURIX TriCore safety MCUs for automotive applications',
+    supportedRtos: ['autosar', 'freertos', 'none'],
+    toolchains: ['tasking', 'gcc-tricore', 'hightec'],
+  },
+  {
+    family: 'nordic_nrf',
+    displayName: 'Nordic nRF',
+    description: 'Nordic Semiconductor BLE and wireless SoCs',
+    supportedRtos: ['zephyr', 'freertos', 'none'],
+    toolchains: ['gcc-arm'],
+  },
+  {
+    family: 'rpi_pico',
+    displayName: 'Raspberry Pi Pico',
+    description: 'RP2040-based microcontroller boards',
+    supportedRtos: ['freertos', 'none'],
+    toolchains: ['gcc-arm'],
+  },
+  {
+    family: 'nxp_imxrt',
+    displayName: 'NXP i.MX RT',
+    description: 'NXP crossover processors with real-time capabilities',
+    supportedRtos: ['freertos', 'zephyr', 'none'],
+    toolchains: ['gcc-arm', 'mcuxpresso'],
+  },
+];
+
+// Layout agents configuration
+const LAYOUT_AGENTS = [
+  {
+    id: 'conservative',
+    name: 'Conservative',
+    strategy: 'conservative',
+    description: 'Prioritizes reliability and manufacturability with generous spacing',
+    priority: ['reliability', 'dfm', 'cost'],
+    bestFor: ['High-power', 'Industrial', 'Automotive'],
+  },
+  {
+    id: 'aggressive_compact',
+    name: 'Aggressive Compact',
+    strategy: 'aggressive_compact',
+    description: 'Maximizes component density for space-constrained designs',
+    priority: ['size', 'cost', 'manufacturability'],
+    bestFor: ['Consumer electronics', 'Space-constrained', 'Wearables'],
+  },
+  {
+    id: 'thermal_optimized',
+    name: 'Thermal Optimized',
+    strategy: 'thermal_optimized',
+    description: 'Prioritizes thermal performance with strategic heat spreading',
+    priority: ['thermal', 'reliability', 'size'],
+    bestFor: ['Power electronics', 'Motor controllers', 'High-power LEDs'],
+  },
+  {
+    id: 'emi_optimized',
+    name: 'EMI Optimized',
+    strategy: 'emi_optimized',
+    description: 'Minimizes electromagnetic interference with careful routing',
+    priority: ['signal_integrity', 'emi', 'size'],
+    bestFor: ['High-speed digital', 'RF', 'Mixed-signal', 'Sensitive analog'],
+  },
+  {
+    id: 'dfm_optimized',
+    name: 'DFM Optimized',
+    strategy: 'dfm_optimized',
+    description: 'Prioritizes ease of manufacturing and assembly yield',
+    priority: ['manufacturability', 'cost', 'size'],
+    bestFor: ['High-volume production', 'Cost-sensitive'],
+  },
+];
 
 // Validation middleware factory
 function validate<T>(schema: z.ZodSchema<T>) {
@@ -48,20 +226,254 @@ function validate<T>(schema: z.ZodSchema<T>) {
   };
 }
 
+// Helper to get default owner ID (in production, this would come from auth)
+function getDefaultOwnerId(req: Request): string {
+  return (req.headers['x-user-id'] as string) || 'system';
+}
+
 export function createApiRoutes(io: SocketIOServer): Router {
   const router = Router();
+
+  // ============================================================================
+  // Configuration Endpoints
+  // ============================================================================
+
+  router.get('/project-types', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all project types');
+      const summaries = getAllProjectTypeSummaries();
+
+      res.json({
+        success: true,
+        data: summaries,
+        metadata: { count: summaries.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/project-types/:type', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectType = req.params.type as ProjectType;
+      log.debug('Getting project type configuration', { type: projectType });
+
+      const configuration = getProjectTypeConfiguration(projectType);
+
+      res.json({
+        success: true,
+        data: configuration,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Unknown project type')) {
+        next(new NotFoundError('ProjectType', req.params.type, { operation: 'getProjectTypeConfiguration' }));
+      } else {
+        next(error);
+      }
+    }
+  });
+
+  router.get('/mcu-families', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting MCU families');
+
+      res.json({
+        success: true,
+        data: MCU_FAMILIES,
+        metadata: { count: MCU_FAMILIES.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/simulation-types', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all simulation types');
+
+      // Collect all unique simulation types from all project configurations
+      const allSimulations = new Map<string, { type: SimulationType; displayName: string; description?: string }>();
+
+      for (const config of Object.values(PROJECT_TYPE_CONFIGURATIONS)) {
+        for (const sim of config.simulations) {
+          if (!allSimulations.has(sim.type)) {
+            allSimulations.set(sim.type, {
+              type: sim.type,
+              displayName: sim.displayName,
+            });
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        data: Array.from(allSimulations.values()),
+        metadata: { count: allSimulations.size },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/simulation-types/:projectType', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectType = req.params.projectType as ProjectType;
+      log.debug('Getting simulation types for project type', { type: projectType });
+
+      const simulations = getEnabledSimulations(projectType);
+
+      res.json({
+        success: true,
+        data: simulations,
+        metadata: { count: simulations.length, projectType },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Unknown project type')) {
+        next(new NotFoundError('ProjectType', req.params.projectType, { operation: 'getSimulationTypes' }));
+      } else {
+        next(error);
+      }
+    }
+  });
+
+  router.get('/validation-domains', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all validation domains');
+
+      // Collect all unique validation types from all project configurations
+      const allValidations = new Map<string, { type: string; displayName: string; required: boolean }>();
+
+      for (const config of Object.values(PROJECT_TYPE_CONFIGURATIONS)) {
+        for (const val of config.validations) {
+          if (!allValidations.has(val.type)) {
+            allValidations.set(val.type, {
+              type: val.type,
+              displayName: val.displayName,
+              required: val.required,
+            });
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        data: Array.from(allValidations.values()),
+        metadata: { count: allValidations.size },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/validation-domains/:projectType', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectType = req.params.projectType as ProjectType;
+      log.debug('Getting validation domains for project type', { type: projectType });
+
+      const configuration = getProjectTypeConfiguration(projectType);
+
+      res.json({
+        success: true,
+        data: configuration.validations,
+        metadata: { count: configuration.validations.length, projectType },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Unknown project type')) {
+        next(new NotFoundError('ProjectType', req.params.projectType, { operation: 'getValidationDomains' }));
+      } else {
+        next(error);
+      }
+    }
+  });
+
+  router.get('/layout-agents', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all layout agents');
+
+      res.json({
+        success: true,
+        data: LAYOUT_AGENTS,
+        metadata: { count: LAYOUT_AGENTS.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/layout-agents/:projectType', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectType = req.params.projectType as ProjectType;
+      log.debug('Getting layout agents for project type', { type: projectType });
+
+      const agents = getEnabledLayoutAgents(projectType);
+
+      res.json({
+        success: true,
+        data: agents.map(agent => ({
+          id: agent.strategy,
+          name: agent.displayName,
+          strategy: agent.strategy,
+          description: agent.description,
+          enabled: agent.enabled,
+          priorityWeight: agent.priorityWeight,
+          parameters: agent.parameters,
+        })),
+        metadata: { count: agents.length, projectType },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Unknown project type')) {
+        next(new NotFoundError('ProjectType', req.params.projectType, { operation: 'getLayoutAgents' }));
+      } else {
+        next(error);
+      }
+    }
+  });
 
   // ============================================================================
   // Project Management
   // ============================================================================
 
-  router.get('/projects', async (_req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Implement project listing
+      const filters: ProjectFilters = {};
+
+      // Parse query parameters
+      if (req.query.type) filters.type = req.query.type as string;
+      if (req.query.status) filters.status = req.query.status as ProjectFilters['status'];
+      if (req.query.phase) filters.phase = req.query.phase as ProjectPhase;
+      if (req.query.ownerId) filters.ownerId = req.query.ownerId as string;
+      if (req.query.organizationId) filters.organizationId = req.query.organizationId as string;
+
+      // Pagination
+      const page = parseInt(req.query.page as string, 10) || 1;
+      const pageSize = Math.min(parseInt(req.query.pageSize as string, 10) || 20, 100);
+      filters.limit = pageSize;
+      filters.offset = (page - 1) * pageSize;
+
+      log.debug('Listing projects', { filters, page, pageSize });
+
+      // Create count filters without limit/offset
+      const countFilters: ProjectFilters = {};
+      if (filters.type) countFilters.type = filters.type;
+      if (filters.status) countFilters.status = filters.status;
+      if (filters.phase) countFilters.phase = filters.phase;
+      if (filters.ownerId) countFilters.ownerId = filters.ownerId;
+      if (filters.organizationId) countFilters.organizationId = filters.organizationId;
+
+      const [projects, total] = await Promise.all([
+        findAllProjects(filters),
+        countProjects(countFilters),
+      ]);
+
       res.json({
         success: true,
-        data: [],
-        metadata: { total: 0, page: 1, pageSize: 20 },
+        data: projects,
+        metadata: {
+          total,
+          page,
+          pageSize,
+          totalPages: Math.ceil(total / pageSize),
+        },
       });
     } catch (error) {
       next(error);
@@ -72,19 +484,55 @@ export function createApiRoutes(io: SocketIOServer): Router {
     name: z.string().min(1).max(255),
     description: z.string().optional(),
     repositoryUrl: z.string().url().optional(),
+    projectType: z.nativeEnum(ProjectType).optional(),
+    organizationId: z.string().uuid().optional(),
+    collaborators: z.array(z.string()).optional(),
+    metadata: z.object({
+      tags: z.array(z.string()).optional(),
+      priority: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+    }).optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Implement project creation
-      log.info('Creating project', { name: req.body.name });
+      const ownerId = getDefaultOwnerId(req);
+
+      log.info('Creating project', { name: req.body.name, ownerId, projectType: req.body.projectType });
+
+      // Get default configuration for project type if specified
+      let phaseConfig: Record<string, unknown> | undefined;
+      if (req.body.projectType) {
+        try {
+          const typeConfig = getProjectTypeConfiguration(req.body.projectType);
+          phaseConfig = {
+            enabledPhases: typeConfig.phases.filter(p => p.enabledByDefault).map(p => p.phase),
+            enabledSimulations: typeConfig.simulations.filter(s => s.enabledByDefault).map(s => s.type),
+            enabledValidations: typeConfig.validations.filter(v => v.enabledByDefault).map(v => v.type),
+          };
+        } catch {
+          // Use default if project type is invalid
+          log.warn('Invalid project type, using defaults', { projectType: req.body.projectType });
+        }
+      }
+
+      const input: CreateProjectInput = {
+        name: req.body.name,
+        description: req.body.description,
+        repositoryUrl: req.body.repositoryUrl,
+        projectType: req.body.projectType || 'hardware',
+        ownerId,
+        organizationId: req.body.organizationId,
+        collaborators: req.body.collaborators,
+        metadata: req.body.metadata,
+        phaseConfig,
+      };
+
+      const project = await createProject(input);
+
+      // Emit project created event
+      io.emit('project:created', { project });
+
       res.status(201).json({
         success: true,
-        data: {
-          id: crypto.randomUUID(),
-          ...req.body,
-          phase: 'ideation',
-          status: 'draft',
-          createdAt: new Date().toISOString(),
-        },
+        data: project,
       });
     } catch (error) {
       next(error);
@@ -93,10 +541,144 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.get('/projects/:projectId', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Implement project retrieval
+      const projectId = req.params.projectId;
+      log.debug('Getting project', { projectId });
+
+      const project = await findProjectById(projectId);
+
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getProject' });
+      }
+
       res.json({
         success: true,
-        data: { id: req.params.projectId },
+        data: project,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.put('/projects/:projectId', validate(z.object({
+    name: z.string().min(1).max(255).optional(),
+    description: z.string().optional(),
+    repositoryUrl: z.string().url().optional().nullable(),
+    projectType: z.string().optional(),
+    collaborators: z.array(z.string()).optional(),
+    metadata: z.object({
+      tags: z.array(z.string()).optional(),
+      priority: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+    }).optional(),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.info('Updating project', { projectId, fields: Object.keys(req.body) });
+
+      const updateData: UpdateProjectInput = {};
+
+      if (req.body.name !== undefined) updateData.name = req.body.name;
+      if (req.body.description !== undefined) updateData.description = req.body.description;
+      if (req.body.repositoryUrl !== undefined) updateData.repositoryUrl = req.body.repositoryUrl;
+      if (req.body.projectType !== undefined) updateData.projectType = req.body.projectType;
+      if (req.body.collaborators !== undefined) updateData.collaborators = req.body.collaborators;
+      if (req.body.metadata !== undefined) updateData.metadata = req.body.metadata;
+
+      const project = await updateProject(projectId, updateData);
+
+      // Emit project updated event
+      io.to(`project:${projectId}`).emit('project:updated', { project });
+
+      res.json({
+        success: true,
+        data: project,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/projects/:projectId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.info('Deleting project', { projectId });
+
+      await deleteProject(projectId);
+
+      // Emit project deleted event
+      io.emit('project:deleted', { projectId });
+
+      res.json({
+        success: true,
+        data: { id: projectId, deleted: true },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/projects/:projectId/status', validate(z.object({
+    status: z.enum(['draft', 'in_progress', 'review', 'approved', 'completed', 'on_hold', 'cancelled']),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.info('Updating project status', { projectId, status: req.body.status });
+
+      const project = await updateProjectStatus(projectId, req.body.status);
+
+      io.to(`project:${projectId}`).emit('project:status-changed', {
+        projectId,
+        status: req.body.status,
+        project,
+      });
+
+      res.json({
+        success: true,
+        data: project,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/projects/:projectId/phase', validate(z.object({
+    phase: z.enum([
+      'ideation', 'architecture', 'schematic', 'simulation',
+      'pcb_layout', 'manufacturing', 'firmware', 'testing',
+      'production', 'field_support'
+    ]),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.info('Updating project phase', { projectId, phase: req.body.phase });
+
+      const project = await updateProjectPhase(projectId, req.body.phase);
+
+      io.to(`project:${projectId}`).emit('project:phase-changed', {
+        projectId,
+        phase: req.body.phase,
+        project,
+      });
+
+      res.json({
+        success: true,
+        data: project,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/projects/:projectId/phases', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.debug('Getting project phases', { projectId });
+
+      const phases = await getProjectPhases(projectId);
+
+      res.json({
+        success: true,
+        data: phases,
+        metadata: { count: phases.length, projectId },
       });
     } catch (error) {
       next(error);
@@ -113,14 +695,31 @@ export function createApiRoutes(io: SocketIOServer): Router {
     targetSpecs: z.record(z.unknown()).optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating requirements', { projectId: req.params.projectId });
-      // TODO: Call requirements generation service
-      res.json({
+      const projectId = req.params.projectId;
+      log.info('Generating requirements', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateRequirements' });
+      }
+
+      // Queue requirements generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('requirements:started', {
+        jobId,
+        projectId,
+        description: req.body.description,
+      });
+
+      res.status(202).json({
         success: true,
         data: {
-          projectId: req.params.projectId,
-          requirements: [],
+          jobId,
+          projectId,
           status: 'pending',
+          description: req.body.description,
         },
       });
     } catch (error) {
@@ -133,11 +732,33 @@ export function createApiRoutes(io: SocketIOServer): Router {
     jurisdictions: z.array(z.enum(['USPTO', 'EPO', 'WIPO', 'JPO'])).optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Searching patents', { projectId: req.params.projectId, query: req.body.query });
-      // TODO: Call patent search service
-      res.json({
+      const projectId = req.params.projectId;
+      log.info('Searching patents', { projectId, query: req.body.query });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'patentSearch' });
+      }
+
+      // Queue patent search job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('patent-search:started', {
+        jobId,
+        projectId,
+        query: req.body.query,
+        jurisdictions: req.body.jurisdictions || ['USPTO', 'EPO', 'WIPO'],
+      });
+
+      res.status(202).json({
         success: true,
-        data: { results: [], count: 0 },
+        data: {
+          jobId,
+          projectId,
+          status: 'pending',
+          query: req.body.query,
+        },
       });
     } catch (error) {
       next(error);
@@ -154,14 +775,29 @@ export function createApiRoutes(io: SocketIOServer): Router {
     powerBudget: z.number().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating architecture', { projectId: req.params.projectId });
-      // TODO: Call architecture generation service
-      res.json({
+      const projectId = req.params.projectId;
+      log.info('Generating architecture', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateArchitecture' });
+      }
+
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('architecture:started', {
+        jobId,
+        projectId,
+        requirements: req.body.requirements,
+      });
+
+      res.status(202).json({
         success: true,
         data: {
-          blockDiagram: null,
-          componentList: [],
-          powerDistribution: null,
+          jobId,
+          projectId,
+          status: 'pending',
         },
       });
     } catch (error) {
@@ -176,11 +812,31 @@ export function createApiRoutes(io: SocketIOServer): Router {
     maxCost: z.number().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Selecting components', { projectId: req.params.projectId, category: req.body.category });
-      // TODO: Call component selection service with Digi-Key/Mouser APIs
-      res.json({
+      const projectId = req.params.projectId;
+      log.info('Selecting components', { projectId, category: req.body.category });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'componentSelection' });
+      }
+
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('component-selection:started', {
+        jobId,
+        projectId,
+        category: req.body.category,
+      });
+
+      res.status(202).json({
         success: true,
-        data: { components: [], alternatives: [] },
+        data: {
+          jobId,
+          projectId,
+          status: 'pending',
+          category: req.body.category,
+        },
       });
     } catch (error) {
       next(error);
@@ -189,13 +845,43 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.get('/projects/:projectId/bom', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Generate/retrieve BOM
+      const projectId = req.params.projectId;
+      log.debug('Getting BOM', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getBom' });
+      }
+
+      // Get latest schematic to extract BOM
+      const schematics = await findSchematicsByProject(projectId);
+
+      if (schematics.length === 0) {
+        res.json({
+          success: true,
+          data: {
+            components: [],
+            totalCost: 0,
+            currency: 'USD',
+            message: 'No schematics found for this project',
+          },
+        });
+        return;
+      }
+
+      // Extract components from latest schematic
+      const latestSchematic = schematics[0];
+      const components = latestSchematic.components || [];
+
       res.json({
         success: true,
         data: {
-          components: [],
-          totalCost: 0,
+          components,
+          totalCost: 0, // Would be calculated from pricing data
           currency: 'USD',
+          schematicId: latestSchematic.id,
+          schematicVersion: latestSchematic.version,
         },
       });
     } catch (error) {
@@ -210,15 +896,39 @@ export function createApiRoutes(io: SocketIOServer): Router {
   router.post('/projects/:projectId/schematic/generate', validate(z.object({
     architecture: z.record(z.unknown()),
     components: z.array(z.unknown()),
+    name: z.string().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating schematic', { projectId: req.params.projectId });
-      // TODO: Call schematic generation service
-      res.json({
+      const projectId = req.params.projectId;
+      log.info('Generating schematic', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateSchematic' });
+      }
+
+      // Create schematic record
+      const schematicInput: CreateSchematicInput = {
+        projectId,
+        name: req.body.name || `${project.name} Schematic`,
+        format: 'kicad_sch',
+      };
+
+      const schematic = await createSchematic(schematicInput);
+
+      // Queue schematic generation job
+      io.to(`project:${projectId}`).emit('schematic:generation-started', {
+        schematicId: schematic.id,
+        projectId,
+      });
+
+      res.status(202).json({
         success: true,
         data: {
-          schematicId: crypto.randomUUID(),
+          schematicId: schematic.id,
           status: 'pending',
+          projectId,
         },
       });
     } catch (error) {
@@ -230,20 +940,55 @@ export function createApiRoutes(io: SocketIOServer): Router {
     upload.single('schematic'),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const projectId = req.params.projectId;
+
         if (!req.file) {
           throw new ValidationError('No schematic file provided', { operation: 'schematic-upload' });
         }
+
         log.info('Uploading schematic', {
-          projectId: req.params.projectId,
+          projectId,
+          filename: req.file.originalname,
+          size: req.file.size,
+        });
+
+        // Verify project exists
+        const project = await findProjectById(projectId);
+        if (!project) {
+          throw new NotFoundError('Project', projectId, { operation: 'uploadSchematic' });
+        }
+
+        // Read file content
+        const filePath = req.file.path;
+        const kicadContent = await fs.readFile(filePath, 'utf-8');
+
+        // Create schematic record
+        const schematicInput: CreateSchematicInput = {
+          projectId,
+          name: path.basename(req.file.originalname, path.extname(req.file.originalname)),
+          format: 'kicad_sch',
+          filePath: req.file.path,
+          kicadSch: kicadContent,
+        };
+
+        const schematic = await createSchematic(schematicInput);
+
+        // Clean up temp file
+        await fs.unlink(filePath).catch(() => {});
+
+        io.to(`project:${projectId}`).emit('schematic:uploaded', {
+          schematicId: schematic.id,
+          projectId,
           filename: req.file.originalname,
         });
-        // TODO: Process uploaded schematic
+
         res.json({
           success: true,
           data: {
-            schematicId: crypto.randomUUID(),
+            schematicId: schematic.id,
             filename: req.file.originalname,
             status: 'processing',
+            projectId,
           },
         });
       } catch (error) {
@@ -252,15 +997,51 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }
   );
 
-  router.get('/projects/:projectId/schematic/:schematicId', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/schematics', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Retrieve schematic
+      const projectId = req.params.projectId;
+      log.debug('Getting project schematics', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getSchematics' });
+      }
+
+      const schematics = await findSchematicsByProject(projectId);
+
       res.json({
         success: true,
-        data: {
-          id: req.params.schematicId,
-          projectId: req.params.projectId,
-        },
+        data: schematics,
+        metadata: { count: schematics.length, projectId },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/projects/:projectId/schematic/:schematicId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, schematicId } = req.params;
+      log.debug('Getting schematic', { projectId, schematicId });
+
+      const schematic = await findSchematicById(schematicId);
+
+      if (!schematic) {
+        throw new NotFoundError('Schematic', schematicId, { operation: 'getSchematic' });
+      }
+
+      if (schematic.projectId !== projectId) {
+        throw new ValidationError('Schematic does not belong to this project', {
+          operation: 'getSchematic',
+          schematicId,
+          projectId,
+        });
+      }
+
+      res.json({
+        success: true,
+        data: schematic,
       });
     } catch (error) {
       next(error);
@@ -269,18 +1050,75 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.post('/projects/:projectId/schematic/:schematicId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Validating schematic', {
-        projectId: req.params.projectId,
-        schematicId: req.params.schematicId,
+      const { projectId, schematicId } = req.params;
+      log.info('Validating schematic', { projectId, schematicId });
+
+      const schematic = await findSchematicById(schematicId);
+
+      if (!schematic) {
+        throw new NotFoundError('Schematic', schematicId, { operation: 'validateSchematic' });
+      }
+
+      if (schematic.projectId !== projectId) {
+        throw new ValidationError('Schematic does not belong to this project', {
+          operation: 'validateSchematic',
+          schematicId,
+          projectId,
+        });
+      }
+
+      // Queue ERC validation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('schematic:validation-started', {
+        jobId,
+        schematicId,
+        projectId,
       });
-      // TODO: Run ERC validation
-      res.json({
+
+      res.status(202).json({
         success: true,
         data: {
-          passed: true,
-          violations: [],
-          warnings: [],
+          jobId,
+          schematicId,
+          projectId,
+          status: 'pending',
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/projects/:projectId/schematic/:schematicId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, schematicId } = req.params;
+      log.info('Deleting schematic', { projectId, schematicId });
+
+      const schematic = await findSchematicById(schematicId);
+
+      if (!schematic) {
+        throw new NotFoundError('Schematic', schematicId, { operation: 'deleteSchematic' });
+      }
+
+      if (schematic.projectId !== projectId) {
+        throw new ValidationError('Schematic does not belong to this project', {
+          operation: 'deleteSchematic',
+          schematicId,
+          projectId,
+        });
+      }
+
+      await deleteSchematic(schematicId);
+
+      io.to(`project:${projectId}`).emit('schematic:deleted', {
+        schematicId,
+        projectId,
+      });
+
+      res.json({
+        success: true,
+        data: { id: schematicId, deleted: true },
       });
     } catch (error) {
       next(error);
@@ -291,33 +1129,55 @@ export function createApiRoutes(io: SocketIOServer): Router {
   // Phase 4: Simulation Suite
   // ============================================================================
 
-  router.post('/projects/:projectId/simulation/spice', validate(z.object({
-    schematicId: z.string().uuid(),
-    analysisType: z.enum(['dc', 'ac', 'transient', 'noise', 'monte_carlo']),
+  router.post('/projects/:projectId/simulation/:type', validate(z.object({
+    name: z.string().optional(),
+    schematicId: z.string().uuid().optional(),
+    pcbLayoutId: z.string().uuid().optional(),
+    analysisType: z.string().optional(),
     parameters: z.record(z.unknown()).optional(),
+    priority: z.number().min(1).max(10).optional(),
+    timeoutMs: z.number().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const simulationId = crypto.randomUUID();
-      log.info('Starting SPICE simulation', {
-        projectId: req.params.projectId,
-        simulationId,
-        type: req.body.analysisType,
-      });
+      const { projectId, type } = req.params;
+      const simulationType = type as SimulationType;
+
+      log.info('Creating simulation', { projectId, type: simulationType });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'createSimulation' });
+      }
+
+      // Create simulation record
+      const simulationInput: CreateSimulationInput = {
+        projectId,
+        name: req.body.name || `${simulationType} Simulation`,
+        simulationType,
+        schematicId: req.body.schematicId,
+        pcbLayoutId: req.body.pcbLayoutId,
+        parameters: req.body.parameters,
+        priority: req.body.priority,
+        timeoutMs: req.body.timeoutMs,
+      };
+
+      const simulation = await createSimulation(simulationInput);
 
       // Emit simulation started event
-      io.to(`project:${req.params.projectId}`).emit('simulation:started', {
-        simulationId,
-        type: 'spice',
-        analysisType: req.body.analysisType,
+      io.to(`project:${projectId}`).emit('simulation:started', {
+        simulationId: simulation.id,
+        type: simulationType,
+        projectId,
       });
 
-      // TODO: Start SPICE simulation
       res.status(202).json({
         success: true,
         data: {
-          simulationId,
+          simulationId: simulation.id,
           status: 'pending',
-          type: `spice_${req.body.analysisType}`,
+          type: simulationType,
+          projectId,
         },
       });
     } catch (error) {
@@ -325,82 +1185,30 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }
   });
 
-  router.post('/projects/:projectId/simulation/thermal', validate(z.object({
-    pcbLayoutId: z.string().uuid(),
-    analysisType: z.enum(['steady_state', 'transient', 'cfd']),
-    ambientTemp: z.number().default(25),
-    powerDissipation: z.record(z.number()).optional(),
-  })), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/simulations', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const simulationId = crypto.randomUUID();
-      log.info('Starting thermal simulation', {
-        projectId: req.params.projectId,
-        simulationId,
-        type: req.body.analysisType,
-      });
-      // TODO: Start thermal simulation (OpenFOAM/Elmer)
-      res.status(202).json({
-        success: true,
-        data: {
-          simulationId,
-          status: 'pending',
-          type: `thermal_${req.body.analysisType}`,
-        },
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
+      const projectId = req.params.projectId;
+      log.debug('Getting project simulations', { projectId });
 
-  router.post('/projects/:projectId/simulation/signal-integrity', validate(z.object({
-    pcbLayoutId: z.string().uuid(),
-    nets: z.array(z.string()).optional(),
-    analysisType: z.enum(['impedance', 'crosstalk', 'eye_diagram', 's_parameters']),
-  })), async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const simulationId = crypto.randomUUID();
-      log.info('Starting signal integrity simulation', {
-        projectId: req.params.projectId,
-        simulationId,
-        type: req.body.analysisType,
-      });
-      // TODO: Start SI simulation
-      res.status(202).json({
-        success: true,
-        data: {
-          simulationId,
-          status: 'pending',
-          type: `signal_integrity_${req.body.analysisType}`,
-        },
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getSimulations' });
+      }
 
-  router.post('/projects/:projectId/simulation/rf-emc', validate(z.object({
-    pcbLayoutId: z.string().uuid(),
-    analysisType: z.enum(['radiated_emissions', 'conducted_emissions', 'field_pattern', 's_parameters']),
-    frequencyRange: z.object({
-      min: z.number(),
-      max: z.number(),
-    }).optional(),
-  })), async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const simulationId = crypto.randomUUID();
-      log.info('Starting RF/EMC simulation', {
-        projectId: req.params.projectId,
-        simulationId,
-        type: req.body.analysisType,
-      });
-      // TODO: Start openEMS simulation
-      res.status(202).json({
+      // Build filters from query params
+      const filters: SimulationFilters = {};
+      if (req.query.type) filters.type = req.query.type as SimulationType;
+      if (req.query.status) filters.status = req.query.status as SimulationFilters['status'];
+      if (req.query.schematicId) filters.schematicId = req.query.schematicId as string;
+      if (req.query.pcbLayoutId) filters.pcbLayoutId = req.query.pcbLayoutId as string;
+
+      const simulations = await findSimulationsByProject(projectId, filters);
+
+      res.json({
         success: true,
-        data: {
-          simulationId,
-          status: 'pending',
-          type: `rf_emc_${req.body.analysisType}`,
-        },
+        data: simulations,
+        metadata: { count: simulations.length, projectId },
       });
     } catch (error) {
       next(error);
@@ -409,14 +1217,61 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.get('/projects/:projectId/simulation/:simulationId', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Get simulation status and results
+      const { projectId, simulationId } = req.params;
+      log.debug('Getting simulation', { projectId, simulationId });
+
+      const simulation = await findSimulationById(simulationId);
+
+      if (!simulation) {
+        throw new NotFoundError('Simulation', simulationId, { operation: 'getSimulation' });
+      }
+
+      if (simulation.projectId !== projectId) {
+        throw new ValidationError('Simulation does not belong to this project', {
+          operation: 'getSimulation',
+          simulationId,
+          projectId,
+        });
+      }
+
       res.json({
         success: true,
-        data: {
-          id: req.params.simulationId,
-          status: 'completed',
-          results: null,
-        },
+        data: simulation,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/projects/:projectId/simulation/:simulationId/cancel', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, simulationId } = req.params;
+      log.info('Cancelling simulation', { projectId, simulationId });
+
+      const simulation = await findSimulationById(simulationId);
+
+      if (!simulation) {
+        throw new NotFoundError('Simulation', simulationId, { operation: 'cancelSimulation' });
+      }
+
+      if (simulation.projectId !== projectId) {
+        throw new ValidationError('Simulation does not belong to this project', {
+          operation: 'cancelSimulation',
+          simulationId,
+          projectId,
+        });
+      }
+
+      const updated = await updateSimulationStatus(simulationId, 'cancelled');
+
+      io.to(`project:${projectId}`).emit('simulation:cancelled', {
+        simulationId,
+        projectId,
+      });
+
+      res.json({
+        success: true,
+        data: updated,
       });
     } catch (error) {
       next(error);
@@ -429,6 +1284,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.post('/projects/:projectId/pcb-layout/generate', validate(z.object({
     schematicId: z.string().uuid(),
+    name: z.string().optional(),
     boardConstraints: z.object({
       width: z.number().positive(),
       height: z.number().positive(),
@@ -445,28 +1301,86 @@ export function createApiRoutes(io: SocketIOServer): Router {
     targetScore: z.number().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const layoutId = crypto.randomUUID();
-      log.info('Starting PCB layout generation', {
-        projectId: req.params.projectId,
-        layoutId,
-        agents: req.body.agents,
-      });
+      const projectId = req.params.projectId;
+      log.info('Starting PCB layout generation', { projectId, schematicId: req.body.schematicId });
 
-      // Emit layout generation started
-      io.to(`project:${req.params.projectId}`).emit('layout:started', {
-        layoutId,
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generatePcbLayout' });
+      }
+
+      // Verify schematic exists
+      const schematic = await findSchematicById(req.body.schematicId);
+      if (!schematic) {
+        throw new NotFoundError('Schematic', req.body.schematicId, { operation: 'generatePcbLayout' });
+      }
+
+      // Create PCB layout record
+      const layoutInput: CreatePCBLayoutInput = {
+        projectId,
+        schematicId: req.body.schematicId,
+        name: req.body.name || `${project.name} PCB`,
+        layerCount: req.body.boardConstraints.layers,
+        boardOutline: {
+          width: req.body.boardConstraints.width,
+          height: req.body.boardConstraints.height,
+          shape: 'rectangular',
+          keepoutZones: [],
+        },
+      };
+
+      const layout = await createPCBLayout(layoutInput);
+
+      // Store MAPOS configuration
+      const maposConfig = {
         agents: req.body.agents || config.layout.enabledAgents,
         maxIterations: req.body.maxIterations || config.layout.maxIterations,
+        targetScore: req.body.targetScore || config.layout.targetScore,
+        boardConstraints: req.body.boardConstraints,
+      };
+
+      await updateMaposConfig(layout.id, maposConfig);
+
+      // Emit layout generation started
+      io.to(`project:${projectId}`).emit('layout:started', {
+        layoutId: layout.id,
+        projectId,
+        ...maposConfig,
       });
 
-      // TODO: Start Ralph Loop tournament
       res.status(202).json({
         success: true,
         data: {
-          layoutId,
+          layoutId: layout.id,
           status: 'pending',
-          maxIterations: req.body.maxIterations || config.layout.maxIterations,
+          projectId,
+          maxIterations: maposConfig.maxIterations,
+          targetScore: maposConfig.targetScore,
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/projects/:projectId/pcb-layouts', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.debug('Getting project PCB layouts', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getPcbLayouts' });
+      }
+
+      const layouts = await findPCBLayoutsByProject(projectId);
+
+      res.json({
+        success: true,
+        data: layouts,
+        metadata: { count: layouts.length, projectId },
       });
     } catch (error) {
       next(error);
@@ -475,15 +1389,31 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.get('/projects/:projectId/pcb-layout/:layoutId', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // TODO: Get layout status and details
+      const { projectId, layoutId } = req.params;
+      log.debug('Getting PCB layout', { projectId, layoutId });
+
+      const layout = await findPCBLayoutById(layoutId);
+
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'getPcbLayout' });
+      }
+
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'getPcbLayout',
+          layoutId,
+          projectId,
+        });
+      }
+
+      // Get MAPOS iteration history
+      const iterations = await getMaposIterations(layoutId);
+
       res.json({
         success: true,
         data: {
-          id: req.params.layoutId,
-          projectId: req.params.projectId,
-          status: 'in_progress',
-          iteration: 0,
-          score: 0,
+          ...layout,
+          maposIterations: iterations,
         },
       });
     } catch (error) {
@@ -493,17 +1423,42 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.post('/projects/:projectId/pcb-layout/:layoutId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Validating PCB layout', {
-        projectId: req.params.projectId,
-        layoutId: req.params.layoutId,
+      const { projectId, layoutId } = req.params;
+      log.info('Validating PCB layout', { projectId, layoutId });
+
+      const layout = await findPCBLayoutById(layoutId);
+
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'validatePcbLayout' });
+      }
+
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'validatePcbLayout',
+          layoutId,
+          projectId,
+        });
+      }
+
+      // Queue DRC validation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('layout:validation-started', {
+        jobId,
+        layoutId,
+        projectId,
       });
-      // TODO: Run DRC/validation
-      res.json({
+
+      // Return current validation status if available
+      res.status(202).json({
         success: true,
         data: {
-          passed: true,
-          score: 95.5,
-          domains: [],
+          jobId,
+          layoutId,
+          projectId,
+          status: 'pending',
+          currentScore: layout.score,
+          validationResults: layout.validationResults,
         },
       });
     } catch (error) {
@@ -517,15 +1472,43 @@ export function createApiRoutes(io: SocketIOServer): Router {
     resolution: z.number().default(300),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Rendering PCB layers', {
-        projectId: req.params.projectId,
-        layoutId: req.params.layoutId,
+      const { projectId, layoutId } = req.params;
+      log.info('Rendering PCB layers', { projectId, layoutId, format: req.body.format });
+
+      const layout = await findPCBLayoutById(layoutId);
+
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'renderPcbLayout' });
+      }
+
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'renderPcbLayout',
+          layoutId,
+          projectId,
+        });
+      }
+
+      // Queue render job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('layout:render-started', {
+        jobId,
+        layoutId,
+        projectId,
         format: req.body.format,
+        layers: req.body.layers,
       });
-      // TODO: Render layer images
-      res.json({
+
+      res.status(202).json({
         success: true,
-        data: { images: [] },
+        data: {
+          jobId,
+          layoutId,
+          projectId,
+          status: 'pending',
+          format: req.body.format,
+        },
       });
     } catch (error) {
       next(error);
@@ -541,17 +1524,46 @@ export function createApiRoutes(io: SocketIOServer): Router {
     format: z.enum(['gerber_x2', 'rs274x']).default('gerber_x2'),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating Gerber files', {
-        projectId: req.params.projectId,
+      const projectId = req.params.projectId;
+      log.info('Generating Gerber files', { projectId, layoutId: req.body.layoutId, format: req.body.format });
+
+      // Verify project and layout exist
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateGerbers' });
+      }
+
+      const layout = await findPCBLayoutById(req.body.layoutId);
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', req.body.layoutId, { operation: 'generateGerbers' });
+      }
+
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'generateGerbers',
+          layoutId: req.body.layoutId,
+          projectId,
+        });
+      }
+
+      // Queue Gerber generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('gerbers:generation-started', {
+        jobId,
         layoutId: req.body.layoutId,
+        projectId,
         format: req.body.format,
       });
-      // TODO: Generate Gerbers
-      res.json({
+
+      res.status(202).json({
         success: true,
         data: {
-          files: [],
-          downloadUrl: null,
+          jobId,
+          layoutId: req.body.layoutId,
+          projectId,
+          status: 'pending',
+          format: req.body.format,
         },
       });
     } catch (error) {
@@ -571,17 +1583,40 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Getting manufacturing quote', {
-        projectId: req.params.projectId,
+      const projectId = req.params.projectId;
+      log.info('Getting manufacturing quote', { projectId, vendor: req.body.vendor, quantity: req.body.quantity });
+
+      // Verify project and layout exist
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getQuote' });
+      }
+
+      const layout = await findPCBLayoutById(req.body.layoutId);
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', req.body.layoutId, { operation: 'getQuote' });
+      }
+
+      // Queue quote request job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('quote:request-started', {
+        jobId,
+        layoutId: req.body.layoutId,
+        projectId,
         vendor: req.body.vendor,
         quantity: req.body.quantity,
       });
-      // TODO: Call vendor API
-      res.json({
+
+      res.status(202).json({
         success: true,
         data: {
-          quote: null,
-          estimatedLeadTime: 0,
+          jobId,
+          layoutId: req.body.layoutId,
+          projectId,
+          status: 'pending',
+          vendor: req.body.vendor,
+          quantity: req.body.quantity,
         },
       });
     } catch (error) {
@@ -602,16 +1637,33 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Placing manufacturing order', {
-        projectId: req.params.projectId,
+      const projectId = req.params.projectId;
+      log.info('Placing manufacturing order', { projectId, vendor: req.body.vendor });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'placeOrder' });
+      }
+
+      // Queue order placement job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('order:placement-started', {
+        jobId,
+        projectId,
         vendor: req.body.vendor,
+        quoteId: req.body.quoteId,
       });
-      // TODO: Place order via vendor API
-      res.json({
+
+      res.status(202).json({
         success: true,
         data: {
-          orderId: null,
+          jobId,
+          projectId,
           status: 'pending',
+          vendor: req.body.vendor,
+          quoteId: req.body.quoteId,
         },
       });
     } catch (error) {
@@ -624,29 +1676,121 @@ export function createApiRoutes(io: SocketIOServer): Router {
   // ============================================================================
 
   router.post('/projects/:projectId/firmware/generate', validate(z.object({
-    schematicId: z.string().uuid(),
+    schematicId: z.string().uuid().optional(),
+    pcbLayoutId: z.string().uuid().optional(),
+    name: z.string().optional(),
     targetMcu: z.object({
       family: z.enum(['stm32', 'esp32', 'ti_tms320', 'infineon_aurix', 'nordic_nrf', 'rpi_pico', 'nxp_imxrt']),
       part: z.string(),
+      core: z.string().optional(),
+      flashSize: z.number().optional(),
+      ramSize: z.number().optional(),
+      peripherals: z.array(z.string()).optional(),
     }),
     rtos: z.enum(['freertos', 'zephyr', 'tirtos', 'autosar', 'none']).optional(),
     features: z.array(z.string()).optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const firmwareId = crypto.randomUUID();
-      log.info('Generating firmware', {
-        projectId: req.params.projectId,
-        firmwareId,
+      const projectId = req.params.projectId;
+      log.info('Generating firmware', { projectId, mcuFamily: req.body.targetMcu.family });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateFirmware' });
+      }
+
+      // Create firmware project record
+      const firmwareInput: CreateFirmwareInput = {
+        projectId,
+        pcbLayoutId: req.body.pcbLayoutId,
+        name: req.body.name || `${project.name} Firmware`,
+        targetMcu: {
+          family: req.body.targetMcu.family,
+          part: req.body.targetMcu.part,
+          core: req.body.targetMcu.core || 'cortex-m4',
+          flashSize: req.body.targetMcu.flashSize || 512,
+          ramSize: req.body.targetMcu.ramSize || 128,
+          clockSpeed: req.body.targetMcu.clockSpeed || 168,
+          peripherals: req.body.targetMcu.peripherals || [],
+        },
+        rtosConfig: req.body.rtos && req.body.rtos !== 'none' ? {
+          type: req.body.rtos,
+          version: '10.4.3',
+          tickRate: 1000,
+          heapSize: 32768,
+          maxTasks: 16,
+        } : undefined,
+      };
+
+      const firmware = await createFirmware(firmwareInput);
+
+      io.to(`project:${projectId}`).emit('firmware:generation-started', {
+        firmwareId: firmware.id,
+        projectId,
         mcuFamily: req.body.targetMcu.family,
+        mcuPart: req.body.targetMcu.part,
       });
-      // TODO: Generate firmware scaffolding
+
       res.status(202).json({
         success: true,
         data: {
-          firmwareId,
+          firmwareId: firmware.id,
           status: 'pending',
           targetMcu: req.body.targetMcu,
+          projectId,
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/projects/:projectId/firmware', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.debug('Getting project firmware', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getFirmware' });
+      }
+
+      const firmwareProjects = await findFirmwareByProject(projectId);
+
+      res.json({
+        success: true,
+        data: firmwareProjects,
+        metadata: { count: firmwareProjects.length, projectId },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/projects/:projectId/firmware/:firmwareId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, firmwareId } = req.params;
+      log.debug('Getting firmware', { projectId, firmwareId });
+
+      const firmware = await findFirmwareById(firmwareId);
+
+      if (!firmware) {
+        throw new NotFoundError('Firmware', firmwareId, { operation: 'getFirmware' });
+      }
+
+      if (firmware.projectId !== projectId) {
+        throw new ValidationError('Firmware does not belong to this project', {
+          operation: 'getFirmware',
+          firmwareId,
+          projectId,
+        });
+      }
+
+      res.json({
+        success: true,
+        data: firmware,
       });
     } catch (error) {
       next(error);
@@ -661,15 +1805,42 @@ export function createApiRoutes(io: SocketIOServer): Router {
     })),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating HAL code', {
-        projectId: req.params.projectId,
-        firmwareId: req.params.firmwareId,
-        peripheralCount: req.body.peripherals.length,
+      const { projectId, firmwareId } = req.params;
+      log.info('Generating HAL code', { projectId, firmwareId, peripheralCount: req.body.peripherals.length });
+
+      const firmware = await findFirmwareById(firmwareId);
+
+      if (!firmware) {
+        throw new NotFoundError('Firmware', firmwareId, { operation: 'generateHal' });
+      }
+
+      if (firmware.projectId !== projectId) {
+        throw new ValidationError('Firmware does not belong to this project', {
+          operation: 'generateHal',
+          firmwareId,
+          projectId,
+        });
+      }
+
+      // Queue HAL generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('firmware:hal-generation-started', {
+        jobId,
+        firmwareId,
+        projectId,
+        peripherals: req.body.peripherals,
       });
-      // TODO: Generate HAL layer
-      res.json({
+
+      res.status(202).json({
         success: true,
-        data: { files: [] },
+        data: {
+          jobId,
+          firmwareId,
+          projectId,
+          status: 'pending',
+          peripheralCount: req.body.peripherals.length,
+        },
       });
     } catch (error) {
       next(error);
@@ -682,15 +1853,43 @@ export function createApiRoutes(io: SocketIOServer): Router {
     interface: z.enum(['gpio', 'uart', 'spi', 'i2c', 'adc', 'pwm', 'can']),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating driver code', {
-        projectId: req.params.projectId,
-        firmwareId: req.params.firmwareId,
+      const { projectId, firmwareId } = req.params;
+      log.info('Generating driver code', { projectId, firmwareId, component: req.body.component });
+
+      const firmware = await findFirmwareById(firmwareId);
+
+      if (!firmware) {
+        throw new NotFoundError('Firmware', firmwareId, { operation: 'generateDriver' });
+      }
+
+      if (firmware.projectId !== projectId) {
+        throw new ValidationError('Firmware does not belong to this project', {
+          operation: 'generateDriver',
+          firmwareId,
+          projectId,
+        });
+      }
+
+      // Queue driver generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('firmware:driver-generation-started', {
+        jobId,
+        firmwareId,
+        projectId,
         component: req.body.component,
+        interface: req.body.interface,
       });
-      // TODO: Generate driver from datasheet
-      res.json({
+
+      res.status(202).json({
         success: true,
-        data: { files: [] },
+        data: {
+          jobId,
+          firmwareId,
+          projectId,
+          status: 'pending',
+          component: req.body.component,
+        },
       });
     } catch (error) {
       next(error);
@@ -707,15 +1906,41 @@ export function createApiRoutes(io: SocketIOServer): Router {
     coverage: z.enum(['unit', 'integration', 'system']).default('unit'),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating tests', {
-        projectId: req.params.projectId,
+      const projectId = req.params.projectId;
+      log.info('Generating tests', { projectId, firmwareId: req.body.firmwareId, framework: req.body.testFramework });
+
+      // Verify project and firmware exist
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateTests' });
+      }
+
+      const firmware = await findFirmwareById(req.body.firmwareId);
+      if (!firmware) {
+        throw new NotFoundError('Firmware', req.body.firmwareId, { operation: 'generateTests' });
+      }
+
+      // Queue test generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('testing:generation-started', {
+        jobId,
         firmwareId: req.body.firmwareId,
+        projectId,
         framework: req.body.testFramework,
+        coverage: req.body.coverage,
       });
-      // TODO: Generate test code
-      res.json({
+
+      res.status(202).json({
         success: true,
-        data: { testFiles: [] },
+        data: {
+          jobId,
+          firmwareId: req.body.firmwareId,
+          projectId,
+          status: 'pending',
+          framework: req.body.testFramework,
+          coverage: req.body.coverage,
+        },
       });
     } catch (error) {
       next(error);
@@ -727,14 +1952,33 @@ export function createApiRoutes(io: SocketIOServer): Router {
     testEquipment: z.array(z.string()),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      log.info('Generating HIL setup', {
-        projectId: req.params.projectId,
+      const projectId = req.params.projectId;
+      log.info('Generating HIL setup', { projectId, targetBoard: req.body.targetBoard });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'generateHilSetup' });
+      }
+
+      // Queue HIL setup generation job
+      const jobId = crypto.randomUUID();
+
+      io.to(`project:${projectId}`).emit('testing:hil-setup-started', {
+        jobId,
+        projectId,
         targetBoard: req.body.targetBoard,
+        testEquipment: req.body.testEquipment,
       });
-      // TODO: Generate HIL documentation
-      res.json({
+
+      res.status(202).json({
         success: true,
-        data: { setupGuide: null },
+        data: {
+          jobId,
+          projectId,
+          status: 'pending',
+          targetBoard: req.body.targetBoard,
+        },
       });
     } catch (error) {
       next(error);
@@ -751,26 +1995,69 @@ export function createApiRoutes(io: SocketIOServer): Router {
     validators: z.array(z.enum(['claude_opus', 'gemini_25_pro', 'domain_expert'])).optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const projectId = req.params.projectId;
       const validationId = crypto.randomUUID();
+
       log.info('Starting multi-LLM validation', {
-        projectId: req.params.projectId,
+        projectId,
         validationId,
         artifactType: req.body.artifactType,
       });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'multiLlmValidation' });
+      }
+
+      // Verify artifact exists based on type
+      let artifact;
+      switch (req.body.artifactType) {
+        case 'schematic':
+          artifact = await findSchematicById(req.body.artifactId);
+          if (!artifact) {
+            throw new NotFoundError('Schematic', req.body.artifactId, { operation: 'multiLlmValidation' });
+          }
+          break;
+        case 'pcb':
+          artifact = await findPCBLayoutById(req.body.artifactId);
+          if (!artifact) {
+            throw new NotFoundError('PCB Layout', req.body.artifactId, { operation: 'multiLlmValidation' });
+          }
+          break;
+        case 'firmware':
+          artifact = await findFirmwareById(req.body.artifactId);
+          if (!artifact) {
+            throw new NotFoundError('Firmware', req.body.artifactId, { operation: 'multiLlmValidation' });
+          }
+          break;
+        case 'simulation':
+          artifact = await findSimulationById(req.body.artifactId);
+          if (!artifact) {
+            throw new NotFoundError('Simulation', req.body.artifactId, { operation: 'multiLlmValidation' });
+          }
+          break;
+      }
+
+      const validators = req.body.validators || ['claude_opus', 'gemini_25_pro', 'domain_expert'];
 
       // Emit validation started
-      io.to(`project:${req.params.projectId}`).emit('validation:started', {
+      io.to(`project:${projectId}`).emit('validation:started', {
         validationId,
         artifactType: req.body.artifactType,
-        validators: req.body.validators || ['claude_opus', 'gemini_25_pro', 'domain_expert'],
+        artifactId: req.body.artifactId,
+        validators,
       });
 
-      // TODO: Start multi-LLM validation
       res.status(202).json({
         success: true,
         data: {
           validationId,
           status: 'pending',
+          artifactType: req.body.artifactType,
+          artifactId: req.body.artifactId,
+          validators,
+          projectId,
         },
       });
     } catch (error) {
@@ -779,50 +2066,16 @@ export function createApiRoutes(io: SocketIOServer): Router {
   });
 
   // ============================================================================
-  // Agents
+  // Legacy Agents endpoint (for backward compatibility)
   // ============================================================================
 
   router.get('/agents', async (_req: Request, res: Response, next: NextFunction) => {
     try {
+      log.debug('Getting layout agents (legacy endpoint)');
+
       res.json({
         success: true,
-        data: [
-          {
-            id: 'conservative',
-            name: 'Conservative',
-            strategy: 'conservative',
-            priority: ['reliability', 'dfm', 'cost'],
-            bestFor: ['High-power', 'Industrial', 'Automotive'],
-          },
-          {
-            id: 'aggressive_compact',
-            name: 'Aggressive Compact',
-            strategy: 'aggressive_compact',
-            priority: ['size', 'cost', 'manufacturability'],
-            bestFor: ['Consumer electronics', 'Space-constrained'],
-          },
-          {
-            id: 'thermal_optimized',
-            name: 'Thermal Optimized',
-            strategy: 'thermal_optimized',
-            priority: ['thermal', 'reliability', 'size'],
-            bestFor: ['Power electronics', 'Motor controllers'],
-          },
-          {
-            id: 'emi_optimized',
-            name: 'EMI Optimized',
-            strategy: 'emi_optimized',
-            priority: ['signal_integrity', 'emi', 'size'],
-            bestFor: ['High-speed digital', 'RF', 'Mixed-signal'],
-          },
-          {
-            id: 'dfm_optimized',
-            name: 'DFM Optimized',
-            strategy: 'dfm_optimized',
-            priority: ['manufacturability', 'cost', 'size'],
-            bestFor: ['High-volume production'],
-          },
-        ],
+        data: LAYOUT_AGENTS,
       });
     } catch (error) {
       next(error);

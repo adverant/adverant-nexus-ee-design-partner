@@ -923,3 +923,9 @@ export interface ConsensusResult {
   validatorCount: number;
   passed: boolean;
 }
+
+// ============================================================================
+// Re-export Project Type System
+// ============================================================================
+
+export * from './project-types.js';

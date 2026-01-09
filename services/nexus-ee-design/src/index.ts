@@ -19,6 +19,7 @@ import { log } from './utils/logger.js';
 import { EEDesignError, handleError } from './utils/errors.js';
 import { createApiRoutes } from './api/routes.js';
 import { SkillsEngineClient } from './services/skills/skills-engine-client.js';
+import { getFileWatcherService, clearFileWatcherService } from './services/file-watcher/index.js';
 import { setSkillsEngineClient, getSkillsEngineClient, clearSkillsEngineClient } from './state.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -131,6 +132,15 @@ async function startServer(): Promise<void> {
       log.debug('Client subscribed to layout', { socketId: socket.id, layoutId });
     });
 
+    socket.on('unsubscribe:project', (projectId: string) => {
+      socket.leave(`project:${projectId}`);
+      log.debug('Client unsubscribed from project', { socketId: socket.id, projectId });
+    });
+
+    socket.on('heartbeat', () => {
+      socket.emit('heartbeat:ack');
+    });
+
     socket.on('disconnect', () => {
       log.info('Client disconnected', { socketId: socket.id });
     });
@@ -197,6 +207,19 @@ async function startServer(): Promise<void> {
     // Non-fatal - continue starting server
   }
 
+  // Initialize FileWatcherService for real-time KiCad file monitoring
+  try {
+    const fileWatcher = getFileWatcherService();
+    await fileWatcher.initialize(io);
+
+    log.info('FileWatcherService initialized', {
+      stats: fileWatcher.getStats(),
+    });
+  } catch (error) {
+    log.warn('Failed to initialize FileWatcherService', { error });
+    // Non-fatal - continue starting server
+  }
+
   // Start server
   httpServer.listen(config.port, () => {
     log.info(`EE Design Partner started`, {
@@ -216,6 +239,10 @@ async function startServer(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     log.info(`Received ${signal}, shutting down gracefully...`);
+
+    // Shutdown FileWatcherService
+    clearFileWatcherService();
+    log.info('FileWatcherService shutdown');
 
     // Shutdown Skills Engine client
     const skillsClient = getSkillsEngineClient();

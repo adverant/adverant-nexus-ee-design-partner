@@ -129,3 +129,16 @@ export type {
   SkillExecutionResponse,
   RegistrationResult
 } from './skills';
+
+// File Watcher Services
+export {
+  FileWatcherService,
+  getFileWatcherService,
+  clearFileWatcherService
+} from './file-watcher';
+
+export type {
+  FileWatcherConfig,
+  FileChangeEvent,
+  PCBUpdateEvent
+} from './file-watcher';
