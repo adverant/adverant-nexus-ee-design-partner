@@ -48,10 +48,14 @@ export interface EEProject {
   name: string;
   description: string;
   repositoryUrl: string;
+  /** Project type (e.g., 'power_electronics', 'mixed_signal') */
+  type: string;
   phase: ProjectPhase;
   status: ProjectStatus;
   owner: string;
   collaborators: string[];
+  /** Completion percentage (0-100) */
+  completion: number;
   createdAt: string;
   updatedAt: string;
   metadata: ProjectMetadata;

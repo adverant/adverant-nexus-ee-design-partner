@@ -84,18 +84,50 @@ interface ProjectRow {
 const repoLogger: Logger = log.child({ service: 'project-repository' });
 
 /**
+ * Calculate completion percentage based on project phase.
+ * Each phase represents ~10% of total project completion.
+ */
+function calculateCompletion(phase: ProjectPhase, status: ProjectStatus): number {
+  if (status === 'completed') return 100;
+  if (status === 'cancelled') return 0;
+
+  const phaseOrder: ProjectPhase[] = [
+    'ideation',
+    'architecture',
+    'schematic',
+    'simulation',
+    'pcb_layout',
+    'manufacturing',
+    'firmware',
+    'testing',
+    'production',
+    'field_support',
+  ];
+
+  const phaseIndex = phaseOrder.indexOf(phase);
+  if (phaseIndex === -1) return 0;
+
+  // Each completed phase is 10%, current phase counts as half
+  return phaseIndex * 10 + 5;
+}
+
+/**
  * Map a database row to an EEProject object.
  */
 function mapRowToProject(row: ProjectRow): EEProject {
+  const completion = calculateCompletion(row.phase, row.status);
+
   return {
     id: row.id,
     name: row.name,
     description: row.description || '',
     repositoryUrl: row.repository_url || '',
+    type: row.project_type || 'power_electronics',
     phase: row.phase,
     status: row.status,
     owner: row.owner_id,
     collaborators: row.collaborators || [],
+    completion,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     metadata: {
