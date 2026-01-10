@@ -78,6 +78,12 @@ import {
   type CreateFirmwareInput,
 } from '../database/repositories/firmware-repository.js';
 
+// File browser imports
+import {
+  getFileTreeHandler,
+  getFileContentHandler,
+} from './file-browser.js';
+
 // Configuration imports
 import {
   PROJECT_TYPE_CONFIGURATIONS,
@@ -782,6 +788,22 @@ export function createApiRoutes(io: SocketIOServer): Router {
       next(error);
     }
   });
+
+  // ============================================================================
+  // File Browser Routes (Virtual File System)
+  // ============================================================================
+
+  /**
+   * GET /projects/:projectId/files/tree
+   * Get virtual file tree for project artifacts
+   */
+  router.get('/projects/:projectId/files/tree', getFileTreeHandler);
+
+  /**
+   * GET /projects/:projectId/files/content?path=<file-path>
+   * Get file content from virtual file system
+   */
+  router.get('/projects/:projectId/files/content', getFileContentHandler);
 
   router.patch('/projects/:projectId/status', validate(z.object({
     status: z.enum(['draft', 'in_progress', 'review', 'approved', 'completed', 'on_hold', 'cancelled']),
