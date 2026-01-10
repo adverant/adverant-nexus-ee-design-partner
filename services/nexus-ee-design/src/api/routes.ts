@@ -231,13 +231,120 @@ function getDefaultOwnerId(req: Request): string {
   return (req.headers['x-user-id'] as string) || 'system';
 }
 
+// UUID validation regex
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// Validate UUID parameter middleware
+function validateUUIDParam(paramName: string) {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const value = req.params[paramName];
+    if (!value || !UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid ${paramName}: must be a valid UUID`, {
+        operation: 'uuid_validation',
+        param: paramName,
+        value: value,
+      }));
+    }
+    next();
+  };
+}
+
 export function createApiRoutes(io: SocketIOServer): Router {
   const router = Router();
 
   // ============================================================================
   // Configuration Endpoints
+  // These are served at both /config/* and /* for backward compatibility
   // ============================================================================
 
+  // Config endpoints at /config/* path (frontend API client expects these)
+  router.get('/config/project-types', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all project types (config endpoint)');
+      const summaries = getAllProjectTypeSummaries();
+
+      res.json({
+        success: true,
+        data: summaries,
+        metadata: { count: summaries.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/config/mcu-families', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting MCU families (config endpoint)');
+
+      res.json({
+        success: true,
+        data: MCU_FAMILIES,
+        metadata: { count: MCU_FAMILIES.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/config/simulation-types', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all simulation types (config endpoint)');
+
+      // Collect all unique simulation types from all project configurations
+      const allSimulations = new Map<string, { type: SimulationType; displayName: string; description?: string }>();
+
+      for (const configItem of Object.values(PROJECT_TYPE_CONFIGURATIONS)) {
+        for (const sim of configItem.simulations) {
+          if (!allSimulations.has(sim.type)) {
+            allSimulations.set(sim.type, {
+              type: sim.type,
+              displayName: sim.displayName,
+            });
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        data: Array.from(allSimulations.values()),
+        metadata: { count: allSimulations.size },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/config/validation-domains', async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      log.debug('Getting all validation domains (config endpoint)');
+
+      // Collect all unique validation types from all project configurations
+      const allValidations = new Map<string, { type: string; displayName: string; required: boolean }>();
+
+      for (const configItem of Object.values(PROJECT_TYPE_CONFIGURATIONS)) {
+        for (const val of configItem.validations) {
+          if (!allValidations.has(val.type)) {
+            allValidations.set(val.type, {
+              type: val.type,
+              displayName: val.displayName,
+              required: val.required,
+            });
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        data: Array.from(allValidations.values()),
+        metadata: { count: allValidations.size },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Legacy endpoints without /config prefix (keep for backward compatibility)
   router.get('/project-types', async (_req: Request, res: Response, next: NextFunction) => {
     try {
       log.debug('Getting all project types');
@@ -432,6 +539,66 @@ export function createApiRoutes(io: SocketIOServer): Router {
   // ============================================================================
   // Project Management
   // ============================================================================
+
+  // Apply UUID validation to all routes with :projectId parameter
+  router.param('projectId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+    if (!UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid projectId: must be a valid UUID (received: ${value})`, {
+        operation: 'uuid_validation',
+        param: 'projectId',
+        value: value,
+      }));
+    }
+    next();
+  });
+
+  // Apply UUID validation to schematicId parameter
+  router.param('schematicId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+    if (!UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid schematicId: must be a valid UUID (received: ${value})`, {
+        operation: 'uuid_validation',
+        param: 'schematicId',
+        value: value,
+      }));
+    }
+    next();
+  });
+
+  // Apply UUID validation to layoutId parameter
+  router.param('layoutId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+    if (!UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid layoutId: must be a valid UUID (received: ${value})`, {
+        operation: 'uuid_validation',
+        param: 'layoutId',
+        value: value,
+      }));
+    }
+    next();
+  });
+
+  // Apply UUID validation to simulationId parameter
+  router.param('simulationId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+    if (!UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid simulationId: must be a valid UUID (received: ${value})`, {
+        operation: 'uuid_validation',
+        param: 'simulationId',
+        value: value,
+      }));
+    }
+    next();
+  });
+
+  // Apply UUID validation to firmwareId parameter
+  router.param('firmwareId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+    if (!UUID_REGEX.test(value)) {
+      return next(new ValidationError(`Invalid firmwareId: must be a valid UUID (received: ${value})`, {
+        operation: 'uuid_validation',
+        param: 'firmwareId',
+        value: value,
+      }));
+    }
+    next();
+  });
 
   router.get('/projects', async (req: Request, res: Response, next: NextFunction) => {
     try {
