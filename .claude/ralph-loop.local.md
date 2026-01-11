@@ -1,9 +1,9 @@
 ---
 active: true
 iteration: 1
-max_iterations: 100
-completion_promise: "ALL PLUGIN OPEN UI BUTTONS WORK AND OPEN FUNCTIONAL BROWSER WINDOWS"
-started_at: "2026-01-09T19:51:59Z"
+max_iterations: 10
+completion_promise: "ALL VALIDATION TESTS PASS"
+started_at: "2026-01-10T13:11:21Z"
 ---
 
-Ensure marketplace plugin Open UI button actually opens a functional browser window with working UI/UX for each installed marketplace plugin. Fix any issues found with the button, navigation, or plugin pages.
+Use web-debug skill with multiple parallel agents to validate https://dashboard.adverant.ai/dashboard/ee-design/ideation and https://dashboard.adverant.ai/dashboard/ee-design/projects pages. Use console code injection as primary validation method. Test: 1) No JavaScript errors on page load 2) All API calls succeed (check Network tab) 3) WebSocket connections work 4) All buttons/interactions function 5) Data loads from real APIs (not mock) 6) Zustand store state is properly initialized. Use ultrathinking mode for thorough analysis.
