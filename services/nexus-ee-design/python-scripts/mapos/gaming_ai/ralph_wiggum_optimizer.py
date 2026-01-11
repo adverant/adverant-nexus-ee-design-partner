@@ -13,6 +13,8 @@ Key Mechanisms:
 2. Completion Criteria: Configurable success conditions
 3. Stagnation Detection: Escalation when progress stalls
 4. Git Integration: Version control for optimization history
+5. File Locking: Safe concurrent access to state files
+6. Atomic Writes: Prevent corruption on interruption
 
 References:
 - Ralph Wiggum Technique: https://awesomeclaude.ai/ralph-wiggum
@@ -21,19 +23,103 @@ References:
 
 import asyncio
 import json
+import logging
 import shutil
 import subprocess
+import tempfile
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Tuple
 from datetime import datetime
 from enum import Enum, auto
+from contextlib import contextmanager
 
 import numpy as np
+
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+# File locking support (Unix/macOS)
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+    logger.warning("fcntl not available - file locking disabled")
 
 # Local imports
 from .red_queen_evolver import RedQueenEvolver, Champion
 from .map_elites import BehavioralDescriptor
+
+
+@contextmanager
+def file_lock(filepath: Path, timeout: float = 30.0):
+    """
+    Context manager for file locking.
+
+    Prevents concurrent access to state files in multi-pod K8s deployments.
+    Falls back to no locking if fcntl not available.
+    """
+    lock_path = Path(str(filepath) + ".lock")
+
+    if not HAS_FCNTL:
+        yield
+        return
+
+    lock_file = None
+    try:
+        lock_file = open(lock_path, 'w')
+        # Non-blocking lock with timeout
+        start = datetime.now()
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                elapsed = (datetime.now() - start).total_seconds()
+                if elapsed > timeout:
+                    raise TimeoutError(f"Could not acquire lock on {filepath} within {timeout}s")
+                import time
+                time.sleep(0.1)
+
+        yield
+
+    finally:
+        if lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
+
+
+def atomic_write_json(filepath: Path, data: Dict[str, Any]) -> None:
+    """
+    Write JSON atomically to prevent corruption.
+
+    Writes to temp file then renames for atomicity.
+    """
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write to temp file in same directory (for atomic rename)
+    fd, temp_path = tempfile.mkstemp(
+        dir=filepath.parent,
+        prefix=filepath.stem + "_",
+        suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+        # Atomic rename
+        os.replace(temp_path, filepath)
+    except Exception:
+        # Clean up temp file on error
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 class OptimizationStatus(Enum):
@@ -171,16 +257,40 @@ class OptimizationState:
         )
 
     def save(self, path: Path) -> None:
-        """Save state to JSON file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2)
+        """
+        Save state to JSON file with atomic write and file locking.
+
+        Uses atomic writes to prevent corruption if interrupted.
+        Uses file locking to prevent concurrent access in K8s.
+        """
+        with file_lock(path):
+            atomic_write_json(path, self.to_dict())
+        logger.debug(f"Saved optimization state to {path}")
 
     @classmethod
     def load(cls, path: Path) -> 'OptimizationState':
-        """Load state from JSON file."""
-        with open(path) as f:
-            return cls.from_dict(json.load(f))
+        """
+        Load state from JSON file with validation.
+
+        Uses file locking for safe concurrent access.
+        """
+        with file_lock(path):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+
+                # Validate required fields
+                if 'pcb_path' not in data:
+                    raise ValueError("Invalid state file: missing pcb_path")
+
+                return cls.from_dict(data)
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Corrupted state file {path}: {e}")
+                raise ValueError(f"Corrupted optimization state: {e}")
+            except Exception as e:
+                logger.error(f"Failed to load state from {path}: {e}")
+                raise
 
 
 @dataclass

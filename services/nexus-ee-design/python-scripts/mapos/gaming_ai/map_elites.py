@@ -25,7 +25,7 @@ import json
 import hashlib
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any, Set, Callable
+from typing import Dict, List, Tuple, Optional, Any, Set, Callable, Union
 from datetime import datetime
 from collections import defaultdict
 

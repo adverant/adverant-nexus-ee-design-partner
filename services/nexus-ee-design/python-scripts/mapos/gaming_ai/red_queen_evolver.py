@@ -23,6 +23,7 @@ References:
 import asyncio
 import json
 import hashlib
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any, Callable, Set
@@ -32,8 +33,26 @@ import math
 
 import numpy as np
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+# Import configuration for extracting constants
+try:
+    from .config import get_config, EvolutionConfig
+    HAS_CONFIG = True
+except ImportError:
+    HAS_CONFIG = False
+
 # Local imports
 from .map_elites import MAPElitesArchive, BehavioralDescriptor, ArchiveStatistics
+
+
+# Default constants (can be overridden via config)
+DEFAULT_WIN_MARGIN = 0.01
+DEFAULT_TIE_MARGIN = 0.01
+DEFAULT_MUTATION_RATE = 0.8
+DEFAULT_VIOLATION_WEIGHT = 0.5
+DEFAULT_GENERALITY_WEIGHT = 0.5
 
 
 class MutationStrategy(Enum):

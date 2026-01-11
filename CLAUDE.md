@@ -26,20 +26,21 @@ Event types: `fix`, `decision`, `learning`, `pattern`, `preference`, `context`
 
 ## Project Overview
 
-**EE Design Partner** is an end-to-end hardware/software development automation platform that integrates:
+**EE Design Partner** is an end-to-end hardware/software development automation platform featuring:
+
 - **Claude Code** as the central orchestrator (terminal-first UX)
-- **Gemini 2.5 Pro** via OpenRouter for multi-LLM validation
+- **Gaming AI Optimization** - MAP-Elites, Red Queen, Ralph Wiggum algorithms
+- **LLM-First Architecture** - OpenRouter-powered intelligence (PyTorch optional)
+- **Multi-LLM validation** (Claude Opus 4 + Gemini 2.5 Pro)
 - **KiCad WASM** for browser-native schematic and PCB editing
 - **Comprehensive simulation suite** (SPICE, Thermal, SI, RF, EMC)
-- **Skills Engine** for dynamic workflow automation
-- **MAPOS** (Multi-Agent PCB Optimization System) for DRC violation reduction
+- **Skills Engine** with 40+ skills for dynamic workflow automation
+- **MAPOS** (Multi-Agent PCB Optimization System) with Gaming AI integration
 
 **Repository**: `github.com/adverant/adverant-nexus-ee-design-partner`
 **License**: MIT - Adverant Inc. 2024-2026
 
 ### Related Adverant Projects
-
-This repository integrates with the broader Adverant ecosystem:
 
 | Repository | Purpose | CLAUDE.md |
 |------------|---------|-----------|
@@ -54,7 +55,7 @@ This repository integrates with the broader Adverant ecosystem:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    NEXUS DASHBOARD - EE DESIGN PARTNER                       │
+│                    NEXUS EE DESIGN PARTNER                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -62,7 +63,7 @@ This repository integrates with the broader Adverant ecosystem:
 │  │  $ /ee-design analyze-requirements "200A FOC ESC"                    │  │
 │  │  $ /schematic-gen power-stage --mosfets=18 --topology=3phase         │  │
 │  │  $ /pcb-layout generate --strategy=thermal --layers=10               │  │
-│  │  $ /mapos optimize --target=100                                      │  │
+│  │  $ /mapos optimize --target=0 --use-gaming-ai                        │  │
 │  │  $ /firmware-gen stm32h755 --foc --triple-redundant                  │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
@@ -70,20 +71,116 @@ This repository integrates with the broader Adverant ecosystem:
 │  │   PROJECT REPO      │  │   DESIGN TABS       │  │   VALIDATION       │  │
 │  │   (VSCode-like)     │  │   (KiCad WASM)      │  │   PANEL            │  │
 │  └─────────────────────┘  └─────────────────────┘  └────────────────────┘  │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                       GAMING AI ENGINE                                 │ │
+│  │  ┌────────────┐    ┌────────────┐    ┌────────────┐                   │ │
+│  │  │ MAP-Elites │◄──►│ Red Queen  │◄──►│   Ralph    │                   │ │
+│  │  │  Archive   │    │  Evolver   │    │  Wiggum    │                   │ │
+│  │  │            │    │            │    │            │                   │ │
+│  │  │ Quality-   │    │ Adversarial│    │ Persistent │                   │ │
+│  │  │ Diversity  │    │ Evolution  │    │ Iteration  │                   │ │
+│  │  └────────────┘    └────────────┘    └────────────┘                   │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
+## Gaming AI System
+
+Gaming AI brings cutting-edge optimization techniques to electronic design:
+
+### Algorithms
+
+| Algorithm | Inspiration | Purpose |
+|-----------|-------------|---------|
+| **MAP-Elites** | Quality-Diversity | Maintain diverse elite solutions |
+| **Red Queen** | Digital Red Queen (Sakana AI) | Adversarial co-evolution |
+| **Ralph Wiggum** | Persistent iteration | "Me fail optimization? Unpossible!" |
+
+### LLM-First Architecture
+
+The Gaming AI uses **OpenRouter LLM as primary intelligence** with optional GPU offloading:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    LLM-FIRST MODE (Default)                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐     │
+│   │    LLM       │    │    LLM       │    │    LLM       │     │
+│   │   State      │───►│   Value      │───►│   Policy     │     │
+│   │  Encoder     │    │  Estimator   │    │  Generator   │     │
+│   └──────────────┘    └──────────────┘    └──────────────┘     │
+│          │                   │                    │             │
+│          └───────────────────┼────────────────────┘             │
+│                              ▼                                  │
+│              ┌───────────────────────────┐                     │
+│              │  MAP-Elites + Red Queen   │                     │
+│              │  + Ralph Wiggum Loop      │                     │
+│              └───────────────────────────┘                     │
+│                                                                  │
+│  Optional GPU Offloading: RunPod | Modal | Replicate | Together │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Gaming AI Modules
+
+**PCB Gaming AI** (`services/nexus-ee-design/python-scripts/mapos/gaming_ai/`):
+| Module | Purpose |
+|--------|---------|
+| `config.py` | Centralized configuration |
+| `llm_backends.py` | LLM replacements for neural networks |
+| `optional_gpu_backend.py` | Third-party GPU offloading |
+| `map_elites.py` | Quality-diversity archive |
+| `red_queen_evolver.py` | Adversarial co-evolution |
+| `ralph_wiggum_optimizer.py` | Persistent iteration loop |
+| `integration.py` | High-level optimization API |
+
+**Schematic Gaming AI** (`services/nexus-ee-design/python-scripts/mapos/schematic_gaming_ai/`):
+| Module | Purpose |
+|--------|---------|
+| `behavior_descriptor.py` | 10D behavioral feature space |
+| `fitness_function.py` | Multi-objective fitness (4 domains) |
+| `mutation_operators.py` | 5 mutation strategies |
+| `schematic_map_elites.py` | Quality-diversity for schematics |
+| `schematic_red_queen.py` | Adversarial schematic evolution |
+| `schematic_ralph_wiggum.py` | Persistent schematic optimization |
+| `integration.py` | High-level schematic optimization API |
+
+### Usage Examples
+
+**PCB Optimization:**
+```python
+from mapos.gaming_ai import optimize_pcb, MAPOSRQConfig
+
+result = await optimize_pcb(
+    pcb_path="board.kicad_pcb",
+    config=MAPOSRQConfig(
+        use_llm=True,              # Primary: OpenRouter
+        use_neural_networks=False, # Optional: PyTorch
+        target_violations=100,
+        max_iterations=500,
+    )
+)
+```
+
+**Schematic Optimization:**
+```python
+from mapos.schematic_gaming_ai import optimize_schematic
+
+result = await optimize_schematic(
+    project_id="my-project",
+    schematic=schematic_dict,
+    target_fitness=0.95,
+    mode="hybrid",
+)
+```
+
+---
+
 ## Infrastructure & Deployment
-
-### GitHub Repository Access
-
-**Adverant Organization**: `github.com/adverant`
-
-**Authentication**:
-- Use GitHub Personal Access Token (PAT) for repository access
-- Never commit tokens to repositories
 
 ### Kubernetes Deployment
 
@@ -122,25 +219,6 @@ k3s kubectl set image deployment/nexus-ee-design nexus-ee-design=localhost:5000/
 k3s kubectl rollout status deployment/nexus-ee-design -n nexus
 echo "Deployed: ${BUILD_TAG}"
 EOF
-```
-
-### Verification
-
-After deployment, verify:
-
-1. **Check pod status:**
-```bash
-ssh root@157.173.102.118 "k3s kubectl get pods -n nexus -l app.kubernetes.io/name=nexus-ee-design"
-```
-
-2. **Check MAPOS worker:**
-```bash
-ssh root@157.173.102.118 "k3s kubectl get pods -n nexus -l app.kubernetes.io/name=mapos-kicad-worker"
-```
-
-3. **Check logs:**
-```bash
-ssh root@157.173.102.118 "k3s kubectl logs -f deployment/nexus-ee-design -n nexus"
 ```
 
 ---
@@ -207,15 +285,28 @@ adverant-nexus-ee-design-partner/
 │   │   ├── types/               # TypeScript types
 │   │   └── utils/               # Logger, errors, helpers
 │   ├── docker/                  # Docker configurations
-│   │   └── mapos/              # MAPOS KiCad worker
-│   └── python-scripts/          # KiCad automation
-│       └── mapos/              # MAPOS optimization scripts
+│   │   └── mapos/               # MAPOS KiCad worker
+│   └── python-scripts/
+│       └── mapos/
+│           ├── gaming_ai/       # Gaming AI for PCB (NEW)
+│           │   ├── config.py
+│           │   ├── llm_backends.py
+│           │   ├── optional_gpu_backend.py
+│           │   ├── map_elites.py
+│           │   ├── red_queen_evolver.py
+│           │   └── ralph_wiggum_optimizer.py
+│           └── schematic_gaming_ai/  # Gaming AI for Schematics (NEW)
+│               ├── behavior_descriptor.py
+│               ├── fitness_function.py
+│               ├── mutation_operators.py
+│               └── integration.py
 ├── ui/                          # Dashboard UI components
 ├── skills/                      # Skill definitions (.md)
 ├── k8s/                         # Kubernetes manifests
-│   ├── deployment.yaml          # Main service deployment
-│   └── mapos-kicad-worker.yaml  # MAPOS worker deployment
-├── docs/                        # Documentation
+├── docs/
+│   ├── architecture.md          # System architecture
+│   ├── gaming-ai.md             # Gaming AI deep dive (NEW)
+│   └── use-cases.md             # 20 use case examples (NEW)
 └── tests/                       # Test suites
 ```
 
@@ -223,21 +314,27 @@ adverant-nexus-ee-design-partner/
 
 ## MAPOS - Multi-Agent PCB Optimization System
 
-MAPOS is the core PCB optimization engine with a 7-phase pipeline:
+MAPOS is the core PCB optimization engine with a 7-phase pipeline enhanced by Gaming AI:
 
-| Phase | Description | Impact |
-|-------|-------------|--------|
-| 1 | Design Rules Generation | IPC-2221 compliant .kicad_dru |
-| 2 | pcbnew API Fixes | 40-50% violation reduction |
-| 3 | Zone Fill | Native ZONE_FILLER API |
-| 4 | Net Assignment | Orphan pad net assignment |
-| 5 | Solder Mask Fixes | Via tenting, bridge allowance |
-| 6 | Silkscreen Fixes | 90%+ silk_over_copper reduction |
-| 7 | LLM-Guided Fixes | OpenRouter Claude API |
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MAPOS 7-PHASE PIPELINE                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: Design Rules     ──► IPC-2221 compliant .kicad_dru            │
+│  Phase 2: pcbnew Fixes     ──► Zone nets, dangling vias (40-50%)        │
+│  Phase 3: Zone Fill        ──► ZONE_FILLER API                          │
+│  Phase 4: Net Assignment   ──► Orphan pad nets (30-35%)                 │
+│  Phase 5: Solder Mask      ──► Via tenting, bridges (10-30%)            │
+│  Phase 6: Silkscreen       ──► Graphics to Fab layer (90%+)             │
+│  Phase 7: Gaming AI        ──► MAP-Elites + Red Queen + Ralph Wiggum    │
+│                                                                          │
+│  Total Typical Reduction: 60-80% DRC violations                         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ### MAPOS Python Modules
-
-Located in `services/nexus-ee-design/python-scripts/mapos/`:
 
 | Module | Purpose |
 |--------|---------|
@@ -248,21 +345,6 @@ Located in `services/nexus-ee-design/python-scripts/mapos/`:
 | `kicad_net_assigner.py` | Orphan pad net assignment |
 | `kicad_api_server.py` | FastAPI REST endpoints |
 | `kicad_headless_runner.py` | K8s headless execution |
-
-### MAPOS K8s Deployment
-
-MAPOS runs in K8s with Xvfb sidecar for headless KiCad:
-
-```yaml
-# Deploy MAPOS worker
-kubectl apply -f k8s/mapos-kicad-worker.yaml
-
-# Check status
-kubectl get pods -n nexus -l app.kubernetes.io/name=mapos-kicad-worker
-
-# Run optimization job
-kubectl create job mapos-optimize --from=job/mapos-optimize-job -n nexus
-```
 
 ---
 
@@ -316,6 +398,10 @@ npm run typecheck
 
 # Lint code
 npm run lint
+
+# Test Gaming AI modules
+python3 -c "from mapos.gaming_ai import TORCH_AVAILABLE; print(f'PyTorch: {TORCH_AVAILABLE}')"
+python3 -c "from mapos.schematic_gaming_ai import optimize_schematic; print('Schematic Gaming AI OK')"
 ```
 
 ---
@@ -325,7 +411,7 @@ npm run lint
 ```bash
 # Required
 NEXUS_API_KEY=your_key
-OPENROUTER_API_KEY=your_key  # For LLM-guided fixes
+OPENROUTER_API_KEY=your_key  # For Gaming AI LLM mode
 
 # Service URLs (K8s internal)
 NEXUS_GRAPHRAG_URL=http://nexus-graphrag.nexus.svc.cluster.local:9000
@@ -335,6 +421,11 @@ NEXUS_MAGEAGENT_URL=http://nexus-mageagent.nexus.svc.cluster.local:9010
 NGSPICE_PATH=/usr/bin/ngspice
 OPENFOAM_PATH=/opt/openfoam
 OPENEMS_PATH=/opt/openems
+
+# Optional GPU Offloading
+RUNPOD_API_KEY=your_key
+MODAL_TOKEN_ID=your_id
+REPLICATE_API_TOKEN=your_token
 ```
 
 ---
@@ -347,6 +438,8 @@ OPENEMS_PATH=/opt/openems
 | POST | `/api/v1/projects/:id/schematic/generate` | Generate schematic |
 | POST | `/api/v1/projects/:id/pcb-layout/generate` | Start PCB layout |
 | POST | `/api/v1/projects/:id/mapos/optimize` | Run MAPOS optimization |
+| POST | `/api/v1/projects/:id/gaming-ai/optimize-pcb` | Run Gaming AI PCB optimization |
+| POST | `/api/v1/projects/:id/gaming-ai/optimize-schematic` | Run Gaming AI schematic optimization |
 | POST | `/api/v1/projects/:id/simulation/spice` | Run SPICE simulation |
 | POST | `/api/v1/projects/:id/simulation/thermal` | Run thermal analysis |
 | POST | `/api/v1/projects/:id/firmware/generate` | Generate firmware |
@@ -424,6 +517,16 @@ The **foc-esc-heavy-lift** project serves as the reference implementation:
 - 15,000+ lines firmware
 
 Repository: `github.com/adverant/foc-esc-heavy-lift` (design data only)
+
+---
+
+## Documentation
+
+- [README.md](README.md) - Project overview
+- [docs/architecture.md](docs/architecture.md) - System architecture
+- [docs/gaming-ai.md](docs/gaming-ai.md) - Gaming AI deep dive
+- [docs/use-cases.md](docs/use-cases.md) - 20 use case examples
+- [skills/mapos.md](skills/mapos.md) - MAPOS reference
 
 ---
 

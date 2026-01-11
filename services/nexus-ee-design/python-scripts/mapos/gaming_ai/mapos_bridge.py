@@ -69,7 +69,11 @@ import numpy as np
 
 @dataclass
 class GamingAIConfig:
-    """Extended configuration for Gaming AI integration."""
+    """
+    Extended configuration for Gaming AI integration.
+
+    Default mode: LLM-first (no PyTorch required).
+    """
 
     # Base MAPOS settings (passed to parent)
     target_violations: int = 100
@@ -84,10 +88,21 @@ class GamingAIConfig:
     rq_population_size: int = 50
     rq_iterations_per_round: int = 100
 
-    # Neural network settings
-    use_neural_networks: bool = True
+    # Mode selection: "standard", "gaming_ai", or "hybrid"
+    mode: str = "hybrid"
+
+    # Neural network settings (DISABLED by default - LLM-first)
+    use_neural_networks: bool = False  # Changed default to False
     hidden_dim: int = 256
     checkpoint_path: Optional[str] = None
+
+    # LLM settings (ENABLED by default)
+    use_llm: bool = True
+    llm_model: str = "anthropic/claude-opus-4.5"
+
+    # Optional GPU backend
+    gpu_provider: Optional[str] = None  # "runpod", "modal", "replicate"
+    gpu_endpoint: Optional[str] = None
 
     # Ralph Wiggum settings
     max_stagnation: int = 15
