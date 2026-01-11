@@ -117,8 +117,8 @@ spec:
             - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: nexus-api-keys
-                  key: openrouter-api-key
+                  name: nexus-secrets
+                  key: OPENROUTER_API_KEY
 
           resources:
             requests:
@@ -296,8 +296,8 @@ spec:
             - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: nexus-api-keys
-                  key: openrouter-api-key
+                  name: nexus-secrets
+                  key: OPENROUTER_API_KEY
           resources:
             requests:
               cpu: "2000m"
