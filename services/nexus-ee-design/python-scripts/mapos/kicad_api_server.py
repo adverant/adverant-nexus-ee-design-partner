@@ -40,8 +40,9 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-DATA_DIR = Path(os.environ.get('MAPOS_DATA_DIR', '/data'))
-OUTPUT_DIR = Path(os.environ.get('MAPOS_OUTPUT_DIR', '/output'))
+# Support both MAPOS_DATA_DIR (legacy) and PCB_DATA_DIR (K8s deployment)
+DATA_DIR = Path(os.environ.get('PCB_DATA_DIR', os.environ.get('MAPOS_DATA_DIR', '/data')))
+OUTPUT_DIR = Path(os.environ.get('OUTPUT_DIR', os.environ.get('MAPOS_OUTPUT_DIR', '/output')))
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 
 # Ensure directories exist
