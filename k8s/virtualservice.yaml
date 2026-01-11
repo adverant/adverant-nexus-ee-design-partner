@@ -1,0 +1,162 @@
+# Nexus EE Design Partner - Istio VirtualService
+#
+# This VirtualService provides routing for the EE Design Partner plugin.
+# It handles both internal (mesh) and external (gateway) traffic.
+#
+# External access via api.adverant.ai is handled by api-gateway-virtualservice.yaml
+# in the Adverant-Nexus repo, which routes:
+#   - /ee-design/api/v1/* -> nexus-ee-design:8080/api/v1/*
+#   - /ee-design/ws/* -> nexus-ee-design:8080/ws (WebSocket)
+#   - /api/ee-design/* -> nexus-ee-design:8080/*
+#
+# This VirtualService handles:
+#   - Internal K8s mesh traffic (service-to-service)
+#   - Optional dedicated subdomain (ee-design.adverant.ai)
+
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: nexus-ee-design
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/component: plugin
+    app.kubernetes.io/part-of: nexus-plugins
+    version: v1
+spec:
+  hosts:
+  # Internal K8s service names
+  - nexus-ee-design
+  - nexus-ee-design.nexus.svc.cluster.local
+  # Optional: dedicated subdomain (requires DNS + TLS cert)
+  # - ee-design.adverant.ai
+  gateways:
+  - nexus/nexus-gateway
+  - mesh
+  http:
+  # ==========================================================================
+  # WebSocket route (must come first for proper upgrade handling)
+  # ==========================================================================
+  - match:
+    - headers:
+        upgrade:
+          exact: websocket
+      uri:
+        prefix: /ws
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 3600s  # 1 hour for long-running WebSocket connections
+    corsPolicy:
+      allowOrigins:
+      - prefix: "*"
+      allowMethods:
+      - GET
+      - POST
+      - OPTIONS
+      allowHeaders:
+      - "*"
+      exposeHeaders:
+      - "*"
+
+  # ==========================================================================
+  # Health check endpoints
+  # ==========================================================================
+  - match:
+    - uri:
+        exact: /health
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 10s
+
+  - match:
+    - uri:
+        exact: /ready
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 10s
+
+  - match:
+    - uri:
+        exact: /live
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 10s
+
+  # ==========================================================================
+  # API routes - Main application endpoints
+  # ==========================================================================
+  - match:
+    - uri:
+        prefix: /api/v1
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 300s  # 5 minutes for heavy operations (PCB layout, simulation)
+    retries:
+      attempts: 3
+      perTryTimeout: 100s
+      retryOn: 5xx,reset,connect-failure,refused-stream
+    corsPolicy:
+      allowOrigins:
+      - prefix: "*"
+      allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+      allowHeaders:
+      - "*"
+      exposeHeaders:
+      - "*"
+      allowCredentials: true
+
+  # ==========================================================================
+  # Metrics endpoint (Prometheus)
+  # ==========================================================================
+  - match:
+    - uri:
+        exact: /metrics
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 30s
+
+  # ==========================================================================
+  # Default route - catch-all for internal mesh traffic
+  # ==========================================================================
+  - route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 60s
+    corsPolicy:
+      allowOrigins:
+      - prefix: "*"
+      allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+      allowHeaders:
+      - "*"
+      exposeHeaders:
+      - "*"
