@@ -524,19 +524,54 @@ class LLMValueEstimator:
         Fast quality estimate without LLM (deterministic).
 
         Uses heuristic based on DRC violations.
-        """
-        drc = None
-        if hasattr(pcb_state, 'run_drc'):
-            try:
-                drc = pcb_state.run_drc()
-            except Exception:
-                pass
 
-        if drc is None:
+        Args:
+            pcb_state: PCB state object with run_drc() method.
+                       If None or invalid, returns 0.5 (unknown quality).
+
+        Returns:
+            Quality score between 0.01 and 0.99
+
+        Raises:
+            No exceptions - all errors are caught and logged, returning
+            a safe default value.
+        """
+        # Handle None or invalid input gracefully
+        if pcb_state is None:
+            logger.warning(
+                "estimate_quality_fast called with None pcb_state. "
+                "This indicates a bug in the calling code - pcb_state should "
+                "always be provided for accurate value estimation."
+            )
             return 0.5
 
-        violations = getattr(drc, 'total_violations', 0)
+        # Verify pcb_state has required interface
+        if not hasattr(pcb_state, 'run_drc'):
+            logger.warning(
+                f"estimate_quality_fast: pcb_state ({type(pcb_state).__name__}) "
+                f"does not have run_drc() method. Cannot estimate quality."
+            )
+            return 0.5
 
+        # Run DRC and compute quality
+        drc = None
+        try:
+            drc = pcb_state.run_drc()
+        except Exception as e:
+            logger.warning(f"DRC execution failed in estimate_quality_fast: {e}")
+            return 0.5
+
+        if drc is None:
+            logger.debug("DRC returned None - using default quality estimate")
+            return 0.5
+
+        # Get violation count safely
+        violations = getattr(drc, 'total_violations', 0)
+        if not isinstance(violations, (int, float)):
+            logger.warning(f"Invalid violations type: {type(violations)}. Using 0.")
+            violations = 0
+
+        # Compute quality score
         if violations == 0:
             return 0.99
         elif violations > 1000:
@@ -544,7 +579,9 @@ class LLMValueEstimator:
         else:
             # Logarithmic scale with configurable target
             target = self.config.ralph_wiggum.target_violations
-            return max(0.01, 1.0 - np.log1p(violations) / np.log1p(target * 10))
+            score = max(0.01, 1.0 - np.log1p(violations) / np.log1p(target * 10))
+            logger.debug(f"Quality estimate: {score:.4f} (violations={violations})")
+            return score
 
     async def estimate_quality(self, pcb_state: Any) -> ValueEstimate:
         """
@@ -756,17 +793,40 @@ class LLMPolicyGenerator:
         Generate ranked list of modification suggestions.
 
         Args:
-            pcb_state: Current PCB state
+            pcb_state: Current PCB state. If None, returns empty list.
             drc_violations: Optional violation counts by type
             top_k: Number of suggestions to return
             focus_area: Optional area to focus on
 
         Returns:
-            List of modification suggestions ranked by expected impact
+            List of modification suggestions ranked by expected impact.
+            Returns empty list if pcb_state is None or invalid.
         """
+        # Handle None or invalid input gracefully
+        if pcb_state is None:
+            logger.warning(
+                "suggest_modifications called with None pcb_state. "
+                "Cannot generate suggestions without a valid PCB state."
+            )
+            return []
+
         # Get violations if not provided
         if drc_violations is None:
             drc_violations = self._get_violations(pcb_state)
+
+        # If no violations, return no_action suggestion
+        if not drc_violations or sum(drc_violations.values()) == 0:
+            logger.info("No DRC violations found - no modifications needed")
+            return [ModificationSuggestion(
+                mod_type="no_action",
+                target="",
+                action="Design has no DRC violations",
+                rationale="No modifications needed - design is clean",
+                violations_fixed=[],
+                confidence=1.0,
+                priority=1,
+                parameters={}
+            )]
 
         # Build analysis
         analysis = self._analyze_state(pcb_state, drc_violations)
@@ -1012,12 +1072,33 @@ class LLMDynamicsSimulator:
         Simulate the effect of a modification without applying it.
 
         Args:
-            pcb_state: Current PCB state
+            pcb_state: Current PCB state. If None, returns fallback prediction.
             modification: Proposed modification
 
         Returns:
-            Prediction of what will happen
+            Prediction of what will happen. Returns fallback prediction
+            if pcb_state is None or invalid.
         """
+        # Handle None or invalid input gracefully
+        if pcb_state is None:
+            logger.warning(
+                "simulate_modification called with None pcb_state. "
+                "Using fallback prediction based on modification alone."
+            )
+            return self._get_fallback_prediction(modification)
+
+        if modification is None:
+            logger.warning("simulate_modification called with None modification.")
+            return DynamicsPrediction(
+                violations_fixed=[],
+                violations_created=[],
+                net_improvement=0,
+                side_effects=["No modification provided"],
+                confidence=0.0,
+                best_case="No change",
+                worst_case="No change"
+            )
+
         current_drc = self._summarize_drc(pcb_state)
 
         prompt = f"""PCB design has these violations:

@@ -300,12 +300,36 @@ class MAPOSRQOptimizer:
 
     def _init_evolution_components(self) -> None:
         """Initialize evolution components."""
-        # Fitness function
+        # Fitness function that integrates LLM value estimation
         def fitness_fn(solution: Any) -> float:
+            """
+            Compute fitness for a PCB solution.
+
+            Uses LLM value estimation when available for more nuanced
+            quality assessment, falling back to DRC-based heuristic.
+            """
+            # Try LLM value estimation first (provides better quality signal)
+            if self.llm_value is not None:
+                try:
+                    # Use the synchronous fast method for evolution (async not suitable here)
+                    value = self.llm_value.estimate_quality_fast(solution)
+                    logger.debug(f"LLM fitness estimation: {value:.4f}")
+                    return float(np.clip(value, 0.01, 0.99))
+                except Exception as e:
+                    logger.debug(f"LLM fitness failed, using heuristic: {e}")
+
+            # Fallback: direct DRC-based fitness
             if hasattr(solution, 'run_drc'):
-                drc = solution.run_drc()
-                return 1.0 / (1.0 + drc.total_violations / 100.0)
-            return 0.5
+                try:
+                    drc = solution.run_drc()
+                    violations = getattr(drc, 'total_violations', 0)
+                    fitness = 1.0 / (1.0 + violations / 100.0)
+                    logger.debug(f"DRC fitness: {fitness:.4f} (violations={violations})")
+                    return fitness
+                except Exception as e:
+                    logger.warning(f"DRC fitness failed: {e}")
+
+            return 0.5  # Unknown quality
 
         # Red Queen Evolver
         self.red_queen = RedQueenEvolver(
@@ -401,39 +425,146 @@ class MAPOSRQOptimizer:
         rng = np.random.Generator(np.random.PCG64(hash_val % (2**31)))
         return rng.standard_normal(self.config.hidden_dim).astype(np.float32)
 
-    def _get_value_estimate(self, embedding: np.ndarray) -> float:
+    def _get_value_estimate(
+        self,
+        embedding: np.ndarray,
+        pcb_state: Optional[Any] = None
+    ) -> float:
         """
-        Get value estimate.
+        Get quality value estimate for a PCB state.
 
         Uses the following priority:
-        1. Local PyTorch value network (if available)
-        2. LLM-based value estimator
-        3. Heuristic fallback
+        1. Local PyTorch value network (if available and enabled)
+        2. LLM-based value estimator with actual PCB state
+        3. DRC-based heuristic fallback
+
+        Args:
+            embedding: State embedding vector (256D numpy array)
+            pcb_state: PCB state object with run_drc() method. REQUIRED for
+                       accurate LLM estimation. If None, falls back to heuristics.
+
+        Returns:
+            Quality score between 0.01 and 0.99
+
+        Note:
+            Previous implementation passed None to estimate_quality_fast(), which
+            would cause AttributeError when trying to call pcb_state.run_drc().
+            This fix ensures pcb_state is properly propagated through the call chain.
         """
-        # Try local PyTorch network first
+        # Try local PyTorch network first (if explicitly enabled)
         if self.value_network is not None and TORCH_AVAILABLE:
             try:
                 import torch
                 emb_tensor = torch.tensor(embedding, dtype=torch.float32).unsqueeze(0)
                 with torch.no_grad():
                     value = self.value_network(emb_tensor)
-                return value.item()
+                logger.debug(f"PyTorch value estimation: {value.item():.4f}")
+                return float(np.clip(value.item(), 0.01, 0.99))
             except Exception as e:
-                logger.debug(f"PyTorch value estimation failed: {e}")
+                logger.warning(f"PyTorch value estimation failed: {e}")
 
-        # Use LLM value estimator if available
-        if self.llm_value is not None:
+        # Use LLM value estimator if available (requires pcb_state)
+        if self.llm_value is not None and pcb_state is not None:
             try:
-                # Fast estimate without full LLM call
-                return self.llm_value.estimate_quality_fast(None)
+                value = self.llm_value.estimate_quality_fast(pcb_state)
+                logger.debug(f"LLM value estimation (fast): {value:.4f}")
+                return float(np.clip(value, 0.01, 0.99))
+            except AttributeError as e:
+                logger.error(
+                    f"LLM value estimation failed due to missing attribute: {e}. "
+                    f"Ensure pcb_state has run_drc() method."
+                )
             except Exception as e:
-                logger.debug(f"LLM value estimation failed: {e}")
+                logger.warning(f"LLM value estimation failed: {e}")
 
-        # Fallback: heuristic based on embedding
-        return float(np.tanh(embedding.mean()))
+        # Fallback: direct DRC-based heuristic if pcb_state available
+        if pcb_state is not None and hasattr(pcb_state, 'run_drc'):
+            try:
+                drc = pcb_state.run_drc()
+                violations = getattr(drc, 'total_violations', 0)
+                value = 1.0 / (1.0 + violations / 100.0)
+                logger.debug(f"DRC heuristic value: {value:.4f} (violations={violations})")
+                return float(np.clip(value, 0.01, 0.99))
+            except Exception as e:
+                logger.warning(f"DRC heuristic estimation failed: {e}")
+
+        # Final fallback: embedding-based heuristic (least accurate)
+        if pcb_state is None:
+            logger.warning(
+                "_get_value_estimate called without pcb_state. "
+                "Using embedding-based heuristic which is less accurate."
+            )
+        value = float(np.clip(np.tanh(embedding.mean()) * 0.4 + 0.5, 0.01, 0.99))
+        logger.debug(f"Embedding heuristic value: {value:.4f}")
+        return value
+
+    async def _get_policy_async(
+        self,
+        pcb_state: Any,
+        embedding: np.ndarray,
+        drc_features: np.ndarray
+    ) -> Tuple[np.ndarray, List[Any]]:
+        """
+        Get policy distribution using LLM for intelligent action selection.
+
+        This async method uses LLMPolicyGenerator to provide intelligent
+        modification suggestions instead of random uniform distribution.
+
+        Args:
+            pcb_state: PCB state object with DRC capabilities
+            embedding: State embedding vector
+            drc_features: DRC feature vector
+
+        Returns:
+            Tuple of (action_probabilities, modification_suggestions)
+        """
+        # Try LLM policy generator first
+        if self.llm_policy is not None and pcb_state is not None:
+            try:
+                # Get DRC violations for context
+                drc_violations = None
+                if hasattr(pcb_state, 'run_drc'):
+                    drc = pcb_state.run_drc()
+                    drc_violations = getattr(drc, 'violations_by_type', {})
+
+                # Get LLM suggestions
+                suggestions = await self.llm_policy.suggest_modifications(
+                    pcb_state=pcb_state,
+                    drc_violations=drc_violations,
+                    top_k=5
+                )
+
+                if suggestions:
+                    # Convert suggestions to action probability distribution
+                    probs = self.llm_policy.get_action_probabilities(pcb_state, suggestions)
+                    logger.debug(f"LLM policy generated {len(suggestions)} suggestions")
+                    return probs, suggestions
+
+            except Exception as e:
+                logger.warning(f"LLM policy generation failed: {e}")
+
+        # Fallback to PyTorch policy network
+        return self._get_policy(embedding, drc_features), []
 
     def _get_policy(self, embedding: np.ndarray, drc_features: np.ndarray) -> np.ndarray:
-        """Get policy distribution from neural network."""
+        """
+        Get policy distribution (synchronous version).
+
+        Uses the following priority:
+        1. Local PyTorch policy network (if available and enabled)
+        2. Uniform distribution fallback (for async LLM, use _get_policy_async)
+
+        Args:
+            embedding: State embedding vector (256D numpy array)
+            drc_features: DRC context features (12D numpy array)
+
+        Returns:
+            Action probability distribution over 9 modification categories
+
+        Note:
+            For LLM-based policy, use _get_policy_async() instead.
+            This synchronous method cannot call the async LLM client.
+        """
         if self.policy_network is not None and TORCH_AVAILABLE:
             try:
                 import torch
@@ -441,12 +572,227 @@ class MAPOSRQOptimizer:
                 drc_tensor = torch.tensor(drc_features, dtype=torch.float32).unsqueeze(0)
 
                 probs, _ = self.policy_network.get_category_distribution(emb_tensor, drc_tensor)
-                return probs.cpu().numpy().flatten()
-            except Exception:
-                pass
+                result = probs.cpu().numpy().flatten()
+                logger.debug(f"PyTorch policy distribution: max={result.max():.3f}")
+                return result
+            except Exception as e:
+                logger.warning(f"PyTorch policy generation failed: {e}")
 
         # Fallback: uniform distribution
+        # Note: For intelligent policy without PyTorch, use _get_policy_async()
+        logger.debug("Using uniform policy distribution (no PyTorch available)")
         return np.ones(9) / 9
+
+    async def _verify_prediction_with_drc(
+        self,
+        pcb_state: Any,
+        modification: Any,
+        prediction: Any,
+        actual_new_state: Any
+    ) -> Dict[str, Any]:
+        """
+        Verify LLM dynamics prediction against actual DRC results.
+
+        This implements the DRC feedback loop to validate prediction accuracy
+        and improve future predictions through experience collection.
+
+        Args:
+            pcb_state: Original PCB state before modification
+            modification: The modification that was applied
+            prediction: LLM prediction of what would happen
+            actual_new_state: The actual PCB state after modification
+
+        Returns:
+            Dict with prediction accuracy metrics and feedback
+        """
+        feedback = {
+            "prediction_accuracy": 0.0,
+            "violations_fixed_predicted": [],
+            "violations_fixed_actual": [],
+            "violations_created_predicted": [],
+            "violations_created_actual": [],
+            "net_improvement_predicted": 0,
+            "net_improvement_actual": 0,
+            "feedback_for_llm": ""
+        }
+
+        try:
+            # Get original DRC
+            original_drc = None
+            if hasattr(pcb_state, 'run_drc'):
+                original_drc = pcb_state.run_drc()
+            original_violations = {}
+            if original_drc:
+                original_violations = getattr(original_drc, 'violations_by_type', {})
+                original_total = getattr(original_drc, 'total_violations', 0)
+            else:
+                original_total = 0
+
+            # Get new DRC
+            new_drc = None
+            if hasattr(actual_new_state, 'run_drc'):
+                new_drc = actual_new_state.run_drc()
+            new_violations = {}
+            if new_drc:
+                new_violations = getattr(new_drc, 'violations_by_type', {})
+                new_total = getattr(new_drc, 'total_violations', 0)
+            else:
+                new_total = 0
+
+            # Compute actual changes
+            violations_fixed_actual = []
+            violations_created_actual = []
+
+            for vtype in set(original_violations.keys()) | set(new_violations.keys()):
+                orig_count = original_violations.get(vtype, 0)
+                new_count = new_violations.get(vtype, 0)
+
+                if new_count < orig_count:
+                    violations_fixed_actual.append(vtype)
+                elif new_count > orig_count:
+                    violations_created_actual.append(vtype)
+
+            actual_improvement = original_total - new_total
+
+            # Get prediction values
+            if prediction is not None:
+                pred_fixed = getattr(prediction, 'violations_fixed', [])
+                pred_created = getattr(prediction, 'violations_created', [])
+                pred_improvement = getattr(prediction, 'net_improvement', 0)
+            else:
+                pred_fixed = []
+                pred_created = []
+                pred_improvement = 0
+
+            # Compute prediction accuracy
+            fixed_match = len(set(pred_fixed) & set(violations_fixed_actual))
+            fixed_total = max(len(set(pred_fixed) | set(violations_fixed_actual)), 1)
+            fixed_accuracy = fixed_match / fixed_total
+
+            created_match = len(set(pred_created) & set(violations_created_actual))
+            created_total = max(len(set(pred_created) | set(violations_created_actual)), 1)
+            created_accuracy = created_match / created_total if violations_created_actual else 1.0
+
+            improvement_accuracy = 1.0 - abs(pred_improvement - actual_improvement) / max(abs(actual_improvement), 10)
+            improvement_accuracy = max(0.0, improvement_accuracy)
+
+            overall_accuracy = (fixed_accuracy + created_accuracy + improvement_accuracy) / 3.0
+
+            # Store results
+            feedback["prediction_accuracy"] = overall_accuracy
+            feedback["violations_fixed_predicted"] = pred_fixed
+            feedback["violations_fixed_actual"] = violations_fixed_actual
+            feedback["violations_created_predicted"] = pred_created
+            feedback["violations_created_actual"] = violations_created_actual
+            feedback["net_improvement_predicted"] = pred_improvement
+            feedback["net_improvement_actual"] = actual_improvement
+
+            # Generate feedback for improving future predictions
+            if overall_accuracy < 0.7:
+                feedback["feedback_for_llm"] = (
+                    f"Prediction accuracy: {overall_accuracy:.1%}. "
+                    f"Predicted {pred_improvement} improvement but actual was {actual_improvement}. "
+                    f"Expected to fix {pred_fixed} but actually fixed {violations_fixed_actual}. "
+                    f"Unexpected violations: {violations_created_actual}."
+                )
+            else:
+                feedback["feedback_for_llm"] = f"Good prediction accuracy: {overall_accuracy:.1%}"
+
+            logger.info(
+                f"DRC feedback loop: accuracy={overall_accuracy:.1%}, "
+                f"predicted={pred_improvement}, actual={actual_improvement}"
+            )
+
+        except Exception as e:
+            logger.warning(f"DRC feedback verification failed: {e}")
+            feedback["feedback_for_llm"] = f"Verification failed: {e}"
+
+        return feedback
+
+    async def _apply_llm_guided_modification(
+        self,
+        pcb_state: Any,
+        max_attempts: int = 3
+    ) -> Tuple[Optional[Any], Optional[Any], Optional[Dict]]:
+        """
+        Apply LLM-guided modification with prediction verification.
+
+        Uses LLM policy to suggest modifications, dynamics simulator to predict
+        outcomes, and DRC feedback loop to verify and learn.
+
+        Args:
+            pcb_state: Current PCB state
+            max_attempts: Maximum modification attempts
+
+        Returns:
+            Tuple of (new_state, modification, feedback) or (None, None, None) if failed
+        """
+        if self.llm_policy is None:
+            return None, None, None
+
+        for attempt in range(max_attempts):
+            try:
+                # Get state embedding
+                embedding = self._encode_state(pcb_state)
+                drc_features = np.zeros(12)  # DRC context
+
+                # Get policy suggestions
+                probs, suggestions = await self._get_policy_async(
+                    pcb_state, embedding, drc_features
+                )
+
+                if not suggestions:
+                    logger.debug("No LLM suggestions available")
+                    continue
+
+                # Pick top suggestion
+                modification = suggestions[0]
+                logger.info(
+                    f"LLM suggested: {modification.mod_type} on {modification.target} "
+                    f"(confidence={modification.confidence:.2f})"
+                )
+
+                # Predict outcome using dynamics simulator
+                prediction = None
+                if self.llm_dynamics is not None:
+                    try:
+                        prediction = await self.llm_dynamics.simulate_modification(
+                            pcb_state, modification
+                        )
+                        logger.debug(
+                            f"Dynamics prediction: net_improvement={prediction.net_improvement}, "
+                            f"confidence={prediction.confidence:.2f}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Dynamics prediction failed: {e}")
+
+                # Apply modification
+                new_state = None
+                if hasattr(pcb_state, 'apply_modification'):
+                    try:
+                        new_state = pcb_state.apply_modification(modification)
+                    except Exception as e:
+                        logger.warning(f"Modification application failed: {e}")
+
+                if new_state is None:
+                    # Fallback: use Red Queen random mutation
+                    new_state = self.red_queen._random_mutate(pcb_state)
+
+                if new_state is None:
+                    continue
+
+                # Verify prediction against actual DRC
+                feedback = await self._verify_prediction_with_drc(
+                    pcb_state, modification, prediction, new_state
+                )
+
+                return new_state, modification, feedback
+
+            except Exception as e:
+                logger.warning(f"LLM-guided modification attempt {attempt + 1} failed: {e}")
+                continue
+
+        return None, None, None
 
     def _collect_experience(
         self,
@@ -542,10 +888,34 @@ class MAPOSRQOptimizer:
 
         optimization_id = f"mapos_rq_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # Track prediction feedback for learning
+        prediction_feedback_history: List[Dict[str, Any]] = []
+
         for rq_round in range(self.config.rq_rounds):
-            # Create population from current state
+            print(f"\n  Round {rq_round + 1}/{self.config.rq_rounds}")
+
+            # Try LLM-guided modification first (more intelligent)
+            llm_modified_state = None
+            llm_modification = None
+            llm_feedback = None
+
+            if self.llm_policy is not None:
+                llm_modified_state, llm_modification, llm_feedback = await self._apply_llm_guided_modification(
+                    current_state
+                )
+                if llm_feedback:
+                    prediction_feedback_history.append(llm_feedback)
+                    logger.debug(f"LLM modification feedback: {llm_feedback.get('prediction_accuracy', 0):.1%} accuracy")
+
+            # Create population from current state + LLM suggestion
             population = [current_state]
-            for _ in range(self.config.rq_population_size - 1):
+
+            # Add LLM-modified state to population if available
+            if llm_modified_state is not None:
+                population.append(llm_modified_state)
+
+            # Fill rest with random mutations
+            while len(population) < self.config.rq_population_size:
                 mutated = self.red_queen._random_mutate(current_state)
                 if mutated:
                     population.append(mutated)
@@ -558,31 +928,55 @@ class MAPOSRQOptimizer:
                 best_champion = max(round_result.champions, key=lambda c: c.fitness)
                 current_state = best_champion.solution
 
-                # Collect experience
+                # Collect experience with proper DRC analysis
                 drc = current_state.run_drc() if hasattr(current_state, 'run_drc') else None
                 violations = drc.total_violations if drc else best_violations
 
                 if violations < best_violations:
+                    improvement = best_violations - violations
+                    print(f"    Improvement: {best_violations} -> {violations} (-{improvement})")
                     best_violations = violations
                     best_state = current_state
 
-                # Record experience
+                # Get actual policy distribution if LLM suggestions were used
+                policy_target = np.ones(9) / 9  # Default uniform
+                if llm_modification is not None and self.llm_policy is not None:
+                    # Use the actual LLM-generated policy probabilities
+                    try:
+                        policy_target = self.llm_policy.get_action_probabilities(
+                            current_state,
+                            [llm_modification] if llm_modification else []
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to get policy target: {e}")
+
+                # Get proper value estimate for the state
+                embedding = self._encode_state(current_state)
+                value_target = self._get_value_estimate(embedding, pcb_state=current_state)
+
+                # Record experience with actual policy and value
                 self._collect_experience(
                     pcb_state=initial_state,
                     action=(0, np.zeros(5)),
                     reward=self.initial_violations - violations,
                     next_state=current_state,
                     done=False,
-                    value_target=best_champion.fitness,
-                    policy_target=np.ones(9) / 9,
+                    value_target=value_target,
+                    policy_target=policy_target,
                     optimization_id=optimization_id,
                     step=rq_round,
                 )
 
             # Check early termination
             if best_violations <= self.config.target_violations:
-                print(f"\nTarget reached in round {rq_round + 1}!")
+                print(f"\n  Target reached in round {rq_round + 1}!")
                 break
+
+        # Log prediction accuracy summary
+        if prediction_feedback_history:
+            accuracies = [f.get('prediction_accuracy', 0) for f in prediction_feedback_history]
+            avg_accuracy = sum(accuracies) / len(accuracies)
+            print(f"\n  LLM prediction accuracy: {avg_accuracy:.1%} (over {len(accuracies)} predictions)")
 
         # Phase 2: Ralph Wiggum Refinement (if not at target)
         if best_violations > self.config.target_violations:
