@@ -67,6 +67,10 @@ class OperationType(str, Enum):
     FIX_SOLDER_MASK = "fix_solder_mask"
     FIX_SILKSCREEN = "fix_silkscreen"
     FIX_DFM = "fix_dfm"
+    # Gaming AI operations (MAP-Elites + Red Queen + Ralph Wiggum)
+    GAMING_AI_OPTIMIZE = "gaming_ai_optimize"
+    GAMING_AI_QUICK = "gaming_ai_quick"
+    UNIFIED_OPTIMIZE = "unified_optimize"
 
 
 class OperationRequest(BaseModel):
@@ -111,6 +115,24 @@ class JobStatus(BaseModel):
     progress: int
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+class GamingAIRequest(BaseModel):
+    """Request for Gaming AI optimization (MAP-Elites + Red Queen + Ralph Wiggum)."""
+    pcb_filename: str = Field(..., description="PCB filename in /data directory")
+    target_violations: int = Field(default=100, description="Target DRC violations to reach")
+    rq_rounds: int = Field(default=10, description="Red Queen evolution rounds")
+    max_stagnation: int = Field(default=15, description="Max rounds without improvement before stopping")
+    use_llm: bool = Field(default=True, description="Use LLM for intelligent guidance")
+    api_key: Optional[str] = Field(default=None, description="OpenRouter API key for LLM calls")
+
+
+class UnifiedOptimizerRequest(BaseModel):
+    """Request for unified optimization (Base + LLM + Gaming AI)."""
+    pcb_filename: str = Field(..., description="PCB filename in /data directory")
+    mode: str = Field(default="hybrid", description="Mode: base, llm, gaming_ai, or hybrid")
+    target_violations: int = Field(default=100, description="Target DRC violations")
+    api_key: Optional[str] = Field(default=None, description="OpenRouter API key")
 
 
 # ============================================================================
@@ -363,6 +385,131 @@ async def run_operation(request: OperationRequest):
                                         '--mask-margin', str(mask_margin),
                                         '--silk-offset', str(silk_offset)])
 
+        elif request.operation == OperationType.GAMING_AI_OPTIMIZE:
+            # Full Gaming AI optimization (MAP-Elites + Red Queen + Ralph Wiggum)
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            if not user_api_key:
+                result = {'success': False, 'error': 'OpenRouter API key required for Gaming AI'}
+            else:
+                try:
+                    # Import Gaming AI integration
+                    sys.path.insert(0, str(Path(__file__).parent))
+                    from gaming_ai.integration import MAPOSRQOptimizer, MAPOSRQConfig
+
+                    config = MAPOSRQConfig(
+                        target_violations=request.params.get('target_violations', 100),
+                        rq_rounds=request.params.get('rq_rounds', 10),
+                        max_stagnation=request.params.get('max_stagnation', 15),
+                        use_llm=True,
+                        use_neural_networks=False,
+                        openrouter_api_key=user_api_key,
+                    )
+
+                    optimizer = MAPOSRQOptimizer(str(pcb_path), config=config)
+
+                    # Run async optimizer synchronously
+                    loop = asyncio.new_event_loop()
+                    try:
+                        opt_result = loop.run_until_complete(optimizer.optimize())
+                        result = {
+                            'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
+                            'status': opt_result.status.name,
+                            'initial_violations': opt_result.initial_violations,
+                            'final_violations': opt_result.final_violations,
+                            'improvement': opt_result.improvement,
+                            'improvement_pct': opt_result.improvement_pct,
+                            'red_queen_rounds': opt_result.red_queen_rounds,
+                            'champions_found': len(opt_result.champions) if opt_result.champions else 0,
+                        }
+                    finally:
+                        loop.close()
+                except ImportError as e:
+                    result = {'success': False, 'error': f'Gaming AI module not available: {e}'}
+                except Exception as e:
+                    result = {'success': False, 'error': f'Gaming AI error: {e}'}
+
+        elif request.operation == OperationType.GAMING_AI_QUICK:
+            # Quick Gaming AI (fewer rounds for faster results)
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            if not user_api_key:
+                result = {'success': False, 'error': 'OpenRouter API key required for Gaming AI'}
+            else:
+                try:
+                    sys.path.insert(0, str(Path(__file__).parent))
+                    from gaming_ai.integration import MAPOSRQOptimizer, MAPOSRQConfig
+
+                    config = MAPOSRQConfig(
+                        target_violations=request.params.get('target_violations', 100),
+                        rq_rounds=3,  # Quick mode - fewer rounds
+                        max_stagnation=5,
+                        use_llm=True,
+                        use_neural_networks=False,
+                        openrouter_api_key=user_api_key,
+                    )
+
+                    optimizer = MAPOSRQOptimizer(str(pcb_path), config=config)
+
+                    loop = asyncio.new_event_loop()
+                    try:
+                        opt_result = loop.run_until_complete(optimizer.optimize())
+                        result = {
+                            'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
+                            'status': opt_result.status.name,
+                            'initial_violations': opt_result.initial_violations,
+                            'final_violations': opt_result.final_violations,
+                            'improvement': opt_result.improvement,
+                            'improvement_pct': opt_result.improvement_pct,
+                        }
+                    finally:
+                        loop.close()
+                except ImportError as e:
+                    result = {'success': False, 'error': f'Gaming AI module not available: {e}'}
+                except Exception as e:
+                    result = {'success': False, 'error': f'Gaming AI error: {e}'}
+
+        elif request.operation == OperationType.UNIFIED_OPTIMIZE:
+            # Unified optimizer (Base + LLM + Gaming AI)
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            mode = request.params.get('mode', 'hybrid')
+            try:
+                sys.path.insert(0, str(Path(__file__).parent))
+                from unified_optimizer import UnifiedMAPOSOptimizer, OptimizationMode
+
+                mode_map = {
+                    'base': OptimizationMode.BASE,
+                    'llm': OptimizationMode.LLM,
+                    'gaming_ai': OptimizationMode.GAMING_AI,
+                    'hybrid': OptimizationMode.HYBRID,
+                }
+                opt_mode = mode_map.get(mode, OptimizationMode.HYBRID)
+
+                optimizer = UnifiedMAPOSOptimizer(
+                    str(pcb_path),
+                    mode=opt_mode,
+                    target_violations=request.params.get('target_violations', 100),
+                    api_key=user_api_key,
+                )
+
+                loop = asyncio.new_event_loop()
+                try:
+                    opt_result = loop.run_until_complete(optimizer.optimize())
+                    result = {
+                        'success': opt_result.success,
+                        'mode': opt_result.mode,
+                        'initial_violations': opt_result.initial_violations,
+                        'final_violations': opt_result.final_violations,
+                        'improvement': opt_result.improvement,
+                        'improvement_pct': opt_result.improvement_pct,
+                        'phases': opt_result.phases,
+                        'duration_seconds': opt_result.duration_seconds,
+                    }
+                finally:
+                    loop.close()
+            except ImportError as e:
+                result = {'success': False, 'error': f'Unified optimizer not available: {e}'}
+            except Exception as e:
+                result = {'success': False, 'error': f'Unified optimizer error: {e}'}
+
         else:
             raise HTTPException(status_code=400, detail=f"Unknown operation: {request.operation}")
 
@@ -441,6 +588,150 @@ async def get_job_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     return jobs[job_id]
+
+
+@app.post("/v1/gaming-ai/optimize")
+async def gaming_ai_optimize(request: GamingAIRequest, background_tasks: BackgroundTasks):
+    """
+    Start Gaming AI optimization with MAP-Elites + Red Queen + Ralph Wiggum.
+
+    This is the full Gaming AI pipeline for maximum optimization quality.
+    Uses evolutionary algorithms and LLM guidance to optimize PCB layout.
+    """
+    import uuid
+    import hashlib
+
+    pcb_path = DATA_DIR / request.pcb_filename
+    if not pcb_path.exists():
+        raise HTTPException(status_code=404, detail=f"PCB not found: {request.pcb_filename}")
+
+    # Generate job ID
+    job_id = hashlib.md5(f"{request.pcb_filename}:{datetime.utcnow()}".encode()).hexdigest()[:8]
+    jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
+
+    async def run_gaming_ai():
+        try:
+            jobs[job_id].status = "running"
+            jobs[job_id].progress = 5
+
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+            if request.use_llm and not user_api_key:
+                jobs[job_id].status = "failed"
+                jobs[job_id].error = "OpenRouter API key required for LLM-guided Gaming AI"
+                return
+
+            # Import Gaming AI
+            sys.path.insert(0, str(Path(__file__).parent))
+            from gaming_ai.integration import MAPOSRQOptimizer, MAPOSRQConfig
+
+            config = MAPOSRQConfig(
+                target_violations=request.target_violations,
+                rq_rounds=request.rq_rounds,
+                max_stagnation=request.max_stagnation,
+                use_llm=request.use_llm,
+                use_neural_networks=False,
+                openrouter_api_key=user_api_key,
+            )
+
+            jobs[job_id].progress = 10
+
+            optimizer = MAPOSRQOptimizer(str(pcb_path), config=config)
+            result = await optimizer.optimize()
+
+            jobs[job_id].status = "completed" if result.status.name in ['SUCCESS', 'PARTIAL'] else "failed"
+            jobs[job_id].progress = 100
+            jobs[job_id].result = {
+                'status': result.status.name,
+                'initial_violations': result.initial_violations,
+                'final_violations': result.final_violations,
+                'improvement': result.improvement,
+                'improvement_pct': result.improvement_pct,
+                'red_queen_rounds': result.red_queen_rounds,
+                'champions_found': len(result.champions) if result.champions else 0,
+                'best_champion': result.champions[0] if result.champions else None,
+            }
+
+        except ImportError as e:
+            jobs[job_id].status = "failed"
+            jobs[job_id].error = f"Gaming AI module not available: {e}"
+        except Exception as e:
+            jobs[job_id].status = "failed"
+            jobs[job_id].error = str(e)
+
+    background_tasks.add_task(run_gaming_ai)
+    return {"job_id": job_id, "status": "pending", "message": "Gaming AI optimization started"}
+
+
+@app.post("/v1/unified/optimize")
+async def unified_optimize(request: UnifiedOptimizerRequest, background_tasks: BackgroundTasks):
+    """
+    Start unified optimization (Base + LLM + Gaming AI).
+
+    Modes:
+    - base: Basic MAPOS (zone fill, net assignment, etc.)
+    - llm: LLM-guided fixing via Claude Opus 4.5
+    - gaming_ai: MAP-Elites + Red Queen + Ralph Wiggum
+    - hybrid: Base -> LLM -> Gaming AI (most thorough)
+    """
+    import hashlib
+
+    pcb_path = DATA_DIR / request.pcb_filename
+    if not pcb_path.exists():
+        raise HTTPException(status_code=404, detail=f"PCB not found: {request.pcb_filename}")
+
+    job_id = hashlib.md5(f"{request.pcb_filename}:{datetime.utcnow()}".encode()).hexdigest()[:8]
+    jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
+
+    async def run_unified():
+        try:
+            jobs[job_id].status = "running"
+            jobs[job_id].progress = 5
+
+            user_api_key = request.api_key or OPENROUTER_API_KEY
+
+            sys.path.insert(0, str(Path(__file__).parent))
+            from unified_optimizer import UnifiedMAPOSOptimizer, OptimizationMode
+
+            mode_map = {
+                'base': OptimizationMode.BASE,
+                'llm': OptimizationMode.LLM,
+                'gaming_ai': OptimizationMode.GAMING_AI,
+                'hybrid': OptimizationMode.HYBRID,
+            }
+            opt_mode = mode_map.get(request.mode, OptimizationMode.HYBRID)
+
+            optimizer = UnifiedMAPOSOptimizer(
+                str(pcb_path),
+                mode=opt_mode,
+                target_violations=request.target_violations,
+                api_key=user_api_key,
+            )
+
+            jobs[job_id].progress = 10
+            result = await optimizer.optimize()
+
+            jobs[job_id].status = "completed" if result.success else "failed"
+            jobs[job_id].progress = 100
+            jobs[job_id].result = {
+                'mode': result.mode,
+                'initial_violations': result.initial_violations,
+                'final_violations': result.final_violations,
+                'improvement': result.improvement,
+                'improvement_pct': result.improvement_pct,
+                'success': result.success,
+                'phases': result.phases,
+                'duration_seconds': result.duration_seconds,
+            }
+
+        except ImportError as e:
+            jobs[job_id].status = "failed"
+            jobs[job_id].error = f"Unified optimizer not available: {e}"
+        except Exception as e:
+            jobs[job_id].status = "failed"
+            jobs[job_id].error = str(e)
+
+    background_tasks.add_task(run_unified)
+    return {"job_id": job_id, "status": "pending", "message": f"Unified optimization ({request.mode}) started"}
 
 
 @app.post("/v1/upload")

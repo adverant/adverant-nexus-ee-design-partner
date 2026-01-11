@@ -24,6 +24,37 @@ import tempfile
 import shutil
 
 
+def find_kicad_cli() -> Optional[str]:
+    """
+    Auto-detect kicad-cli executable across platforms.
+
+    Searches common installation paths for macOS, Linux, and containers.
+
+    Returns:
+        Path to kicad-cli if found, None otherwise
+    """
+    candidates = [
+        # macOS KiCad 8.x
+        '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli',
+        # Linux system paths
+        '/usr/bin/kicad-cli',
+        '/usr/local/bin/kicad-cli',
+        # Linux PPA/snap installs
+        '/snap/kicad/current/bin/kicad-cli',
+        '/opt/kicad/bin/kicad-cli',
+        # Container paths
+        '/usr/lib/kicad/bin/kicad-cli',
+        # System PATH (last resort)
+        shutil.which('kicad-cli'),
+    ]
+
+    for path in candidates:
+        if path and Path(path).exists():
+            return path
+
+    return None
+
+
 class ModificationType(Enum):
     """Types of modifications that can be applied to a PCB."""
     # Component positioning
@@ -597,12 +628,12 @@ class PCBState:
 
         return output
 
-    def run_drc(self, kicad_cli: str = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli") -> DRCResult:
+    def run_drc(self, kicad_cli: Optional[str] = None) -> DRCResult:
         """
         Run KiCad DRC on this state.
 
         Args:
-            kicad_cli: Path to kicad-cli executable
+            kicad_cli: Path to kicad-cli executable. If None, auto-detects.
 
         Returns:
             DRCResult with violation counts
@@ -612,6 +643,12 @@ class PCBState:
 
         if not self.pcb_path or not self.pcb_path.exists():
             raise RuntimeError("No PCB file available for DRC")
+
+        # Auto-detect kicad-cli if not provided
+        if kicad_cli is None:
+            kicad_cli = find_kicad_cli()
+        if not kicad_cli:
+            raise RuntimeError("kicad-cli not found. Please install KiCad or provide explicit path.")
 
         # Create temp file if modifications need to be applied
         if self.modifications:

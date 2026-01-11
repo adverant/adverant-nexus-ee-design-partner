@@ -9,6 +9,7 @@ targeted S-expression modifications.
 NO MOCKS, NO STUBS, NO SHORTCUTS - Real LLM calls and real PCB modifications.
 
 Uses OpenRouter API with Claude Opus 4.5 model.
+Integrates fix pattern caching to reduce repeat LLM calls (~$0.30 each).
 """
 
 import os
@@ -22,6 +23,14 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
+
+# Import fix pattern cache for cost savings
+try:
+    from fix_cache import get_fix_cache, FixPatternCache
+    FIX_CACHE_AVAILABLE = True
+except ImportError:
+    FIX_CACHE_AVAILABLE = False
+    get_fix_cache = None
 
 
 @dataclass
@@ -156,11 +165,43 @@ class LLMPCBFixer:
             return json.load(f)
 
     def analyze_violations_with_llm(self, drc_data: Dict) -> str:
-        """Use LLM to analyze DRC violations and suggest fixes."""
+        """Use LLM to analyze DRC violations and suggest fixes.
 
-        # Prepare violation summary
+        Uses fix pattern caching to avoid repeat LLM calls for known violation types.
+        """
+
+        # Check cache first for known fix patterns
         violations = drc_data.get('violations', [])
         unconnected = drc_data.get('unconnected_items', [])
+
+        cached_operations = []
+        uncached_violations = []
+
+        if FIX_CACHE_AVAILABLE and get_fix_cache is not None:
+            cache = get_fix_cache()
+            for v in violations:
+                cached = cache.get(v)
+                if cached:
+                    cached_operations.extend(cached)
+                    print(f"  Cache hit for violation type: {v.get('type', 'unknown')}")
+                else:
+                    uncached_violations.append(v)
+
+            # If all violations are cached, return cached operations directly
+            if not uncached_violations and cached_operations:
+                cache_stats = cache.get_stats()
+                print(f"\n  All {len(violations)} violations matched cache patterns!")
+                print(f"  Estimated savings: {cache_stats['savings_usd']}")
+                return json.dumps({
+                    'analysis': 'All violations matched cached fix patterns',
+                    'recommended_operations': cached_operations,
+                    'from_cache': True,
+                    'cache_stats': cache_stats,
+                })
+        else:
+            uncached_violations = violations
+
+        # Prepare violation summary for uncached violations
 
         # Group by type
         by_type = {}
@@ -627,6 +668,14 @@ Output JSON:
 
         improvement = total - new_total
         print(f"\nResult: {total} -> {new_total} ({improvement:+d} violations)")
+
+        # Store successful fix patterns in cache for future reuse
+        if FIX_CACHE_AVAILABLE and get_fix_cache is not None and improvement > 0:
+            cache = get_fix_cache()
+            for v in violations:
+                # Store fix pattern with success=True if we got improvement
+                cache.put(v, operations, success=True)
+            print(f"  Cached {len(violations)} fix patterns for future reuse")
 
         return {
             'violations': new_total,
