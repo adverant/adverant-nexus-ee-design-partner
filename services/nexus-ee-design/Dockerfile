@@ -49,7 +49,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # =============================================================================
 # Stage 3: Production Runtime
 # =============================================================================
-FROM node:20-alpine AS production
+# Use Python 3.11 Alpine to match the venv Python version
+FROM python:3.11-alpine AS production
 
 # Build arguments for metadata
 ARG BUILD_ID
@@ -78,14 +79,15 @@ ENV NODE_ENV=production \
     NEXUS_VERSION="${VERSION}" \
     PYTHON_PATH="/opt/venv/bin/python3" \
     PYTHON_SCRIPTS_DIR="/app/python-scripts" \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/app/python-scripts"
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies including Node.js 20
 RUN apk add --no-cache \
-    python3 \
-    py3-pip \
+    nodejs \
+    npm \
     tini \
     curl \
     && rm -rf /var/cache/apk/*
