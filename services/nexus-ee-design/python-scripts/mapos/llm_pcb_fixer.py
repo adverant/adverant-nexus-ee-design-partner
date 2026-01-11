@@ -99,6 +99,41 @@ class LLMPCBFixer:
                 return path
         return None
 
+    def _find_kicad_python(self) -> Optional[str]:
+        """Find Python interpreter with pcbnew module available."""
+        # Check if pcbnew is available in current Python
+        try:
+            import pcbnew
+            return sys.executable
+        except ImportError:
+            pass
+
+        # Search common KiCad Python locations
+        paths = [
+            # macOS
+            '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3',
+            '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.11/bin/python3',
+            # Linux (Ubuntu/Debian with KiCad from PPA)
+            '/usr/bin/python3',
+            # Container environments
+            sys.executable,
+        ]
+
+        for path in paths:
+            if path and Path(path).exists():
+                # Verify pcbnew is importable
+                try:
+                    result = subprocess.run(
+                        [path, '-c', 'import pcbnew; print(pcbnew.Version())'],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        return path
+                except Exception:
+                    continue
+
+        return None
+
     def run_drc(self) -> Dict[str, Any]:
         """Run KiCad DRC and return parsed results."""
         if not self.kicad_cli:
@@ -328,9 +363,9 @@ Always output valid JSON when requested."""
 
         # Route to pcbnew scripts
         script_dir = Path(__file__).parent
-        kicad_python = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"
+        kicad_python = self._find_kicad_python()
 
-        if not Path(kicad_python).exists():
+        if not kicad_python:
             print(f"    Warning: KiCad Python not found")
             return False
 
@@ -469,9 +504,9 @@ Output JSON:
         use KiCad's native API and won't corrupt the file structure.
         """
         script_dir = Path(__file__).parent
-        kicad_python = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"
+        kicad_python = self._find_kicad_python()
 
-        if not Path(kicad_python).exists():
+        if not kicad_python:
             print("  Warning: KiCad Python not found, skipping pcbnew fixes")
             return {'success': False, 'error': 'KiCad Python not available'}
 
