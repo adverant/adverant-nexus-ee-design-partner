@@ -33,9 +33,18 @@ RUN npm prune --production
 # =============================================================================
 # Stage 2: Python Environment
 # =============================================================================
-FROM python:3.11-slim AS python-builder
+# Use Alpine to match production runtime (musl libc)
+FROM python:3.11-alpine AS python-builder
 
 WORKDIR /opt
+
+# Install build dependencies for compiling Python packages
+RUN apk add --no-cache \
+    build-base \
+    gfortran \
+    openblas-dev \
+    lapack-dev \
+    pkgconfig
 
 # Install Python dependencies
 RUN python -m venv /opt/venv
@@ -44,6 +53,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY python-scripts/requirements.txt ./
 
+# Install packages - they'll compile against musl
 RUN pip install --no-cache-dir -r requirements.txt
 
 # =============================================================================
@@ -84,12 +94,15 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-# Install runtime dependencies including Node.js 20
+# Install runtime dependencies including Node.js and numpy dependencies
 RUN apk add --no-cache \
     nodejs \
     npm \
     tini \
     curl \
+    openblas \
+    libstdc++ \
+    libgfortran \
     && rm -rf /var/cache/apk/*
 
 # Create non-root user
