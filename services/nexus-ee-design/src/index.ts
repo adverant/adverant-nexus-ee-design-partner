@@ -30,12 +30,14 @@ async function startServer(): Promise<void> {
   const httpServer = createServer(app);
 
   // Socket.IO for real-time updates
+  // Path must match what Istio routes from external traffic (no rewrite)
+  // External: wss://api.adverant.ai/ee-design/ws → backend /ee-design/ws
   const io = new SocketIOServer(httpServer, {
     cors: {
       origin: '*',
       methods: ['GET', 'POST'],
     },
-    path: '/ws',
+    path: '/ee-design/ws',
   });
 
   // Middleware

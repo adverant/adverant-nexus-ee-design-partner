@@ -36,19 +36,43 @@ spec:
   http:
   # ==========================================================================
   # WebSocket route (must come first for proper upgrade handling)
+  # Socket.IO is configured to use /ee-design/ws path for consistency
+  # with external routing through api-gateway-virtualservice
   # ==========================================================================
   - match:
     - headers:
         upgrade:
           exact: websocket
       uri:
-        prefix: /ws
+        prefix: /ee-design/ws
     route:
     - destination:
         host: nexus-ee-design.nexus.svc.cluster.local
         port:
           number: 8080
     timeout: 3600s  # 1 hour for long-running WebSocket connections
+    corsPolicy:
+      allowOrigins:
+      - prefix: "*"
+      allowMethods:
+      - GET
+      - POST
+      - OPTIONS
+      allowHeaders:
+      - "*"
+      exposeHeaders:
+      - "*"
+
+  # Socket.IO polling transport (HTTP fallback)
+  - match:
+    - uri:
+        prefix: /ee-design/ws
+    route:
+    - destination:
+        host: nexus-ee-design.nexus.svc.cluster.local
+        port:
+          number: 8080
+    timeout: 60s
     corsPolicy:
       allowOrigins:
       - prefix: "*"
