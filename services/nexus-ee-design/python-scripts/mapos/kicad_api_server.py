@@ -58,6 +58,7 @@ class OperationType(str, Enum):
     FIX_ZONE_NETS = "fix_zone_nets"
     FIX_CLEARANCES = "fix_clearances"
     REMOVE_DANGLING_VIAS = "remove_dangling_vias"
+    FIX_DANGLING_TRACKS = "fix_dangling_tracks"  # NEW: Fix dangling track endpoints
     ASSIGN_ORPHAN_NETS = "assign_orphan_nets"
     ADJUST_TRACE_WIDTH = "adjust_trace_width"
     ADJUST_POWER_TRACES = "adjust_power_traces"
@@ -251,6 +252,7 @@ async def list_operations():
                     "fix_zone_nets": "Correct zone net assignments",
                     "fix_clearances": "Update design settings clearances",
                     "remove_dangling_vias": "Remove vias not connected to tracks",
+                    "fix_dangling_tracks": "Fix tracks with dangling endpoints (extend or remove)",
                     "assign_orphan_nets": "Assign nets to unconnected pads",
                     "adjust_trace_width": "Modify trace widths for a specific net",
                     "adjust_power_traces": "Widen all power traces",
@@ -290,6 +292,39 @@ async def run_operation(request: OperationRequest):
 
         elif request.operation == OperationType.REMOVE_DANGLING_VIAS:
             result = run_python_script('kicad_pcb_fixer.py', ['dangling-vias', str(pcb_path), '--json'])
+
+        elif request.operation == OperationType.FIX_DANGLING_TRACKS:
+            # Fix dangling track endpoints - extend to nearest connection or remove
+            strategy = request.params.get('strategy', 'smart')  # smart, extend, remove, trim
+            max_extension_mm = request.params.get('max_extension_mm', 5.0)
+
+            if strategy == 'extend':
+                result = run_python_script('kicad_dangling_track_fixer.py',
+                                           [str(pcb_path), '--extend',
+                                            '--max-extension-mm', str(max_extension_mm),
+                                            '--json'])
+            elif strategy == 'remove':
+                result = run_python_script('kicad_dangling_track_fixer.py',
+                                           [str(pcb_path), '--remove', '--json'])
+            elif strategy == 'trim':
+                result = run_python_script('kicad_dangling_track_fixer.py',
+                                           [str(pcb_path), '--trim', '--json'])
+            else:  # smart: extend first, then trim remaining
+                # First try to extend
+                extend_result = run_python_script('kicad_dangling_track_fixer.py',
+                                                  [str(pcb_path), '--extend',
+                                                   '--max-extension-mm', str(max_extension_mm),
+                                                   '--json'])
+                # Then trim what couldn't be extended
+                trim_result = run_python_script('kicad_dangling_track_fixer.py',
+                                                [str(pcb_path), '--trim', '--json'])
+                result = {
+                    'success': extend_result.get('success', False) or trim_result.get('success', False),
+                    'strategy': 'smart',
+                    'extend': extend_result,
+                    'trim': trim_result,
+                    'total_fixed': extend_result.get('tracks_extended', 0) + trim_result.get('fully_removed', 0),
+                }
 
         elif request.operation == OperationType.ASSIGN_ORPHAN_NETS:
             result = run_python_script('kicad_net_assigner.py', [str(pcb_path), '--json'])

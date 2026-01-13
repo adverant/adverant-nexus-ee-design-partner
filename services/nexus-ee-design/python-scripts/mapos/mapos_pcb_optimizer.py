@@ -268,6 +268,237 @@ class MAPOSPCBOptimizer:
                 return True, 0
             return False, 0
 
+    def fix_dangling_tracks(self, strategy: str = 'smart') -> Tuple[bool, int, Dict[str, Any]]:
+        """
+        Fix dangling track violations using pcbnew API.
+
+        This calls the standalone kicad_dangling_track_fixer.py script.
+        The 'smart' strategy first tries to extend tracks to nearby connections,
+        then removes tracks that can't be extended.
+
+        Args:
+            strategy: 'remove' (remove all dangling), 'extend' (try to extend),
+                     'trim' (conservative), or 'smart' (extend then remove remaining)
+
+        Returns:
+            Tuple of (success, tracks_fixed, result_dict)
+        """
+        if not Path(KICAD_PYTHON).exists():
+            print(f"  Warning: KiCad Python not found at {KICAD_PYTHON}")
+            return False, 0, {'error': 'KiCad Python not found'}
+
+        script_path = Path(__file__).parent / 'kicad_dangling_track_fixer.py'
+        if not script_path.exists():
+            print(f"  Warning: Dangling track fixer script not found at {script_path}")
+            return False, 0, {'error': 'Script not found'}
+
+        env = os.environ.copy()
+        env['DISPLAY'] = ''
+        env['KICAD_NO_TRACKING'] = '1'
+
+        total_fixed = 0
+        combined_result: Dict[str, Any] = {'strategy': strategy, 'operations': []}
+
+        if strategy == 'smart':
+            # First: try to extend dangling tracks to nearest connections
+            extend_result = subprocess.run(
+                [KICAD_PYTHON, str(script_path), str(self.pcb_path), '--extend', '--json'],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env
+            )
+
+            try:
+                stdout = extend_result.stdout.strip()
+                json_start = stdout.rfind('\n{')
+                if json_start >= 0:
+                    extend_output = json.loads(stdout[json_start + 1:])
+                elif stdout.startswith('{'):
+                    extend_output = json.loads(stdout)
+                else:
+                    extend_output = {}
+
+                extended = extend_output.get('tracks_extended', 0)
+                total_fixed += extended
+                combined_result['operations'].append({
+                    'type': 'extend',
+                    'tracks_extended': extended,
+                    'failed': extend_output.get('extension_failed', 0)
+                })
+            except (json.JSONDecodeError, Exception):
+                combined_result['operations'].append({'type': 'extend', 'error': 'parse_failed'})
+
+            # Second: remove remaining dangling tracks that couldn't be extended
+            remove_result = subprocess.run(
+                [KICAD_PYTHON, str(script_path), str(self.pcb_path), '--trim', '--json'],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env
+            )
+
+            try:
+                stdout = remove_result.stdout.strip()
+                json_start = stdout.rfind('\n{')
+                if json_start >= 0:
+                    remove_output = json.loads(stdout[json_start + 1:])
+                elif stdout.startswith('{'):
+                    remove_output = json.loads(stdout)
+                else:
+                    remove_output = {}
+
+                removed = remove_output.get('fully_removed', 0)
+                total_fixed += removed
+                combined_result['operations'].append({
+                    'type': 'trim',
+                    'tracks_removed': removed,
+                    'flagged_for_review': remove_output.get('flagged_for_review', 0)
+                })
+            except (json.JSONDecodeError, Exception):
+                combined_result['operations'].append({'type': 'trim', 'error': 'parse_failed'})
+
+        else:
+            # Single operation based on strategy
+            if strategy == 'extend':
+                flag = '--extend'
+            elif strategy == 'trim':
+                flag = '--trim'
+            else:  # remove
+                flag = '--remove'
+
+            result = subprocess.run(
+                [KICAD_PYTHON, str(script_path), str(self.pcb_path), flag, '--json'],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env
+            )
+
+            try:
+                stdout = result.stdout.strip()
+                json_start = stdout.rfind('\n{')
+                if json_start >= 0:
+                    output = json.loads(stdout[json_start + 1:])
+                elif stdout.startswith('{'):
+                    output = json.loads(stdout)
+                else:
+                    output = {}
+
+                if strategy == 'extend':
+                    total_fixed = output.get('tracks_extended', 0)
+                elif strategy == 'trim':
+                    total_fixed = output.get('fully_removed', 0)
+                else:
+                    total_fixed = output.get('tracks_removed', 0)
+
+                combined_result['operations'].append({
+                    'type': strategy,
+                    'result': output
+                })
+            except (json.JSONDecodeError, Exception) as e:
+                combined_result['operations'].append({'type': strategy, 'error': str(e)})
+
+        # Reload PCB content
+        with open(self.pcb_path, 'r') as f:
+            self.pcb_content = f.read()
+
+        if total_fixed > 0:
+            self.fixes.append(Fix(
+                fix_type=FixType.DANGLING_TRACK,
+                description=f"Fixed {total_fixed} dangling tracks via pcbnew (strategy: {strategy})",
+                before=f"({total_fixed} dangling tracks)",
+                after="(fixed/removed)",
+                count=total_fixed
+            ))
+
+        combined_result['total_fixed'] = total_fixed
+        return True, total_fixed, combined_result
+
+    def fix_footprint_issues(self) -> Tuple[bool, int, Dict[str, Any]]:
+        """
+        Fix auto-fixable footprint issues using pcbnew API.
+
+        This addresses lib_footprint_issues DRC violations by:
+        - Adding missing courtyards (0.25mm margin)
+        - Correcting SMD/TH attribute mismatches
+        - Setting DNP flag on parts with "DNP" in value
+
+        Note: Full library synchronization requires KiCad GUI's
+        "Update PCB from Schematic" feature - not available in headless mode.
+
+        Returns:
+            Tuple of (success, fixes_count, result_dict)
+        """
+        if not Path(KICAD_PYTHON).exists():
+            print(f"  Warning: KiCad Python not found at {KICAD_PYTHON}")
+            return False, 0, {'error': 'KiCad Python not found'}
+
+        script_path = Path(__file__).parent / 'kicad_footprint_updater.py'
+        if not script_path.exists():
+            print(f"  Warning: Footprint updater script not found at {script_path}")
+            return False, 0, {'error': 'Script not found'}
+
+        env = os.environ.copy()
+        env['DISPLAY'] = ''
+        env['KICAD_NO_TRACKING'] = '1'
+
+        # Run the auto-fix operation
+        result = subprocess.run(
+            [KICAD_PYTHON, str(script_path), str(self.pcb_path), '--fix', '--json'],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env
+        )
+
+        fixes_applied = 0
+        output_dict: Dict[str, Any] = {}
+
+        try:
+            stdout = result.stdout.strip()
+            json_start = stdout.rfind('\n{')
+            if json_start >= 0:
+                output_dict = json.loads(stdout[json_start + 1:])
+            elif stdout.startswith('{'):
+                output_dict = json.loads(stdout)
+
+            fixes_applied = output_dict.get('fixes_applied', 0)
+            auto_fixable = output_dict.get('auto_fixable', 0)
+            flagged = output_dict.get('flagged_for_review', 0)
+
+            # Reload PCB content
+            with open(self.pcb_path, 'r') as f:
+                self.pcb_content = f.read()
+
+            if fixes_applied > 0:
+                # Record the fix
+                description_parts = []
+                for fix in output_dict.get('applied', []):
+                    action = fix.get('action', 'unknown')
+                    ref = fix.get('reference', '?')
+                    description_parts.append(f"{action}:{ref}")
+
+                self.fixes.append(Fix(
+                    fix_type=FixType.ZONE_NET,  # Using ZONE_NET as generic "fix" type
+                    description=f"Fixed {fixes_applied} footprint issues ({', '.join(description_parts[:5])}{'...' if len(description_parts) > 5 else ''})",
+                    before=f"({auto_fixable} auto-fixable issues)",
+                    after="(fixed)",
+                    count=fixes_applied
+                ))
+
+            # Add info about unfixable issues to result
+            output_dict['note'] = 'lib_footprint_mismatch issues require KiCad "Update PCB from Schematic"'
+
+        except (json.JSONDecodeError, Exception) as e:
+            output_dict = {'error': str(e), 'parse_failed': True}
+            if result.returncode == 0:
+                with open(self.pcb_path, 'r') as f:
+                    self.pcb_content = f.read()
+
+        output_dict['fixes_applied'] = fixes_applied
+        return True, fixes_applied, output_dict
+
     # =========================================================================
     # FIX: Design Rules
     # =========================================================================
@@ -680,6 +911,18 @@ class MAPOSPCBOptimizer:
         print("\n[2/7] Running pcbnew API fixes (zone nets, settings, dangling vias)...")
         pcbnew_success, pcbnew_fixes = self.run_pcbnew_fixes()
         print(f"  {'Success' if pcbnew_success else 'Failed'}: {pcbnew_fixes} fixes applied")
+
+        # Phase 2.5: Fix dangling tracks
+        print("\n[2.5/7] Fixing dangling tracks...")
+        track_success, tracks_fixed, track_result = self.fix_dangling_tracks()
+        print(f"  {'Success' if track_success else 'Failed'}: {tracks_fixed} tracks fixed")
+
+        # Phase 2.6: Fix footprint issues (courtyards, attributes)
+        print("\n[2.6/7] Fixing footprint issues (courtyards, attributes)...")
+        fp_success, fp_fixed, fp_result = self.fix_footprint_issues()
+        print(f"  {'Success' if fp_success else 'Failed'}: {fp_fixed} footprints fixed")
+        if fp_result.get('note'):
+            print(f"  Note: {fp_result['note']}")
 
         # Phase 3: Zone fill via pcbnew
         print("\n[3/7] Filling zones via pcbnew ZONE_FILLER...")
