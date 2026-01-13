@@ -410,13 +410,15 @@ async def run_operation(request: OperationRequest):
 
                     # Run async optimizer (we're already in an async context)
                     opt_result = await optimizer.optimize()
+                    # Calculate improvement percentage
+                    improvement_pct = (opt_result.improvement / opt_result.initial_violations * 100) if opt_result.initial_violations > 0 else 0.0
                     result = {
                         'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
                         'status': opt_result.status.name,
                         'initial_violations': opt_result.initial_violations,
                         'final_violations': opt_result.final_violations,
                         'improvement': opt_result.improvement,
-                        'improvement_pct': opt_result.improvement_pct,
+                        'improvement_pct': improvement_pct,
                         'red_queen_rounds': opt_result.red_queen_rounds,
                         'champions_found': len(opt_result.champions) if opt_result.champions else 0,
                     }
@@ -448,13 +450,15 @@ async def run_operation(request: OperationRequest):
 
                     # Run async optimizer (we're already in an async context)
                     opt_result = await optimizer.optimize()
+                    # Calculate improvement percentage
+                    improvement_pct = (opt_result.improvement / opt_result.initial_violations * 100) if opt_result.initial_violations > 0 else 0.0
                     result = {
                         'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
                         'status': opt_result.status.name,
                         'initial_violations': opt_result.initial_violations,
                         'final_violations': opt_result.final_violations,
                         'improvement': opt_result.improvement,
-                        'improvement_pct': opt_result.improvement_pct,
+                        'improvement_pct': improvement_pct,
                     }
                 except ImportError as e:
                     result = {'success': False, 'error': f'Gaming AI module not available: {e}'}
