@@ -43,8 +43,8 @@ RUN pip3 install --no-cache-dir \
 # Create working directory
 WORKDIR /app
 
-# Copy MAPOS scripts
-COPY python-scripts/mapos/ /app/
+# Copy MAPOS scripts (path relative to build context at repo root)
+COPY services/nexus-ee-design/python-scripts/mapos/ /app/
 
 # Set environment variables
 ENV DISPLAY=:99
