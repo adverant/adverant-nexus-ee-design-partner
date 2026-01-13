@@ -41,9 +41,19 @@ class FixType(Enum):
     NET_ASSIGNMENT = "net_assignment"
 
 
-# KiCad Python paths (macOS)
-KICAD_PYTHON = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"
-KICAD_SITE_PACKAGES = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages"
+# KiCad paths - auto-detect based on platform (macOS vs Linux/Docker)
+try:
+    from kicad_paths import KICAD_PYTHON, KICAD_SITE_PACKAGES, KICAD_CLI
+except ImportError:
+    # Fallback for standalone execution
+    from pathlib import Path as _Path
+    if sys.platform == 'darwin':
+        KICAD_PYTHON = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"
+        KICAD_SITE_PACKAGES = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages"
+    else:  # Linux/Docker/K8s
+        KICAD_PYTHON = "/usr/bin/python3"
+        KICAD_SITE_PACKAGES = "/usr/lib/python3/dist-packages"
+    KICAD_CLI = None
 
 
 @dataclass

@@ -2,11 +2,9 @@
 """
 KiCad Zone Filler - Uses native pcbnew API to fill zones.
 
-This script MUST be run with KiCad's bundled Python interpreter:
-/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3
-
-Usage:
-    /Applications/KiCad/KiCad.app/.../python3 kicad_zone_filler.py board.kicad_pcb
+This script should be run with a Python that has pcbnew available:
+- macOS: KiCad's bundled Python
+- Linux/Docker: System Python with kicad-python3 package
 
 Part of MAPOS (Multi-Agent PCB Optimization System) for the Nexus EE Design Partner plugin.
 """
@@ -17,16 +15,23 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-# Add KiCad's pcbnew to path
-KICAD_PYTHON_SITE_PACKAGES = '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages'
-if KICAD_PYTHON_SITE_PACKAGES not in sys.path:
-    sys.path.insert(0, KICAD_PYTHON_SITE_PACKAGES)
+# Cross-platform pcbnew import
+try:
+    from kicad_paths import KICAD_SITE_PACKAGES
+    if KICAD_SITE_PACKAGES not in sys.path:
+        sys.path.insert(0, KICAD_SITE_PACKAGES)
+except ImportError:
+    # Fallback: try macOS path if on macOS
+    if sys.platform == 'darwin':
+        mac_site = '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/lib/python3.9/site-packages'
+        if mac_site not in sys.path:
+            sys.path.insert(0, mac_site)
 
 try:
     import pcbnew
 except ImportError as e:
-    print(f"ERROR: Cannot import pcbnew. Make sure to run with KiCad's Python:", file=sys.stderr)
-    print(f"  /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3 {sys.argv[0]}", file=sys.stderr)
+    print(f"ERROR: Cannot import pcbnew: {e}", file=sys.stderr)
+    print("Ensure pcbnew is available in your Python environment.", file=sys.stderr)
     sys.exit(1)
 
 
