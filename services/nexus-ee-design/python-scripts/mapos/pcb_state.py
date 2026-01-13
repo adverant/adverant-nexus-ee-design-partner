@@ -598,8 +598,13 @@ class PCBState:
         """
         Save state to a new PCB file.
 
-        This applies all modifications to the original file and saves
-        the result to a new location.
+        NOTE: This method copies the current PCB file to a new location.
+        For REAL modifications that change the PCB design, use the scripts
+        in violation_fix_map.py which call pcbnew API directly.
+
+        This method is primarily used for:
+        - Creating backups before modifications
+        - Creating temp copies for DRC checking
 
         Args:
             output_path: Path for output file
@@ -611,20 +616,20 @@ class PCBState:
             raise RuntimeError("No source PCB file available")
 
         output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
 
-        # Load original content
-        with open(self.pcb_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        # Copy the file using shutil for reliability
+        shutil.copy2(self.pcb_path, output)
 
-        # Apply component position changes
-        for ref, comp in self.components.items():
-            # Find and update component position
-            pattern = rf'(\(footprint\s+"[^"]+"\s*\(layer\s+"[^"]+"\)\s*)\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)'
-            # This is simplified - full implementation would need more robust parsing
-
-        # Write modified content
-        with open(output, 'w', encoding='utf-8') as f:
-            f.write(content)
+        # If there are pending modifications, warn (real modifications should use violation_fix_map)
+        if self.modifications:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"PCBState.save_to_file called with {len(self.modifications)} pending modifications. "
+                f"In-memory modifications are NOT applied by this method. "
+                f"Use violation_fix_map.py scripts for real PCB changes."
+            )
 
         return output
 

@@ -40,6 +40,18 @@ SCRIPT_DIR = Path(__file__).parent.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+# Import violation fix map for REAL pcbnew operations
+try:
+    from violation_fix_map import (
+        apply_suggestion_to_pcb,
+        apply_fixes_for_violations,
+        get_fixes_for_violation,
+    )
+    VIOLATION_FIX_MAP_AVAILABLE = True
+except ImportError:
+    VIOLATION_FIX_MAP_AVAILABLE = False
+    logger.warning("violation_fix_map not available - modifications will use fallback")
+
 # Local gaming AI imports - config first
 from .config import (
     GamingAIConfig, OptimizationMode, InferenceProvider,
@@ -766,17 +778,50 @@ class MAPOSRQOptimizer:
                     except Exception as e:
                         logger.warning(f"Dynamics prediction failed: {e}")
 
-                # Apply modification
+                # Apply modification using REAL pcbnew operations
                 new_state = None
-                if hasattr(pcb_state, 'apply_modification'):
+
+                # PRIMARY: Use violation_fix_map for real pcbnew operations
+                if VIOLATION_FIX_MAP_AVAILABLE and hasattr(pcb_state, 'pcb_path'):
+                    try:
+                        pcb_path = getattr(pcb_state, 'pcb_path', None)
+                        if pcb_path and Path(pcb_path).exists():
+                            logger.info(f"Applying REAL fix via violation_fix_map: {modification.mod_type}")
+
+                            # Execute real fix operation based on suggestion type
+                            fix_result = apply_suggestion_to_pcb(
+                                pcb_path=Path(pcb_path),
+                                suggestion=modification,
+                            )
+
+                            if fix_result.get('success'):
+                                # Reload PCB state to reflect actual file changes
+                                from pcb_state import PCBState
+                                new_state = PCBState.from_file(str(pcb_path))
+                                if hasattr(pcb_state, 'state_id'):
+                                    new_state.parent_id = pcb_state.state_id
+                                if hasattr(pcb_state, 'generation'):
+                                    new_state.generation = pcb_state.generation + 1
+                                logger.info(f"REAL fix applied: {modification.mod_type} → {fix_result}")
+                            else:
+                                logger.warning(f"Fix returned failure: {fix_result.get('error', 'unknown')}")
+                    except Exception as e:
+                        logger.warning(f"Real pcbnew fix failed: {e}")
+
+                # FALLBACK 1: Try pcb_state.apply_modification (legacy path)
+                if new_state is None and hasattr(pcb_state, 'apply_modification'):
                     try:
                         new_state = pcb_state.apply_modification(modification)
+                        if new_state is not None:
+                            logger.debug("Used legacy apply_modification fallback")
                     except Exception as e:
-                        logger.warning(f"Modification application failed: {e}")
+                        logger.warning(f"Legacy modification application failed: {e}")
 
+                # FALLBACK 2: Use Red Queen random mutation
                 if new_state is None:
-                    # Fallback: use Red Queen random mutation
                     new_state = self.red_queen._random_mutate(pcb_state)
+                    if new_state is not None:
+                        logger.debug("Used Red Queen random mutation fallback")
 
                 if new_state is None:
                     continue
