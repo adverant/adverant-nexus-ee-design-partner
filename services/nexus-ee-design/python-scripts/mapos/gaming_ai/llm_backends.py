@@ -770,6 +770,10 @@ class LLMPolicyGenerator:
         "fix_silkscreen",
         "fix_solder_mask",
         "add_thermal_via",
+        "fix_dangling_tracks",
+        "fix_footprint_library",
+        "fix_zone_fill",
+        "fix_unconnected",
         "no_action"
     ]
 
@@ -979,20 +983,25 @@ Return JSON array:
         violations: Dict[str, int],
         top_k: int
     ) -> List[ModificationSuggestion]:
-        """Generate fallback suggestions without LLM."""
+        """Generate fallback suggestions without LLM.
+
+        This method handles ALL violation types the system can fix,
+        mapping each to an appropriate mod_type that will be processed
+        by violation_fix_map.apply_suggestion_to_pcb().
+        """
         suggestions = []
 
-        # Suggest based on violation types
-        if violations.get('clearance', 0) > 0:
+        # === TRACK ISSUES ===
+        if violations.get('track_dangling', 0) > 0:
             suggestions.append(ModificationSuggestion(
-                mod_type="adjust_clearance",
-                target="global",
-                action="increase clearance by 0.05mm",
-                rationale="Reduce clearance violations",
-                violations_fixed=["clearance"],
-                confidence=0.6,
-                priority=7,
-                parameters={"delta": 0.05}
+                mod_type="fix_dangling_tracks",
+                target="all_dangling",
+                action="extend or remove dangling track endpoints",
+                rationale="Fix tracks that don't connect to pads or vias",
+                violations_fixed=["track_dangling"],
+                confidence=0.8,
+                priority=8,
+                parameters={"mode": "extend"}
             ))
 
         if violations.get('track_width', 0) > 0:
@@ -1007,24 +1016,113 @@ Return JSON array:
                 parameters={"min_width": 0.2}
             ))
 
-        if violations.get('silk_over_copper', 0) > 0:
+        # === FOOTPRINT ISSUES ===
+        if violations.get('lib_footprint_issues', 0) > 0 or \
+           violations.get('lib_footprint_mismatch', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="fix_footprint_library",
+                target="all_mismatched",
+                action="update footprints to match library versions",
+                rationale="Resolve footprint vs library inconsistencies",
+                violations_fixed=["lib_footprint_issues", "lib_footprint_mismatch"],
+                confidence=0.7,
+                priority=6,
+                parameters={"check_only": True}
+            ))
+
+        # === CLEARANCE ISSUES ===
+        if violations.get('clearance', 0) > 0 or \
+           violations.get('clearance_violation', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="adjust_clearance",
+                target="global",
+                action="increase clearance by 0.05mm",
+                rationale="Reduce clearance violations",
+                violations_fixed=["clearance", "clearance_violation"],
+                confidence=0.6,
+                priority=7,
+                parameters={"delta": 0.05}
+            ))
+
+        # === SILKSCREEN ISSUES ===
+        if violations.get('silk_over_copper', 0) > 0 or \
+           violations.get('silk_overlap', 0) > 0 or \
+           violations.get('silkscreen_overlap', 0) > 0:
             suggestions.append(ModificationSuggestion(
                 mod_type="fix_silkscreen",
                 target="all",
                 action="move silkscreen away from copper",
                 rationale="Fix silkscreen overlap violations",
-                violations_fixed=["silk_over_copper"],
+                violations_fixed=["silk_over_copper", "silk_overlap", "silkscreen_overlap"],
                 confidence=0.7,
                 priority=5,
                 parameters={}
             ))
 
+        # === SOLDER MASK ISSUES ===
+        if violations.get('solder_mask_bridge', 0) > 0 or \
+           violations.get('mask_aperture', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="fix_solder_mask",
+                target="all",
+                action="tent vias and adjust mask clearances",
+                rationale="Fix solder mask bridge violations",
+                violations_fixed=["solder_mask_bridge", "mask_aperture"],
+                confidence=0.7,
+                priority=6,
+                parameters={}
+            ))
+
+        # === ZONE ISSUES ===
+        if violations.get('zone_net_assignment_error', 0) > 0 or \
+           violations.get('zone_fill_missing', 0) > 0 or \
+           violations.get('zone_clearance', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="fix_zone_fill",
+                target="all_zones",
+                action="refill zones and fix net assignments",
+                rationale="Fix zone-related violations",
+                violations_fixed=["zone_net_assignment_error", "zone_fill_missing", "zone_clearance"],
+                confidence=0.85,
+                priority=8,
+                parameters={}
+            ))
+
+        # === VIA ISSUES ===
+        if violations.get('via_dangling', 0) > 0 or \
+           violations.get('dangling_via', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="delete_via",
+                target="dangling_vias",
+                action="remove vias not connected to any net",
+                rationale="Clean up orphan vias",
+                violations_fixed=["via_dangling", "dangling_via"],
+                confidence=0.9,
+                priority=7,
+                parameters={}
+            ))
+
+        # === UNCONNECTED ISSUES ===
+        if violations.get('unconnected_items', 0) > 0 or \
+           violations.get('unconnected', 0) > 0:
+            suggestions.append(ModificationSuggestion(
+                mod_type="fix_unconnected",
+                target="orphan_pads",
+                action="assign nets to unconnected pads",
+                rationale="Connect orphan pads to appropriate nets",
+                violations_fixed=["unconnected_items", "unconnected"],
+                confidence=0.6,
+                priority=6,
+                parameters={}
+            ))
+
+        # If no specific suggestions, return no_action
         if not suggestions:
             suggestions.append(ModificationSuggestion(
                 mod_type="no_action",
                 target="",
-                action="no changes needed",
-                rationale="No obvious improvements identified",
+                action="no automated fixes available for these violation types",
+                rationale="Manual intervention may be required",
                 violations_fixed=[],
                 confidence=0.3,
                 priority=1,

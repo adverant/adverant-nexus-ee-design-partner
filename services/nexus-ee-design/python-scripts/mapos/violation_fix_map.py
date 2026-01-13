@@ -522,6 +522,11 @@ def apply_suggestion_to_pcb(
         'fix_unconnected': 'unconnected_items',
         'update_footprint': 'lib_footprint_issues',
         'fix_footprint': 'lib_footprint_issues',
+        # New mod_types from expanded _get_fallback_suggestions()
+        'fix_dangling_tracks': 'track_dangling',
+        'fix_footprint_library': 'lib_footprint_issues',
+        'fix_zone_fill': 'zone_fill_missing',
+        'delete_via': 'via_dangling',
     }
 
     # Normalize and map
