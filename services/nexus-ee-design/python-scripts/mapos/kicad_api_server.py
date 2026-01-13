@@ -408,22 +408,18 @@ async def run_operation(request: OperationRequest):
 
                     optimizer = MAPOSRQOptimizer(str(pcb_path), config=config)
 
-                    # Run async optimizer synchronously
-                    loop = asyncio.new_event_loop()
-                    try:
-                        opt_result = loop.run_until_complete(optimizer.optimize())
-                        result = {
-                            'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
-                            'status': opt_result.status.name,
-                            'initial_violations': opt_result.initial_violations,
-                            'final_violations': opt_result.final_violations,
-                            'improvement': opt_result.improvement,
-                            'improvement_pct': opt_result.improvement_pct,
-                            'red_queen_rounds': opt_result.red_queen_rounds,
-                            'champions_found': len(opt_result.champions) if opt_result.champions else 0,
-                        }
-                    finally:
-                        loop.close()
+                    # Run async optimizer (we're already in an async context)
+                    opt_result = await optimizer.optimize()
+                    result = {
+                        'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
+                        'status': opt_result.status.name,
+                        'initial_violations': opt_result.initial_violations,
+                        'final_violations': opt_result.final_violations,
+                        'improvement': opt_result.improvement,
+                        'improvement_pct': opt_result.improvement_pct,
+                        'red_queen_rounds': opt_result.red_queen_rounds,
+                        'champions_found': len(opt_result.champions) if opt_result.champions else 0,
+                    }
                 except ImportError as e:
                     result = {'success': False, 'error': f'Gaming AI module not available: {e}'}
                 except Exception as e:
@@ -450,19 +446,16 @@ async def run_operation(request: OperationRequest):
 
                     optimizer = MAPOSRQOptimizer(str(pcb_path), config=config)
 
-                    loop = asyncio.new_event_loop()
-                    try:
-                        opt_result = loop.run_until_complete(optimizer.optimize())
-                        result = {
-                            'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
-                            'status': opt_result.status.name,
-                            'initial_violations': opt_result.initial_violations,
-                            'final_violations': opt_result.final_violations,
-                            'improvement': opt_result.improvement,
-                            'improvement_pct': opt_result.improvement_pct,
-                        }
-                    finally:
-                        loop.close()
+                    # Run async optimizer (we're already in an async context)
+                    opt_result = await optimizer.optimize()
+                    result = {
+                        'success': opt_result.status.name in ['SUCCESS', 'PARTIAL'],
+                        'status': opt_result.status.name,
+                        'initial_violations': opt_result.initial_violations,
+                        'final_violations': opt_result.final_violations,
+                        'improvement': opt_result.improvement,
+                        'improvement_pct': opt_result.improvement_pct,
+                    }
                 except ImportError as e:
                     result = {'success': False, 'error': f'Gaming AI module not available: {e}'}
                 except Exception as e:
@@ -491,21 +484,18 @@ async def run_operation(request: OperationRequest):
                     api_key=user_api_key,
                 )
 
-                loop = asyncio.new_event_loop()
-                try:
-                    opt_result = loop.run_until_complete(optimizer.optimize())
-                    result = {
-                        'success': opt_result.success,
-                        'mode': opt_result.mode,
-                        'initial_violations': opt_result.initial_violations,
-                        'final_violations': opt_result.final_violations,
-                        'improvement': opt_result.improvement,
-                        'improvement_pct': opt_result.improvement_pct,
-                        'phases': opt_result.phases,
-                        'duration_seconds': opt_result.duration_seconds,
-                    }
-                finally:
-                    loop.close()
+                # Run async optimizer (we're already in an async context)
+                opt_result = await optimizer.optimize()
+                result = {
+                    'success': opt_result.success,
+                    'mode': opt_result.mode,
+                    'initial_violations': opt_result.initial_violations,
+                    'final_violations': opt_result.final_violations,
+                    'improvement': opt_result.improvement,
+                    'improvement_pct': opt_result.improvement_pct,
+                    'phases': opt_result.phases,
+                    'duration_seconds': opt_result.duration_seconds,
+                }
             except ImportError as e:
                 result = {'success': False, 'error': f'Unified optimizer not available: {e}'}
             except Exception as e:

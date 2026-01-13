@@ -1,0 +1,41 @@
+# Nexus EE Design Partner - Istio DestinationRule
+#
+# Configures traffic policy for the EE Design service including:
+# - WebSocket upgrade support via h2UpgradePolicy
+# - Connection pooling for long-lived connections
+# - Timeout settings for heavy operations
+
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: nexus-ee-design
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus-ee-design
+    app.kubernetes.io/component: plugin
+    app.kubernetes.io/part-of: nexus-plugins
+    version: v1
+spec:
+  host: nexus-ee-design.nexus.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        # Allow HTTP/1.1 to WebSocket upgrade
+        h2UpgradePolicy: UPGRADE
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 200
+        idleTimeout: 3600s
+        maxRequestsPerConnection: 0  # Unlimited for WebSocket
+      tcp:
+        connectTimeout: 30s
+        maxConnections: 200
+        tcpKeepalive:
+          interval: 75s
+          time: 7200s
+    loadBalancer:
+      simple: ROUND_ROBIN
+    outlierDetection:
+      baseEjectionTime: 30s
+      consecutive5xxErrors: 5
+      interval: 30s
+      maxEjectionPercent: 30
