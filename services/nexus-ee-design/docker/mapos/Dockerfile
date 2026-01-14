@@ -35,10 +35,14 @@ RUN add-apt-repository -y ppa:kicad/kicad-8.0-releases \
 RUN pip3 install --no-cache-dir \
     kiauto \
     requests \
+    httpx \
     psutil \
     fastapi \
     uvicorn \
-    python-multipart
+    python-multipart \
+    aiofiles \
+    numpy \
+    scipy
 
 # Create working directory
 WORKDIR /app
