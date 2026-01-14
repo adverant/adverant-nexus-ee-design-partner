@@ -41,7 +41,7 @@ class LLMConfig:
     """Configuration for LLM provider (OpenRouter)."""
 
     provider: str = "openrouter"
-    model: str = "anthropic/claude-opus-4.5"
+    model: str = "anthropic/claude-3.5-haiku:beta"  # Fast, cost-effective for mutations
     api_key: Optional[str] = field(
         default_factory=lambda: os.environ.get("OPENROUTER_API_KEY")
     )

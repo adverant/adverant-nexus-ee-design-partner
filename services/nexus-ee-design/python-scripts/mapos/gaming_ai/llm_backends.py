@@ -113,6 +113,19 @@ class LLMClient:
                 )
                 response.raise_for_status()
                 data = response.json()
+
+                # Handle error responses from OpenRouter
+                if "error" in data:
+                    error_msg = data.get("error", {})
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get("message", str(error_msg))
+                    raise RuntimeError(f"OpenRouter error: {error_msg}")
+
+                # Extract response content
+                if "choices" not in data or not data["choices"]:
+                    logger.error(f"Unexpected response structure: {json.dumps(data)[:500]}")
+                    raise KeyError(f"No 'choices' in response. Keys: {list(data.keys())}")
+
                 return data["choices"][0]["message"]["content"]
 
             except Exception as e:
