@@ -74,6 +74,11 @@ interface ErrorStates {
 // Store Interface
 // ============================================================================
 
+// Use Record instead of Map for React compatibility (Map reference stays same on mutation)
+type SimulationsRecord = Record<string, SimulationState>;
+// Use Record instead of Set for React compatibility (Set reference stays same on mutation)
+type ExpandedFoldersRecord = Record<string, boolean>;
+
 interface EEDesignState {
   // Connection
   isConnected: boolean;
@@ -96,8 +101,8 @@ interface EEDesignState {
   terminalHistory: TerminalEntry[];
   currentCommandId: string | null;
 
-  // Simulations
-  simulations: Map<string, SimulationState>;
+  // Simulations - using Record for React compatibility
+  simulations: SimulationsRecord;
 
   // Layout
   layoutState: LayoutState | null;
@@ -105,7 +110,8 @@ interface EEDesignState {
   // UI State
   activeTab: string;
   isTerminalMaximized: boolean;
-  expandedFolders: Set<string>;
+  // Using Record<string, boolean> instead of Set<string> for React compatibility
+  expandedFolders: ExpandedFoldersRecord;
 
   // Loading & Error States
   loading: LoadingStates;
@@ -203,11 +209,11 @@ Connected to backend API at ${process.env.NEXT_PUBLIC_API_URL || "http://localho
       },
     ],
     currentCommandId: null,
-    simulations: new Map(),
+    simulations: {},
     layoutState: null,
     activeTab: "schematic",
     isTerminalMaximized: false,
-    expandedFolders: new Set(),
+    expandedFolders: {},
     loading: initialLoadingState,
     errors: initialErrorState,
 
@@ -363,10 +369,10 @@ Connected to backend API at ${process.env.NEXT_PUBLIC_API_URL || "http://localho
 
     toggleFolder: (path: string) => {
       set((state) => {
-        if (state.expandedFolders.has(path)) {
-          state.expandedFolders.delete(path);
+        if (state.expandedFolders[path]) {
+          delete state.expandedFolders[path];
         } else {
-          state.expandedFolders.add(path);
+          state.expandedFolders[path] = true;
         }
       });
     },
@@ -624,24 +630,24 @@ Type any command with --help for detailed usage.`,
 
     updateSimulation: (simulationId: string, update: Partial<SimulationState>) => {
       set((state) => {
-        const existing = state.simulations.get(simulationId);
+        const existing = state.simulations[simulationId];
         if (existing) {
-          state.simulations.set(simulationId, { ...existing, ...update });
+          state.simulations[simulationId] = { ...existing, ...update };
         } else {
-          state.simulations.set(simulationId, {
+          state.simulations[simulationId] = {
             id: simulationId,
             type: update.type || "unknown",
             status: update.status || "pending",
             progress: update.progress || 0,
             ...update,
-          });
+          };
         }
       });
     },
 
     removeSimulation: (simulationId: string) => {
       set((state) => {
-        state.simulations.delete(simulationId);
+        delete state.simulations[simulationId];
       });
     },
 
@@ -702,7 +708,7 @@ Type any command with --help for detailed usage.`,
         state.selectedFile = null;
         state.validationResult = null;
         state.isValidationRunning = false;
-        state.simulations.clear();
+        state.simulations = {};
         state.layoutState = null;
         state.loading = initialLoadingState;
         state.errors = initialErrorState;

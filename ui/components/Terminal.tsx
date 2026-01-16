@@ -5,9 +5,13 @@
  *
  * Production-ready terminal with real backend integration.
  * Uses Zustand store for state and executes commands via API.
+ *
+ * IMPORTANT: Callbacks passed to useWebSocket are memoized with useCallback
+ * to prevent unnecessary re-renders. The hook also uses refs internally,
+ * providing defense-in-depth against infinite render loops.
  */
 
-import { useEffect, useRef, useState, KeyboardEvent } from "react";
+import { useEffect, useRef, useState, KeyboardEvent, useCallback } from "react";
 import { Terminal as TerminalIcon, Maximize2, Minimize2, Loader2, AlertCircle, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useEEDesignStore, type TerminalEntry } from "@/hooks/useEEDesignStore";
@@ -37,15 +41,25 @@ export function Terminal({ projectId }: TerminalProps) {
     setTerminalMaximized,
   } = useEEDesignStore();
 
-  // WebSocket connection
+  // Memoized callbacks for WebSocket hook (defense-in-depth)
+  const handleWebSocketConnected = useCallback(() => {
+    console.log("[Terminal] WebSocket connected");
+  }, []);
+
+  const handleWebSocketDisconnected = useCallback(() => {
+    console.log("[Terminal] WebSocket disconnected");
+  }, []);
+
+  const handleWebSocketError = useCallback((error: Error) => {
+    console.error("[Terminal] WebSocket error:", error.message);
+  }, []);
+
+  // WebSocket connection with stable callbacks
   const { isConnected: wsConnected } = useWebSocket({
     autoConnect: true,
-    onConnected: () => {
-      console.log("[Terminal] WebSocket connected");
-    },
-    onDisconnected: () => {
-      console.log("[Terminal] WebSocket disconnected");
-    },
+    onConnected: handleWebSocketConnected,
+    onDisconnected: handleWebSocketDisconnected,
+    onError: handleWebSocketError,
   });
 
   // Check API connection on mount

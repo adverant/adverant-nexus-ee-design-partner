@@ -100,13 +100,13 @@ function TreeNode({
 }: {
   node: FileNode;
   depth?: number;
-  expandedFolders: Set<string>;
+  expandedFolders: Record<string, boolean>;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
   selectedPath: string | null;
 }) {
   const isFolder = node.type === "directory";
-  const isExpanded = expandedFolders.has(node.path);
+  const isExpanded = !!expandedFolders[node.path];
   const isSelected = selectedPath === node.path;
   const extension = getExtension(node.name);
 
