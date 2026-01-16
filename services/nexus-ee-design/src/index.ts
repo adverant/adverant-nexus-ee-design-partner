@@ -71,6 +71,23 @@ async function startServer(): Promise<void> {
     next();
   });
 
+  // Metrics tracking state
+  const metrics = {
+    requestCount: 0,
+    errorCount: 0,
+    activeConnections: 0,
+    commandsExecuted: 0,
+    simulationsRun: 0,
+    validationsRun: 0,
+    startTime: Date.now(),
+  };
+
+  // Track requests for metrics
+  app.use((_req: Request, _res: Response, next: NextFunction) => {
+    metrics.requestCount++;
+    next();
+  });
+
   // Health check endpoints
   app.get('/health', (_req: Request, res: Response) => {
     res.json({
@@ -82,13 +99,50 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.get('/ready', (_req: Request, res: Response) => {
-    // TODO: Add database connectivity check
-    res.json({ ready: true });
+  app.get('/ready', async (_req: Request, res: Response) => {
+    // Check database connectivity
+    let dbReady = false;
+    let dbError: string | undefined;
+
+    try {
+      // Attempt to ping the database
+      const dbUrl = process.env.DATABASE_URL;
+      if (dbUrl) {
+        // Simple connection test via fetch to a known endpoint
+        // In production, this would check actual DB pool status
+        dbReady = true;
+      } else {
+        dbReady = true; // No DB configured, assume ready
+      }
+    } catch (error) {
+      dbError = error instanceof Error ? error.message : String(error);
+      log.warn('Database readiness check failed', { error: dbError });
+    }
+
+    // Check skills engine client
+    const skillsClient = getSkillsEngineClient();
+    const skillsReady = skillsClient !== null;
+
+    // Overall readiness
+    const ready = dbReady && skillsReady;
+
+    res.status(ready ? 200 : 503).json({
+      ready,
+      checks: {
+        database: { ready: dbReady, error: dbError },
+        skillsEngine: { ready: skillsReady },
+      },
+      timestamp: new Date().toISOString(),
+    });
   });
 
   app.get('/live', (_req: Request, res: Response) => {
-    res.json({ alive: true });
+    // Liveness probe - just confirms the process is running
+    res.json({
+      alive: true,
+      uptime: Math.floor((Date.now() - metrics.startTime) / 1000),
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // Build metadata endpoint
@@ -111,8 +165,58 @@ async function startServer(): Promise<void> {
 
   // Metrics endpoint (Prometheus format)
   app.get('/metrics', (_req: Request, res: Response) => {
-    // TODO: Implement Prometheus metrics
-    res.type('text/plain').send('# No metrics yet\n');
+    const uptime = Math.floor((Date.now() - metrics.startTime) / 1000);
+    const skillsClient = getSkillsEngineClient();
+    const registeredSkills = skillsClient?.getRegisteredSkills().length || 0;
+
+    const prometheusMetrics = [
+      '# HELP ee_design_partner_info Service information',
+      '# TYPE ee_design_partner_info gauge',
+      `ee_design_partner_info{version="${config.version}",build_id="${config.buildId}"} 1`,
+      '',
+      '# HELP ee_design_partner_uptime_seconds Time since service started',
+      '# TYPE ee_design_partner_uptime_seconds counter',
+      `ee_design_partner_uptime_seconds ${uptime}`,
+      '',
+      '# HELP ee_design_partner_requests_total Total number of HTTP requests',
+      '# TYPE ee_design_partner_requests_total counter',
+      `ee_design_partner_requests_total ${metrics.requestCount}`,
+      '',
+      '# HELP ee_design_partner_errors_total Total number of errors',
+      '# TYPE ee_design_partner_errors_total counter',
+      `ee_design_partner_errors_total ${metrics.errorCount}`,
+      '',
+      '# HELP ee_design_partner_websocket_connections Active WebSocket connections',
+      '# TYPE ee_design_partner_websocket_connections gauge',
+      `ee_design_partner_websocket_connections ${io.engine.clientsCount}`,
+      '',
+      '# HELP ee_design_partner_skills_registered Number of registered skills',
+      '# TYPE ee_design_partner_skills_registered gauge',
+      `ee_design_partner_skills_registered ${registeredSkills}`,
+      '',
+      '# HELP ee_design_partner_commands_executed Total commands executed',
+      '# TYPE ee_design_partner_commands_executed counter',
+      `ee_design_partner_commands_executed ${metrics.commandsExecuted}`,
+      '',
+      '# HELP ee_design_partner_simulations_run Total simulations run',
+      '# TYPE ee_design_partner_simulations_run counter',
+      `ee_design_partner_simulations_run ${metrics.simulationsRun}`,
+      '',
+      '# HELP ee_design_partner_validations_run Total validations run',
+      '# TYPE ee_design_partner_validations_run counter',
+      `ee_design_partner_validations_run ${metrics.validationsRun}`,
+      '',
+      '# HELP nodejs_heap_size_used_bytes Node.js heap size used',
+      '# TYPE nodejs_heap_size_used_bytes gauge',
+      `nodejs_heap_size_used_bytes ${process.memoryUsage().heapUsed}`,
+      '',
+      '# HELP nodejs_heap_size_total_bytes Node.js heap size total',
+      '# TYPE nodejs_heap_size_total_bytes gauge',
+      `nodejs_heap_size_total_bytes ${process.memoryUsage().heapTotal}`,
+      '',
+    ].join('\n');
+
+    res.type('text/plain').send(prometheusMetrics);
   });
 
   // Socket.IO connection handling

@@ -278,19 +278,150 @@ export class SkillsEngineClient extends EventEmitter {
 
   /**
    * Generate embeddings for skill searchability
+   *
+   * Uses OpenRouter API for high-quality embeddings when available,
+   * falls back to deterministic hash-based embeddings for offline/test use.
    */
   private async generateEmbeddings(definition: SkillDefinition): Promise<{
     nameEmbedding: number[];
     descriptionEmbedding: number[];
     contentEmbedding: number[];
   }> {
-    // In production, call Voyage AI or similar for embeddings
-    // For now, return placeholder
+    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+
+    if (openRouterApiKey) {
+      try {
+        // Use OpenRouter for real embeddings
+        const embeddings = await this.fetchOpenRouterEmbeddings(
+          openRouterApiKey,
+          [
+            definition.name,
+            definition.description,
+            definition.content?.slice(0, 8000) || definition.description,
+          ]
+        );
+
+        return {
+          nameEmbedding: embeddings[0] || this.generateHashEmbedding(definition.name),
+          descriptionEmbedding: embeddings[1] || this.generateHashEmbedding(definition.description),
+          contentEmbedding: embeddings[2] || this.generateHashEmbedding(definition.content || ''),
+        };
+      } catch (error) {
+        logger.warn('OpenRouter embeddings failed, using hash fallback', {
+          error: error instanceof Error ? error.message : String(error),
+          skillName: definition.name,
+        });
+      }
+    }
+
+    // Fallback: Generate deterministic hash-based embeddings
+    // These provide consistent but lower quality semantic matching
     return {
-      nameEmbedding: [],
-      descriptionEmbedding: [],
-      contentEmbedding: []
+      nameEmbedding: this.generateHashEmbedding(definition.name),
+      descriptionEmbedding: this.generateHashEmbedding(definition.description),
+      contentEmbedding: this.generateHashEmbedding(definition.content || definition.description),
     };
+  }
+
+  /**
+   * Fetch embeddings from OpenRouter API
+   */
+  private async fetchOpenRouterEmbeddings(
+    apiKey: string,
+    texts: string[]
+  ): Promise<number[][]> {
+    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://adverant.ai',
+        'X-Title': 'EE Design Partner',
+      },
+      body: JSON.stringify({
+        model: 'text-embedding-3-small',
+        input: texts,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      data: Array<{ embedding: number[]; index: number }>;
+    };
+
+    // Sort by index to maintain order
+    const sorted = data.data.sort((a, b) => a.index - b.index);
+    return sorted.map((d) => d.embedding);
+  }
+
+  /**
+   * Generate deterministic hash-based embedding for a text
+   *
+   * Creates a 384-dimensional vector based on text content.
+   * While not as semantically meaningful as neural embeddings,
+   * this provides consistent, reproducible vectors for basic matching.
+   */
+  private generateHashEmbedding(text: string, dimensions: number = 384): number[] {
+    const embedding: number[] = new Array(dimensions).fill(0);
+    const normalizedText = text.toLowerCase().trim();
+
+    if (!normalizedText) {
+      return embedding;
+    }
+
+    // Use multiple hash functions for better distribution
+    const words = normalizedText.split(/\s+/);
+    const chars = normalizedText.split('');
+
+    // Word-level features
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const wordHash = this.hashString(word);
+      const idx = Math.abs(wordHash) % dimensions;
+      embedding[idx] += 1.0 / (1 + Math.log(i + 1));
+
+      // Add bigram features
+      if (i < words.length - 1) {
+        const bigram = word + ' ' + words[i + 1];
+        const bigramHash = this.hashString(bigram);
+        const bigramIdx = Math.abs(bigramHash) % dimensions;
+        embedding[bigramIdx] += 0.5 / (1 + Math.log(i + 1));
+      }
+    }
+
+    // Character n-gram features
+    for (let i = 0; i < chars.length - 2; i++) {
+      const trigram = chars.slice(i, i + 3).join('');
+      const trigramHash = this.hashString(trigram);
+      const idx = (Math.abs(trigramHash) % (dimensions / 2)) + dimensions / 2;
+      embedding[idx] += 0.1;
+    }
+
+    // Normalize to unit length
+    const magnitude = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0));
+    if (magnitude > 0) {
+      for (let i = 0; i < dimensions; i++) {
+        embedding[i] /= magnitude;
+      }
+    }
+
+    return embedding;
+  }
+
+  /**
+   * Simple string hash function (djb2 algorithm)
+   */
+  private hashString(str: string): number {
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) + hash) + str.charCodeAt(i);
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return hash;
   }
 
   /**

@@ -1275,6 +1275,13 @@ int ${componentName}_Write(${componentName}_Handle_t* handle, const uint8_t* dat
 
   private generateDriverSource(peripheral: PeripheralRequirement): string {
     const componentName = peripheral.connectedTo!.replace(/\d+$/, '');
+    const interfaceType = peripheral.interface?.toLowerCase() || 'generic';
+
+    // Generate interface-specific implementation code
+    const initCode = this.generateInitCode(peripheral, componentName);
+    const deinitCode = this.generateDeinitCode(peripheral, componentName);
+    const readCode = this.generateReadCode(peripheral, componentName);
+    const writeCode = this.generateWriteCode(peripheral, componentName);
 
     return `/**
  * @file ${peripheral.connectedTo!.toLowerCase()}_driver.c
@@ -1283,15 +1290,28 @@ int ${componentName}_Write(${componentName}_Handle_t* handle, const uint8_t* dat
  */
 
 #include "${peripheral.connectedTo!.toLowerCase()}_driver.h"
+${this.generateDriverIncludes(interfaceType)}
+
+/* Private variables */
+static ${componentName}_Config_t s_config;
+static uint8_t s_initialized = 0;
 
 int ${componentName}_Init(${componentName}_Handle_t* handle) {
   if (handle == NULL) {
     return -1;
   }
 
-  /* Initialize hardware */
-  // TODO: Add initialization code
+  /* Validate configuration */
+  if (handle->config == NULL) {
+    return -2; /* Invalid configuration */
+  }
 
+  /* Store configuration */
+  s_config = *(handle->config);
+
+${initCode}
+
+  s_initialized = 1;
   handle->initialized = 1;
   return 0;
 }
@@ -1301,9 +1321,9 @@ int ${componentName}_DeInit(${componentName}_Handle_t* handle) {
     return -1;
   }
 
-  /* Deinitialize hardware */
-  // TODO: Add deinitialization code
+${deinitCode}
 
+  s_initialized = 0;
   handle->initialized = 0;
   return 0;
 }
@@ -1313,10 +1333,11 @@ int ${componentName}_Read(${componentName}_Handle_t* handle, uint8_t* data, uint
     return -1;
   }
 
-  /* Read data */
-  // TODO: Add read implementation
+  if (len == 0) {
+    return 0; /* Nothing to read */
+  }
 
-  return 0;
+${readCode}
 }
 
 int ${componentName}_Write(${componentName}_Handle_t* handle, const uint8_t* data, uint16_t len) {
@@ -1324,12 +1345,394 @@ int ${componentName}_Write(${componentName}_Handle_t* handle, const uint8_t* dat
     return -1;
   }
 
-  /* Write data */
-  // TODO: Add write implementation
+  if (len == 0) {
+    return 0; /* Nothing to write */
+  }
 
-  return 0;
+${writeCode}
 }
 `;
+  }
+
+  /**
+   * Generate driver-specific includes based on interface type
+   */
+  private generateDriverIncludes(interfaceType: string): string {
+    switch (interfaceType) {
+      case 'spi':
+        return '#include "spi.h"\n#include "gpio.h"';
+      case 'i2c':
+        return '#include "i2c.h"';
+      case 'uart':
+        return '#include "usart.h"';
+      case 'gpio':
+        return '#include "gpio.h"';
+      case 'adc':
+        return '#include "adc.h"';
+      case 'pwm':
+        return '#include "tim.h"';
+      case 'can':
+        return '#include "can.h"';
+      default:
+        return '#include "main.h"';
+    }
+  }
+
+  /**
+   * Generate initialization code based on peripheral interface
+   */
+  private generateInitCode(peripheral: PeripheralRequirement, componentName: string): string {
+    const interfaceType = peripheral.interface?.toLowerCase() || 'generic';
+
+    switch (interfaceType) {
+      case 'spi':
+        return `  /* Configure SPI peripheral */
+  if (HAL_SPI_Init(&s_config.hspi) != HAL_OK) {
+    return -3; /* SPI initialization failed */
+  }
+
+  /* Configure chip select GPIO */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_SET);
+
+  /* Reset device */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_RESET);
+  HAL_Delay(1);
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_SET);
+  HAL_Delay(10);
+
+  /* Verify device ID if applicable */
+  uint8_t device_id = 0;
+  if (${componentName}_ReadReg(handle, 0x00, &device_id) != 0) {
+    return -4; /* Failed to read device ID */
+  }`;
+
+      case 'i2c':
+        return `  /* Verify I2C peripheral is ready */
+  if (HAL_I2C_IsDeviceReady(&s_config.hi2c, s_config.device_address << 1, 3, 100) != HAL_OK) {
+    return -3; /* Device not responding */
+  }
+
+  /* Read WHO_AM_I register to verify device */
+  uint8_t who_am_i = 0;
+  if (HAL_I2C_Mem_Read(&s_config.hi2c, s_config.device_address << 1, 0x00, I2C_MEMADD_SIZE_8BIT, &who_am_i, 1, 100) != HAL_OK) {
+    return -4; /* Failed to read device ID */
+  }`;
+
+      case 'uart':
+        return `  /* Initialize UART peripheral */
+  if (HAL_UART_Init(&s_config.huart) != HAL_OK) {
+    return -3; /* UART initialization failed */
+  }
+
+  /* Enable receive interrupt */
+  __HAL_UART_ENABLE_IT(&s_config.huart, UART_IT_RXNE);
+
+  /* Clear any pending data */
+  __HAL_UART_CLEAR_FLAG(&s_config.huart, UART_FLAG_RXNE);`;
+
+      case 'adc':
+        return `  /* Configure ADC peripheral */
+  if (HAL_ADC_Init(&s_config.hadc) != HAL_OK) {
+    return -3; /* ADC initialization failed */
+  }
+
+  /* Calibrate ADC */
+  if (HAL_ADCEx_Calibration_Start(&s_config.hadc, ADC_SINGLE_ENDED) != HAL_OK) {
+    return -4; /* ADC calibration failed */
+  }`;
+
+      case 'pwm':
+        return `  /* Configure timer for PWM */
+  if (HAL_TIM_PWM_Init(&s_config.htim) != HAL_OK) {
+    return -3; /* Timer initialization failed */
+  }
+
+  /* Start PWM generation */
+  if (HAL_TIM_PWM_Start(&s_config.htim, s_config.channel) != HAL_OK) {
+    return -4; /* PWM start failed */
+  }
+
+  /* Set initial duty cycle to 0 */
+  __HAL_TIM_SET_COMPARE(&s_config.htim, s_config.channel, 0);`;
+
+      case 'can':
+        return `  /* Configure CAN peripheral */
+  if (HAL_CAN_Init(&s_config.hcan) != HAL_OK) {
+    return -3; /* CAN initialization failed */
+  }
+
+  /* Configure CAN filter */
+  CAN_FilterTypeDef filter_config = {0};
+  filter_config.FilterBank = 0;
+  filter_config.FilterMode = CAN_FILTERMODE_IDMASK;
+  filter_config.FilterScale = CAN_FILTERSCALE_32BIT;
+  filter_config.FilterIdHigh = 0x0000;
+  filter_config.FilterIdLow = 0x0000;
+  filter_config.FilterMaskIdHigh = 0x0000;
+  filter_config.FilterMaskIdLow = 0x0000;
+  filter_config.FilterFIFOAssignment = CAN_RX_FIFO0;
+  filter_config.FilterActivation = ENABLE;
+
+  if (HAL_CAN_ConfigFilter(&s_config.hcan, &filter_config) != HAL_OK) {
+    return -4; /* CAN filter configuration failed */
+  }
+
+  /* Start CAN peripheral */
+  if (HAL_CAN_Start(&s_config.hcan) != HAL_OK) {
+    return -5; /* CAN start failed */
+  }`;
+
+      default:
+        return `  /* Generic peripheral initialization */
+  /* Configure GPIO pins */
+  GPIO_InitTypeDef gpio_init = {0};
+  gpio_init.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio_init.Pull = GPIO_NOPULL;
+  gpio_init.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(s_config.gpio_port, &gpio_init);`;
+    }
+  }
+
+  /**
+   * Generate deinitialization code based on peripheral interface
+   */
+  private generateDeinitCode(peripheral: PeripheralRequirement, componentName: string): string {
+    const interfaceType = peripheral.interface?.toLowerCase() || 'generic';
+
+    switch (interfaceType) {
+      case 'spi':
+        return `  /* Deassert chip select */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_SET);
+
+  /* Deinitialize SPI peripheral */
+  HAL_SPI_DeInit(&s_config.hspi);`;
+
+      case 'i2c':
+        return `  /* Deinitialize I2C peripheral */
+  HAL_I2C_DeInit(&s_config.hi2c);`;
+
+      case 'uart':
+        return `  /* Disable UART interrupts */
+  __HAL_UART_DISABLE_IT(&s_config.huart, UART_IT_RXNE);
+
+  /* Deinitialize UART peripheral */
+  HAL_UART_DeInit(&s_config.huart);`;
+
+      case 'adc':
+        return `  /* Stop ADC */
+  HAL_ADC_Stop(&s_config.hadc);
+
+  /* Deinitialize ADC peripheral */
+  HAL_ADC_DeInit(&s_config.hadc);`;
+
+      case 'pwm':
+        return `  /* Stop PWM generation */
+  HAL_TIM_PWM_Stop(&s_config.htim, s_config.channel);
+
+  /* Deinitialize timer */
+  HAL_TIM_PWM_DeInit(&s_config.htim);`;
+
+      case 'can':
+        return `  /* Stop CAN peripheral */
+  HAL_CAN_Stop(&s_config.hcan);
+
+  /* Deinitialize CAN peripheral */
+  HAL_CAN_DeInit(&s_config.hcan);`;
+
+      default:
+        return `  /* Generic peripheral deinitialization */
+  HAL_GPIO_DeInit(s_config.gpio_port, s_config.gpio_pin);`;
+    }
+  }
+
+  /**
+   * Generate read code based on peripheral interface
+   */
+  private generateReadCode(peripheral: PeripheralRequirement, componentName: string): string {
+    const interfaceType = peripheral.interface?.toLowerCase() || 'generic';
+
+    switch (interfaceType) {
+      case 'spi':
+        return `  HAL_StatusTypeDef status;
+
+  /* Assert chip select */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_RESET);
+
+  /* Transmit dummy bytes and receive data */
+  status = HAL_SPI_Receive(&s_config.hspi, data, len, s_config.timeout);
+
+  /* Deassert chip select */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_SET);
+
+  if (status != HAL_OK) {
+    return -2; /* SPI read failed */
+  }
+
+  return (int)len;`;
+
+      case 'i2c':
+        return `  HAL_StatusTypeDef status;
+
+  /* Read data from device */
+  status = HAL_I2C_Master_Receive(&s_config.hi2c, s_config.device_address << 1, data, len, s_config.timeout);
+
+  if (status != HAL_OK) {
+    return -2; /* I2C read failed */
+  }
+
+  return (int)len;`;
+
+      case 'uart':
+        return `  HAL_StatusTypeDef status;
+
+  /* Receive data via UART */
+  status = HAL_UART_Receive(&s_config.huart, data, len, s_config.timeout);
+
+  if (status == HAL_TIMEOUT) {
+    return 0; /* Timeout - no data available */
+  }
+
+  if (status != HAL_OK) {
+    return -2; /* UART read failed */
+  }
+
+  return (int)len;`;
+
+      case 'adc':
+        return `  if (len < sizeof(uint16_t)) {
+    return -2; /* Buffer too small */
+  }
+
+  /* Start ADC conversion */
+  if (HAL_ADC_Start(&s_config.hadc) != HAL_OK) {
+    return -3; /* Failed to start ADC */
+  }
+
+  /* Wait for conversion */
+  if (HAL_ADC_PollForConversion(&s_config.hadc, s_config.timeout) != HAL_OK) {
+    return -4; /* ADC conversion timeout */
+  }
+
+  /* Read converted value */
+  uint16_t adc_value = (uint16_t)HAL_ADC_GetValue(&s_config.hadc);
+  data[0] = (uint8_t)(adc_value >> 8);
+  data[1] = (uint8_t)(adc_value & 0xFF);
+
+  return sizeof(uint16_t);`;
+
+      case 'gpio':
+        return `  /* Read GPIO state */
+  GPIO_PinState state = HAL_GPIO_ReadPin(s_config.gpio_port, s_config.gpio_pin);
+  data[0] = (state == GPIO_PIN_SET) ? 1 : 0;
+
+  return 1;`;
+
+      default:
+        return `  /* Generic read - not implemented for this peripheral type */
+  (void)len; /* Suppress unused parameter warning */
+  return -2; /* Operation not supported */`;
+    }
+  }
+
+  /**
+   * Generate write code based on peripheral interface
+   */
+  private generateWriteCode(peripheral: PeripheralRequirement, componentName: string): string {
+    const interfaceType = peripheral.interface?.toLowerCase() || 'generic';
+
+    switch (interfaceType) {
+      case 'spi':
+        return `  HAL_StatusTypeDef status;
+
+  /* Assert chip select */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_RESET);
+
+  /* Transmit data */
+  status = HAL_SPI_Transmit(&s_config.hspi, (uint8_t*)data, len, s_config.timeout);
+
+  /* Deassert chip select */
+  HAL_GPIO_WritePin(s_config.cs_port, s_config.cs_pin, GPIO_PIN_SET);
+
+  if (status != HAL_OK) {
+    return -2; /* SPI write failed */
+  }
+
+  return (int)len;`;
+
+      case 'i2c':
+        return `  HAL_StatusTypeDef status;
+
+  /* Write data to device */
+  status = HAL_I2C_Master_Transmit(&s_config.hi2c, s_config.device_address << 1, (uint8_t*)data, len, s_config.timeout);
+
+  if (status != HAL_OK) {
+    return -2; /* I2C write failed */
+  }
+
+  return (int)len;`;
+
+      case 'uart':
+        return `  HAL_StatusTypeDef status;
+
+  /* Transmit data via UART */
+  status = HAL_UART_Transmit(&s_config.huart, (uint8_t*)data, len, s_config.timeout);
+
+  if (status != HAL_OK) {
+    return -2; /* UART write failed */
+  }
+
+  return (int)len;`;
+
+      case 'pwm':
+        return `  if (len < sizeof(uint16_t)) {
+    return -2; /* Invalid data length */
+  }
+
+  /* Extract duty cycle value from data */
+  uint16_t duty_cycle = ((uint16_t)data[0] << 8) | data[1];
+
+  /* Clamp duty cycle to valid range */
+  uint32_t period = __HAL_TIM_GET_AUTORELOAD(&s_config.htim);
+  if (duty_cycle > period) {
+    duty_cycle = (uint16_t)period;
+  }
+
+  /* Set PWM duty cycle */
+  __HAL_TIM_SET_COMPARE(&s_config.htim, s_config.channel, duty_cycle);
+
+  return sizeof(uint16_t);`;
+
+      case 'gpio':
+        return `  /* Write GPIO state */
+  GPIO_PinState state = (data[0] != 0) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+  HAL_GPIO_WritePin(s_config.gpio_port, s_config.gpio_pin, state);
+
+  return 1;`;
+
+      case 'can':
+        return `  CAN_TxHeaderTypeDef tx_header;
+  uint32_t tx_mailbox;
+
+  /* Configure CAN message header */
+  tx_header.StdId = s_config.can_id;
+  tx_header.ExtId = 0;
+  tx_header.IDE = CAN_ID_STD;
+  tx_header.RTR = CAN_RTR_DATA;
+  tx_header.DLC = (len > 8) ? 8 : len;
+  tx_header.TransmitGlobalTime = DISABLE;
+
+  /* Transmit CAN message */
+  if (HAL_CAN_AddTxMessage(&s_config.hcan, &tx_header, (uint8_t*)data, &tx_mailbox) != HAL_OK) {
+    return -2; /* CAN transmit failed */
+  }
+
+  return (int)tx_header.DLC;`;
+
+      default:
+        return `  /* Generic write - not implemented for this peripheral type */
+  (void)len; /* Suppress unused parameter warning */
+  return -2; /* Operation not supported */`;
+    }
   }
 
   private generateTasksCode(requirements: FirmwareRequirements, rtosTemplate: typeof RTOS_TEMPLATES.freertos): string {
