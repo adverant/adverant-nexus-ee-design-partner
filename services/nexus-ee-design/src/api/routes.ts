@@ -690,7 +690,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
         name: req.body.name,
         description: req.body.description,
         repositoryUrl: req.body.repositoryUrl,
-        projectType: req.body.projectType || 'hardware',
+        projectType: req.body.projectType || ProjectType.POWER_ELECTRONICS,
         ownerId,
         organizationId: req.body.organizationId,
         collaborators: req.body.collaborators,

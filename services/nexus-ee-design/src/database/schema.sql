@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS projects (
         'completed', 'on_hold', 'cancelled'
     )),
     CONSTRAINT projects_type_check CHECK (project_type IN (
-        'hardware', 'firmware', 'mixed', 'reference_design'
+        'power_electronics', 'analog_circuit', 'digital_logic', 'mixed_signal',
+        'rf_design', 'iot_device', 'passive_board', 'firmware_only', 'custom'
     ))
 );
 
