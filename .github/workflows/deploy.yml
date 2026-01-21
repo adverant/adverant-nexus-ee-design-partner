@@ -19,7 +19,7 @@ on:
           - all
 
 env:
-  DEPLOY_SERVER: 157.173.102.118
+  DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}  # Set in GitHub repository secrets
   DEPLOY_USER: root
   REGISTRY: localhost:5000
   K8S_NAMESPACE: nexus

@@ -314,7 +314,7 @@ result = await optimize_schematic(
 - **Service Name**: `nexus-ee-design`
 - **MAPOS Worker**: `mapos-kicad-worker`
 - **Namespace**: `nexus`
-- **Server**: 157.173.102.118
+- **Server**: `<YOUR_SERVER_IP>` (configure in your deployment)
 - **Cluster**: K3s
 - **Image Registry**: `localhost:5000/`
 
@@ -322,7 +322,7 @@ result = await optimize_schematic(
 
 **🚫 CRITICAL: NEVER BUILD DOCKER IMAGES LOCALLY!**
 
-All Docker builds MUST happen on the remote server (157.173.102.118).
+All Docker builds MUST happen on the remote server (your deployment server).
 
 ```bash
 # ❌ WRONG - Never run locally
@@ -334,7 +334,7 @@ docker build .
 
 **Manual Deployment (if needed):**
 ```bash
-ssh root@157.173.102.118 << 'EOF'
+ssh root@<YOUR_SERVER_IP> << 'EOF'
 cd /opt/nexus-ee-design
 git pull origin main
 BUILD_TAG="nexus-ee-design-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"

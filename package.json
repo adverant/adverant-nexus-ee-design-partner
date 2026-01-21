@@ -14,7 +14,7 @@
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces",
     "clean": "npm run clean --workspaces && rm -rf node_modules",
-    "docker:build": "echo 'ERROR: Docker builds must be done on remote server (157.173.102.118)' && exit 1",
+    "docker:build": "echo 'ERROR: Docker builds must be done on remote server (see deployment docs)' && exit 1",
     "deploy": "echo 'Use /build-deploy skill for deployments' && exit 1"
   },
   "repository": {

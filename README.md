@@ -308,7 +308,7 @@ adverant-nexus-ee-design-partner/
 /build-deploy
 
 # Or manually via SSH
-ssh root@157.173.102.118 << 'EOF'
+ssh root@<YOUR_SERVER_IP> << 'EOF'
 cd /opt/nexus-ee-design
 git pull origin main
 docker build -t nexus-ee-design:latest .
