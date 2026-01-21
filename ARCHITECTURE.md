@@ -175,13 +175,13 @@ Multi-Agent PCB Optimization System (MAPOS) implements a 7-phase pipeline for DR
 ```mermaid
 graph TD
     subgraph "MAPOS 7-Phase Pipeline"
-        Phase1[Phase 1: Design Rules<br/>IPC-2221 compliant .kicad_dru]
-        Phase2[Phase 2: pcbnew Fixes<br/>Zone nets, dangling vias]
-        Phase3[Phase 3: Zone Fill<br/>ZONE_FILLER API]
-        Phase4[Phase 4: Net Assignment<br/>Orphan pad nets]
-        Phase5[Phase 5: Solder Mask<br/>Via tenting, bridges]
-        Phase6[Phase 6: Silkscreen<br/>Graphics to Fab layer]
-        Phase7[Phase 7: Gaming AI<br/>MAP-Elites + Red Queen + Ralph Wiggum]
+        Phase1[1. Design Rules]
+        Phase2[2. pcbnew Fixes]
+        Phase3[3. Zone Fill]
+        Phase4[4. Net Assignment]
+        Phase5[5. Solder Mask]
+        Phase6[6. Silkscreen]
+        Phase7[7. Gaming AI]
     end
 
     Input[PCB Design] --> Phase1
@@ -194,6 +194,18 @@ graph TD
     Phase7 --> Output[Optimized PCB]
 ```
 
+### MAPOS Phase Details
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| 1 | Design Rules | IPC-2221 compliant .kicad_dru |
+| 2 | pcbnew Fixes | Zone nets, dangling vias |
+| 3 | Zone Fill | ZONE_FILLER API |
+| 4 | Net Assignment | Orphan pad nets |
+| 5 | Solder Mask | Via tenting, bridges |
+| 6 | Silkscreen | Graphics to Fab layer |
+| 7 | Gaming AI | MAP-Elites + Red Queen + Ralph Wiggum |
+
 ---
 
 ## UI Components
@@ -203,12 +215,12 @@ The plugin provides 6 UI components for interactive design:
 ```mermaid
 graph TB
     subgraph "UI Layer"
-        Terminal[Terminal<br/>Claude Code integration<br/>Type: iframe]
-        Browser[Project Browser<br/>VSCode-like repo browser<br/>Type: panel]
-        KiCad[KiCad Viewer<br/>WASM schematic/PCB editor<br/>Type: tab]
-        SimPanel[Simulation Panel<br/>Waveforms and results<br/>Type: panel]
-        ValPanel[Validation Panel<br/>DRC/ERC/Multi-LLM results<br/>Type: panel]
-        Viewer3D[3D Viewer<br/>Three.js PCB visualization<br/>Type: tab]
+        Terminal[Terminal]
+        Browser[Project Browser]
+        KiCad[KiCad Viewer]
+        SimPanel[Sim Panel]
+        ValPanel[Validation]
+        Viewer3D[3D Viewer]
     end
 
     Terminal --> API[Plugin API]
@@ -223,12 +235,12 @@ graph TB
 
 | Component | Description | Type |
 |-----------|-------------|------|
-| `terminal` | Claude Code terminal integration | iframe |
-| `project-browser` | VSCode-like GitHub repo browser | panel |
-| `kicad-viewer` | KiCad WASM schematic and PCB editor | tab |
-| `simulation-panel` | Simulation waveforms and results | panel |
-| `validation-panel` | DRC/ERC/Multi-LLM validation results | panel |
-| `3d-viewer` | Three.js PCB 3D visualization | tab |
+| terminal | Claude Code terminal integration | iframe |
+| project-browser | VSCode-like GitHub repo browser | panel |
+| kicad-viewer | KiCad WASM schematic and PCB editor | tab |
+| simulation-panel | Simulation waveforms and results | panel |
+| validation-panel | DRC/ERC/Multi-LLM validation results | panel |
+| 3d-viewer | Three.js PCB 3D visualization | tab |
 
 ---
 
@@ -243,9 +255,9 @@ graph LR
     end
 
     subgraph "Nexus Platform"
-        GraphRAG[GraphRAG<br/>Memory & Knowledge Graph<br/>Required]
-        MageAgent[MageAgent<br/>Multi-agent Orchestration<br/>Optional]
-        Sandbox[Sandbox<br/>Code Execution<br/>Optional]
+        GraphRAG[GraphRAG]
+        MageAgent[MageAgent]
+        Sandbox[Sandbox]
     end
 
     Plugin --> GraphRAG
@@ -259,13 +271,13 @@ graph LR
 graph LR
     subgraph "EE Design Partner"
         Plugin[Plugin Core]
-        GamingAI[Gaming AI Engine]
-        Validation[Multi-LLM Validation]
+        GamingAI[Gaming AI]
+        Validation[Validation]
     end
 
     subgraph "External APIs"
-        Anthropic[Anthropic API<br/>Claude Opus 4<br/>Primary LLM]
-        OpenRouter[OpenRouter API<br/>Gemini 2.5 Pro<br/>Validation & Gaming AI]
+        Anthropic[Anthropic]
+        OpenRouter[OpenRouter]
     end
 
     Plugin --> Anthropic
@@ -283,9 +295,9 @@ graph TB
     Artifact[Design Artifact]
 
     subgraph "Validation Ensemble"
-        Claude[Claude Opus 4<br/>Primary Generation<br/>Weight: 0.4]
-        Gemini[Gemini 2.5 Pro<br/>Cross-validation<br/>Weight: 0.3]
-        Domain[Domain Expert Validators<br/>Weight: 0.3]
+        Claude[Claude: 0.4]
+        Gemini[Gemini: 0.3]
+        Domain[Domain: 0.3]
     end
 
     subgraph "Consensus Engine"
