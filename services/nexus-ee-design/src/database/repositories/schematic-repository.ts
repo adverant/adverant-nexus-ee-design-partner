@@ -102,6 +102,7 @@ function mapRowToSchematic(row: SchematicRow): Schematic {
     validationResults: row.validation_results || undefined,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    kicadSch: row.kicad_sch || undefined,
   };
 }
 

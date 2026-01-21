@@ -1237,6 +1237,50 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }
   });
 
+  /**
+   * Get schematic file content for KiCanvas viewer
+   * Returns the raw KiCad schematic file with proper content-type
+   */
+  router.get('/projects/:projectId/schematic/:schematicId/file', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, schematicId } = req.params;
+      log.debug('Getting schematic file', { projectId, schematicId });
+
+      const schematic = await findSchematicById(schematicId);
+
+      if (!schematic) {
+        throw new NotFoundError('Schematic', schematicId, { operation: 'getSchematicFile' });
+      }
+
+      if (schematic.projectId !== projectId) {
+        throw new ValidationError('Schematic does not belong to this project', {
+          operation: 'getSchematicFile',
+          schematicId,
+          projectId,
+        });
+      }
+
+      // Get the kicadSch content from the schematic record
+      // Note: kicadSch is stored in the database, not on disk
+      if (!schematic.kicadSch) {
+        throw new NotFoundError('Schematic file content', schematicId, {
+          operation: 'getSchematicFile',
+          message: 'Schematic file content not available. The schematic may still be generating.',
+        });
+      }
+
+      // Set appropriate headers for KiCad schematic file
+      res.setHeader('Content-Type', 'application/x-kicad-schematic');
+      res.setHeader('Content-Disposition', `inline; filename="${schematic.name}.kicad_sch"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+      // Send the schematic content
+      res.send(schematic.kicadSch);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/projects/:projectId/schematic/:schematicId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { projectId, schematicId } = req.params;

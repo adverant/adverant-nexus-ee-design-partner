@@ -108,6 +108,8 @@ export interface Schematic {
   validationResults?: ValidationResults;
   createdAt: string;
   updatedAt: string;
+  /** Raw KiCad schematic file content (optional, only included when needed) */
+  kicadSch?: string;
 }
 
 export interface SchematicSheet {
