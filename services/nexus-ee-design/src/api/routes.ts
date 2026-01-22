@@ -15,6 +15,7 @@ import path from 'path';
 import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
+import { generateSchematic as generateKicadSchematic, generateMinimalSchematic } from '../utils/kicad-generator.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
 
@@ -1097,30 +1098,103 @@ export function createApiRoutes(io: SocketIOServer): Router {
         throw new NotFoundError('Project', projectId, { operation: 'generateSchematic' });
       }
 
-      // Create schematic record
+      // Emit generation started event
+      io.to(`project:${projectId}`).emit('schematic:generation-started', {
+        projectId,
+        status: 'generating',
+      });
+
+      // Extract architecture data from request
+      const architectureData = req.body.architecture || {};
+      const subsystems = Array.isArray(architectureData.subsystems)
+        ? architectureData.subsystems.map((s: Record<string, unknown>) => ({
+            id: String(s.id || ''),
+            name: String(s.name || 'Unnamed'),
+            category: String(s.category || 'Default'),
+            description: s.description ? String(s.description) : undefined,
+          }))
+        : [];
+
+      // Extract component definitions if provided
+      const componentDefs = Array.isArray(req.body.components)
+        ? req.body.components.map((c: Record<string, unknown>) => ({
+            reference: String(c.reference || 'U1'),
+            value: String(c.value || 'Component'),
+            library: String(c.library || 'Device'),
+            symbol: String(c.symbol || 'R'),
+            footprint: c.footprint ? String(c.footprint) : undefined,
+          }))
+        : [];
+
+      // Generate KiCad schematic content
+      // Import types from generator for proper typing
+      type GeneratedSchematic = ReturnType<typeof generateKicadSchematic>;
+      let generatedSchematic: GeneratedSchematic;
+      if (subsystems.length > 0) {
+        generatedSchematic = generateKicadSchematic({
+          architecture: {
+            subsystems,
+            projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
+            title: req.body.name || project.name,
+            company: 'Adverant EE Design',
+          },
+          components: componentDefs.length > 0 ? componentDefs : undefined,
+          projectName: req.body.name || project.name,
+          paperSize: 'A4',
+        });
+      } else {
+        // Generate minimal schematic if no subsystems specified
+        generatedSchematic = generateMinimalSchematic(req.body.name || project.name);
+      }
+
+      log.info('KiCad schematic content generated', {
+        projectId,
+        contentLength: generatedSchematic.content.length,
+        componentCount: generatedSchematic.components.length,
+        netCount: generatedSchematic.nets.length,
+      });
+
+      // Create schematic record with generated content
+      // The CreateSchematicInput type allows simplified sheet/component/net structures
+      // that get stored as JSON in the database
       const schematicInput: CreateSchematicInput = {
         projectId,
         name: req.body.name || `${project.name} Schematic`,
         format: 'kicad_sch',
+        kicadSch: generatedSchematic.content,
       };
 
       const schematic = await createSchematic(schematicInput);
 
-      // Queue schematic generation job
-      io.to(`project:${projectId}`).emit('schematic:generation-started', {
+      // Emit generation completed event
+      io.to(`project:${projectId}`).emit('schematic:generation-completed', {
+        schematicId: schematic.id,
+        projectId,
+        componentCount: generatedSchematic.components.length,
+        netCount: generatedSchematic.nets.length,
+      });
+
+      log.info('Schematic created successfully', {
         schematicId: schematic.id,
         projectId,
       });
 
-      res.status(202).json({
+      res.status(201).json({
         success: true,
         data: {
           schematicId: schematic.id,
-          status: 'pending',
+          status: 'completed',
           projectId,
+          componentCount: generatedSchematic.components.length,
+          netCount: generatedSchematic.nets.length,
+          sheetCount: generatedSchematic.sheets.length,
         },
       });
     } catch (error) {
+      log.error('Schematic generation failed', {
+        projectId: req.params.projectId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
       next(error);
     }
   });
