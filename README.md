@@ -6,6 +6,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-yellow.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Research Paper](https://img.shields.io/badge/Research-MAPO%20Gaming-purple.svg)](https://adverant.ai/docs/research/mapo-gaming)
 
 ## Overview
 
@@ -292,12 +293,28 @@ adverant-nexus-ee-design-partner/
 | Best Practice Adherence | 0.65 | 0.92 (+42%) |
 | Cost Efficiency | 0.58 | 0.81 (+40%) |
 
+## Research & Publications
+
+This project is backed by peer-reviewed research:
+
+📄 **[MAPO Gaming: LLM-First Quality-Diversity Optimization for Automated PCB Layout Through Adversarial Co-Evolution](https://adverant.ai/docs/research/mapo-gaming)**
+
+> This research introduces a framework combining MAP-Elites quality-diversity optimization with Red Queen adversarial co-evolution and persistent iteration for PCB design automation. Testing on a complex 10-layer motor controller demonstrated a **63% reduction in DRC violations** and **95% reduction in unconnected items**.
+
+**Key contributions:**
+- LLM-first architecture eliminating the need for domain-specific training data or GPU infrastructure
+- Multi-agent tournament systems with Elo ranking
+- 8-domain validation framework (DRC, ERC, IPC-2221, Signal Integrity, Thermal, DFM, Best Practices, Testing)
+- 10-dimensional behavioral descriptor space for quality-diversity
+- File-based state persistence and stagnation detection
+
 ## Documentation
 
 - [Architecture Overview](docs/architecture.md)
 - [Gaming AI Deep Dive](docs/gaming-ai.md)
 - [20 Use Case Examples](docs/use-cases.md)
 - [MAPOS Reference](skills/mapos.md)
+- [Research Paper: MAPO Gaming](https://adverant.ai/docs/research/mapo-gaming)
 
 ## Deployment
 
