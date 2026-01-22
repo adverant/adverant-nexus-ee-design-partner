@@ -640,8 +640,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
       res.json({
         success: true,
-        data: projects,
-        metadata: {
+        data: {
+          data: projects,
           total,
           page,
           pageSize,
