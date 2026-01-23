@@ -295,7 +295,7 @@ adverant-nexus-ee-design-partner/
 
 ## Research & Publications
 
-This project is backed by peer-reviewed research:
+Technical documentation and research methodology:
 
 📄 **[MAPO Gaming: LLM-First Quality-Diversity Optimization for Automated PCB Layout Through Adversarial Co-Evolution](https://adverant.ai/docs/research/mapo-gaming)**
 
