@@ -1314,8 +1314,12 @@ export function createApiRoutes(io: SocketIOServer): Router {
   /**
    * Get schematic file content for KiCanvas viewer
    * Returns the raw KiCad schematic file with proper content-type
+   *
+   * Two routes available:
+   * - /projects/:projectId/schematic/:schematicId/file (original)
+   * - /projects/:projectId/schematic/:schematicId/schematic.kicad_sch (for KiCanvas file type detection)
    */
-  router.get('/projects/:projectId/schematic/:schematicId/file', async (req: Request, res: Response, next: NextFunction) => {
+  const schematicFileHandler = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { projectId, schematicId } = req.params;
       log.debug('Getting schematic file', { projectId, schematicId });
@@ -1353,7 +1357,14 @@ export function createApiRoutes(io: SocketIOServer): Router {
     } catch (error) {
       next(error);
     }
-  });
+  };
+
+  // Original route (for backwards compatibility)
+  router.get('/projects/:projectId/schematic/:schematicId/file', schematicFileHandler);
+
+  // New route with .kicad_sch extension for KiCanvas file type detection
+  // KiCanvas uses the URL basename to detect file type, so including .kicad_sch in the URL is essential
+  router.get('/projects/:projectId/schematic/:schematicId/schematic.kicad_sch', schematicFileHandler);
 
   router.post('/projects/:projectId/schematic/:schematicId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1727,6 +1738,59 @@ export function createApiRoutes(io: SocketIOServer): Router {
       next(error);
     }
   });
+
+  /**
+   * Get PCB file content for KiCanvas viewer
+   * Returns the raw KiCad PCB file with proper content-type
+   *
+   * Two routes available:
+   * - /projects/:projectId/pcb-layout/:layoutId/file (original)
+   * - /projects/:projectId/pcb-layout/:layoutId/board.kicad_pcb (for KiCanvas file type detection)
+   */
+  const pcbFileHandler = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, layoutId } = req.params;
+      log.debug('Getting PCB file', { projectId, layoutId });
+
+      const layout = await findPCBLayoutById(layoutId);
+
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'getPcbFile' });
+      }
+
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'getPcbFile',
+          layoutId,
+          projectId,
+        });
+      }
+
+      // Get the kicadPcb content from the layout record
+      if (!layout.kicadPcb) {
+        throw new NotFoundError('PCB file content', layoutId, {
+          operation: 'getPcbFile',
+          message: 'PCB file content not available. The PCB may still be generating.',
+        });
+      }
+
+      // Set appropriate headers for KiCad PCB file
+      res.setHeader('Content-Type', 'application/x-kicad-pcb');
+      res.setHeader('Content-Disposition', `inline; filename="${layout.name}.kicad_pcb"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+      // Send the PCB content
+      res.send(layout.kicadPcb);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // Original route (for backwards compatibility)
+  router.get('/projects/:projectId/pcb-layout/:layoutId/file', pcbFileHandler);
+
+  // New route with .kicad_pcb extension for KiCanvas file type detection
+  router.get('/projects/:projectId/pcb-layout/:layoutId/board.kicad_pcb', pcbFileHandler);
 
   router.post('/projects/:projectId/pcb-layout/:layoutId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
