@@ -43,6 +43,8 @@ async function startServer(): Promise<void> {
   // Middleware
   app.use(helmet({
     contentSecurityPolicy: false, // Disable for embedded UI
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow KiCanvas to fetch schematic files
+    crossOriginOpenerPolicy: { policy: 'unsafe-none' }, // Allow cross-origin window access for KiCanvas
   }));
   app.use(cors());
   app.use(compression());
