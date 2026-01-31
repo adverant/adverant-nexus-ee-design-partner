@@ -1,0 +1,11 @@
+{
+  "part_number": "LM7805",
+  "manufacturer": "TI",
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-01-31T16:05:43.153796",
+  "needs_review": false,
+  "library": "Regulator_Linear",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Regulator_Linear.kicad_sym",
+  "match_type": "exact"
+}

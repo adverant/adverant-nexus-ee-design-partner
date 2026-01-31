@@ -9,9 +9,15 @@ import { spawn, ChildProcess, exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { existsSync } from 'fs';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { logger } from '../../utils/logger';
+import { fileURLToPath } from 'url';
+import { log as logger } from '../../utils/logger.js';
+
+// ESM-compatible __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const execAsync = promisify(exec);
 
@@ -42,8 +48,27 @@ export interface ScriptJob {
   endTime?: Date;
 }
 
+// Get the scripts directory relative to the project root
+const getScriptsDir = (): string => {
+  // In development, we're in src/services/pcb
+  // In production, we're in dist/services/pcb
+  const possiblePaths = [
+    path.join(__dirname, '../../../../python-scripts'),
+    path.join(__dirname, '../../../python-scripts'),
+    path.resolve(process.cwd(), 'python-scripts'),
+    path.resolve(process.cwd(), 'services/nexus-ee-design/python-scripts'),
+  ];
+
+  for (const p of possiblePaths) {
+    if (existsSync(p)) {
+      return p;
+    }
+  }
+  return possiblePaths[0]; // Default to first option
+};
+
 const DEFAULT_CONFIG: PythonExecutorConfig = {
-  scriptsDir: path.join(__dirname, '../../../../python-scripts'),
+  scriptsDir: getScriptsDir(),
   workDir: '/tmp/nexus-ee-design',
   timeout: 120000, // 2 minutes default
   maxConcurrent: 4
@@ -71,6 +96,9 @@ export class PythonExecutor extends EventEmitter {
     if (this.initialized) return;
 
     try {
+      // Log configuration
+      logger.info(`Python executor scriptsDir: ${this.config.scriptsDir}`);
+
       // Check Python availability
       const pythonPath = await this.findPython();
       this.config.pythonPath = pythonPath;
@@ -78,7 +106,7 @@ export class PythonExecutor extends EventEmitter {
       // Get Python version
       const { stdout } = await execAsync(`${pythonPath} --version`);
       this.pythonVersion = stdout.trim();
-      logger.info(`Python executor initialized: ${this.pythonVersion}`);
+      logger.info(`Python executor initialized: ${this.pythonVersion}, scriptsDir: ${this.config.scriptsDir}`);
 
       // Ensure work directory exists
       await fs.mkdir(this.config.workDir, { recursive: true });
@@ -102,14 +130,35 @@ export class PythonExecutor extends EventEmitter {
   }
 
   /**
-   * Find Python executable
+   * Find Python executable - prioritize venv in scripts directory
    */
   private async findPython(): Promise<string> {
+    // First, check for venv in scripts directory (this has all the dependencies)
+    const venvPaths = [
+      path.join(this.config.scriptsDir, 'venv', 'bin', 'python'),
+      path.join(this.config.scriptsDir, 'venv', 'bin', 'python3'),
+      path.join(this.config.scriptsDir, '.venv', 'bin', 'python'),
+      path.join(this.config.scriptsDir, '.venv', 'bin', 'python3'),
+    ];
+
+    for (const venvPath of venvPaths) {
+      try {
+        await fs.access(venvPath);
+        await execAsync(`${venvPath} --version`);
+        logger.info(`Using venv Python: ${venvPath}`);
+        return venvPath;
+      } catch {
+        continue;
+      }
+    }
+
+    // Fall back to system Python
     const candidates = ['python3', 'python', '/usr/bin/python3', '/usr/local/bin/python3'];
 
     for (const candidate of candidates) {
       try {
         await execAsync(`${candidate} --version`);
+        logger.warn(`Using system Python (no venv found): ${candidate}`);
         return candidate;
       } catch {
         continue;
@@ -261,6 +310,8 @@ if __name__ == "__main__":
       const pythonArgs = [scriptPath, ...args];
       let stdout = '';
       let stderr = '';
+
+      logger.info(`Executing Python script: ${this.config.pythonPath} ${scriptPath}`);
 
       const env = {
         ...process.env,

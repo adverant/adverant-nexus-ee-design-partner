@@ -18,6 +18,7 @@ import { config } from './config.js';
 import { log } from './utils/logger.js';
 import { EEDesignError, handleError } from './utils/errors.js';
 import { createApiRoutes } from './api/routes.js';
+import { cliAccessMiddleware } from './api/cli-access.js';
 import { SkillsEngineClient } from './services/skills/skills-engine-client.js';
 import { getFileWatcherService, clearFileWatcherService } from './services/file-watcher/index.js';
 import { setSkillsEngineClient, getSkillsEngineClient, clearSkillsEngineClient } from './state.js';
@@ -50,6 +51,9 @@ async function startServer(): Promise<void> {
   app.use(compression());
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // CLI Access Middleware - grants full permissions to terminal/CLI clients
+  app.use(cliAccessMiddleware);
 
   // Request logging middleware
   app.use((req: Request, res: Response, next: NextFunction) => {

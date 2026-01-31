@@ -1,0 +1,12 @@
+{
+  "part_number": "10uF",
+  "manufacturer": null,
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-01-31T15:48:21.050703",
+  "needs_review": false,
+  "library": "Device",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Device.kicad_sym",
+  "match_type": "generic_passive",
+  "generic_symbol": "C"
+}

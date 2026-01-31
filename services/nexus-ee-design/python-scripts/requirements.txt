@@ -42,3 +42,8 @@ scikit-rf>=0.30.0
 # Async support
 aiohttp>=3.9.0
 aiofiles>=23.2.0
+
+# MAPO Vision Validation Pipeline
+anthropic>=0.20.0  # LLM vision validation
+neo4j>=5.0.0  # GraphRAG symbol storage (optional)
+openai>=1.0.0  # Embeddings for semantic search (optional)

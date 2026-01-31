@@ -1,0 +1,12 @@
+{
+  "part_number": "INA240A1D",
+  "manufacturer": "TI",
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-01-31T15:32:57.012193",
+  "needs_review": false,
+  "library": "Amplifier_Current",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Amplifier_Current.kicad_sym",
+  "match_type": "fuzzy",
+  "original_query": "INA240A4PWR"
+}

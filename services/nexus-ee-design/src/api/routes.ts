@@ -16,6 +16,7 @@ import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
 import { generateSchematic as generateKicadSchematic, generateMinimalSchematic } from '../utils/kicad-generator.js';
+import { PythonExecutor } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
 
@@ -55,6 +56,7 @@ import {
   updateMaposConfig,
   getMaposIterations,
   updateScores as updatePCBScores,
+  getKicadContent,
   type CreatePCBLayoutInput,
   type DRCResults,
 } from '../database/repositories/pcb-repository.js';
@@ -1126,22 +1128,122 @@ export function createApiRoutes(io: SocketIOServer): Router {
           }))
         : [];
 
-      // Generate KiCad schematic content
-      // Import types from generator for proper typing
-      type GeneratedSchematic = ReturnType<typeof generateKicadSchematic>;
+      // Generate KiCad schematic content using MAPO pipeline
+      interface GeneratedSchematic {
+        content: string;
+        sheets: Array<{ name: string; uuid: string; page: number }>;
+        components: Array<{ reference: string; value: string; uuid: string }>;
+        nets: Array<{ name: string; uuid: string; code: number }>;
+      }
       let generatedSchematic: GeneratedSchematic;
+
       if (subsystems.length > 0) {
-        generatedSchematic = generateKicadSchematic({
-          architecture: {
-            subsystems,
-            projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
-            title: req.body.name || project.name,
-            company: 'Adverant EE Design',
-          },
-          components: componentDefs.length > 0 ? componentDefs : undefined,
-          projectName: req.body.name || project.name,
-          paperSize: 'A4',
+        // Use Python MAPO pipeline for real schematic generation
+        log.info('Using MAPO pipeline for schematic generation', {
+          projectId,
+          subsystemCount: subsystems.length,
         });
+
+        const pythonExecutor = new PythonExecutor();
+        await pythonExecutor.initialize();
+
+        // Prepare input for MAPO pipeline
+        const mapoInput = {
+          subsystems,
+          project_name: req.body.name || project.name,
+          design_name: `schematic_${Date.now()}`,
+          skip_validation: true, // Skip validation for faster initial generation
+        };
+
+        // Emit progress event
+        io.to(`project:${projectId}`).emit('schematic:progress', {
+          projectId,
+          status: 'fetching_symbols',
+          message: 'Fetching real KiCad symbols from libraries...',
+        });
+
+        try {
+          const result = await pythonExecutor.execute(
+            'api_generate_schematic.py',
+            ['--json', JSON.stringify(mapoInput)],
+            { timeout: 300000 } // 5 minute timeout for complex schematics
+          );
+
+          if (!result.success) {
+            log.warn('MAPO pipeline failed, falling back to placeholder generator', {
+              projectId,
+              error: result.stderr,
+            });
+            // Fallback to placeholder generator
+            generatedSchematic = generateKicadSchematic({
+              architecture: {
+                subsystems,
+                projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
+                title: req.body.name || project.name,
+                company: 'Adverant EE Design',
+              },
+              components: componentDefs.length > 0 ? componentDefs : undefined,
+              projectName: req.body.name || project.name,
+              paperSize: 'A4',
+            });
+          } else {
+            // Parse MAPO pipeline output
+            const mapoResult = result.output as {
+              success: boolean;
+              schematic_content: string;
+              sheets?: Array<{ name: string; uuid: string; component_count: number }>;
+              component_count: number;
+              errors: string[];
+            };
+
+            if (mapoResult.success && mapoResult.schematic_content) {
+              generatedSchematic = {
+                content: mapoResult.schematic_content,
+                sheets: (mapoResult.sheets || []).map((s, i) => ({
+                  name: s.name,
+                  uuid: s.uuid,
+                  page: i + 1,
+                })),
+                components: [], // Components are embedded in the schematic content
+                nets: [],
+              };
+
+              // Emit success with real component count
+              io.to(`project:${projectId}`).emit('schematic:progress', {
+                projectId,
+                status: 'assembled',
+                message: `Assembled schematic with ${mapoResult.component_count} real components`,
+                componentCount: mapoResult.component_count,
+              });
+
+              log.info('MAPO pipeline generated schematic successfully', {
+                projectId,
+                componentCount: mapoResult.component_count,
+                contentLength: mapoResult.schematic_content.length,
+              });
+            } else {
+              // MAPO returned success=false, use fallback
+              throw new Error(mapoResult.errors?.join(', ') || 'MAPO generation failed');
+            }
+          }
+        } catch (mapoError) {
+          log.error('MAPO pipeline error, using fallback', {
+            projectId,
+            error: mapoError instanceof Error ? mapoError.message : 'Unknown error',
+          });
+          // Fallback to placeholder generator
+          generatedSchematic = generateKicadSchematic({
+            architecture: {
+              subsystems,
+              projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
+              title: req.body.name || project.name,
+              company: 'Adverant EE Design',
+            },
+            components: componentDefs.length > 0 ? componentDefs : undefined,
+            projectName: req.body.name || project.name,
+            paperSize: 'A4',
+          });
+        }
       } else {
         // Generate minimal schematic if no subsystems specified
         generatedSchematic = generateMinimalSchematic(req.body.name || project.name);
@@ -1150,8 +1252,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
       log.info('KiCad schematic content generated', {
         projectId,
         contentLength: generatedSchematic.content.length,
-        componentCount: generatedSchematic.components.length,
-        netCount: generatedSchematic.nets.length,
+        componentCount: generatedSchematic.components?.length || 0,
+        netCount: generatedSchematic.nets?.length || 0,
       });
 
       // Create schematic record with generated content
@@ -1791,6 +1893,148 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   // New route with .kicad_pcb extension for KiCanvas file type detection
   router.get('/projects/:projectId/pcb-layout/:layoutId/board.kicad_pcb', pcbFileHandler);
+
+  /**
+   * Export PCB as 3D STEP model
+   * Uses KiCad CLI to generate STEP file for CAD/3D viewing
+   */
+  router.get('/projects/:projectId/pcb-layout/:layoutId/board.step', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, layoutId } = req.params;
+      log.info('Exporting PCB as STEP', { projectId, layoutId });
+
+      const layout = await findPCBLayoutById(layoutId);
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'exportStep' });
+      }
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'exportStep', layoutId, projectId,
+        });
+      }
+
+      const pcbContent = await getKicadContent(layoutId);
+      if (!pcbContent) {
+        throw new NotFoundError('PCB content', layoutId, { operation: 'exportStep' });
+      }
+
+      // Write PCB to temp file
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const os = await import('os');
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'step-export-'));
+      const pcbPath = path.join(tempDir, 'board.kicad_pcb');
+      const stepPath = path.join(tempDir, 'board.step');
+      await fs.writeFile(pcbPath, pcbContent);
+
+      // Run export script
+      const { spawn } = await import('child_process');
+      const scriptsDir = config.kicad.scriptsDir;
+      const pythonPath = config.kicad.pythonPath;
+      const scriptPath = path.join(scriptsDir, 'export_3d_model.py');
+
+      const result = await new Promise<{ success: boolean; filePath?: string; message?: string }>((resolve) => {
+        const proc = spawn(pythonPath, [scriptPath, pcbPath, '--format', 'step', '--output', stepPath]);
+        let stdout = '';
+        proc.stdout.on('data', (data) => { stdout += data.toString(); });
+        proc.on('close', () => {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch {
+            resolve({ success: false, message: stdout });
+          }
+        });
+        proc.on('error', () => resolve({ success: false, message: 'Process error' }));
+      });
+
+      if (!result.success || !result.filePath) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        throw new Error(`STEP export failed: ${result.message || 'Unknown error'}`);
+      }
+
+      // Send STEP file
+      const stepContent = await fs.readFile(result.filePath);
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+
+      res.setHeader('Content-Type', 'application/step');
+      res.setHeader('Content-Disposition', `attachment; filename="board-${layoutId.substring(0,8)}.step"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.send(stepContent);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Export PCB as 3D VRML model
+   * Uses KiCad CLI to generate VRML file for web 3D viewing
+   */
+  router.get('/projects/:projectId/pcb-layout/:layoutId/board.wrl', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, layoutId } = req.params;
+      log.info('Exporting PCB as VRML', { projectId, layoutId });
+
+      const layout = await findPCBLayoutById(layoutId);
+      if (!layout) {
+        throw new NotFoundError('PCB Layout', layoutId, { operation: 'exportVrml' });
+      }
+      if (layout.projectId !== projectId) {
+        throw new ValidationError('PCB Layout does not belong to this project', {
+          operation: 'exportVrml', layoutId, projectId,
+        });
+      }
+
+      const pcbContent = await getKicadContent(layoutId);
+      if (!pcbContent) {
+        throw new NotFoundError('PCB content', layoutId, { operation: 'exportVrml' });
+      }
+
+      // Write PCB to temp file
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const os = await import('os');
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vrml-export-'));
+      const pcbPath = path.join(tempDir, 'board.kicad_pcb');
+      const vrmlPath = path.join(tempDir, 'board.wrl');
+      await fs.writeFile(pcbPath, pcbContent);
+
+      // Run export script
+      const { spawn } = await import('child_process');
+      const scriptsDir = config.kicad.scriptsDir;
+      const pythonPath = config.kicad.pythonPath;
+      const scriptPath = path.join(scriptsDir, 'export_3d_model.py');
+
+      const result = await new Promise<{ success: boolean; filePath?: string; message?: string }>((resolve) => {
+        const proc = spawn(pythonPath, [scriptPath, pcbPath, '--format', 'vrml', '--output', vrmlPath]);
+        let stdout = '';
+        proc.stdout.on('data', (data) => { stdout += data.toString(); });
+        proc.on('close', () => {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch {
+            resolve({ success: false, message: stdout });
+          }
+        });
+        proc.on('error', () => resolve({ success: false, message: 'Process error' }));
+      });
+
+      if (!result.success || !result.filePath) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        throw new Error(`VRML export failed: ${result.message || 'Unknown error'}`);
+      }
+
+      // Send VRML file
+      const vrmlContent = await fs.readFile(result.filePath);
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+
+      res.setHeader('Content-Type', 'model/vrml');
+      res.setHeader('Content-Disposition', `attachment; filename="board-${layoutId.substring(0,8)}.wrl"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.send(vrmlContent);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.post('/projects/:projectId/pcb-layout/:layoutId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {

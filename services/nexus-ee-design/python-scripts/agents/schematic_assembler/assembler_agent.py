@@ -1,0 +1,848 @@
+"""
+Schematic Assembler Agent - Assembles KiCad schematics using real symbols.
+
+Takes a BOM, block diagram, and connections to produce properly laid out
+KiCad schematic files with real component symbols.
+
+Author: Nexus EE Design Team
+"""
+
+import asyncio
+import json
+import logging
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+class PinType(Enum):
+    """KiCad pin types."""
+    INPUT = "input"
+    OUTPUT = "output"
+    BIDIRECTIONAL = "bidirectional"
+    TRI_STATE = "tri_state"
+    PASSIVE = "passive"
+    FREE = "free"
+    UNSPECIFIED = "unspecified"
+    POWER_IN = "power_in"
+    POWER_OUT = "power_out"
+    OPEN_COLLECTOR = "open_collector"
+    OPEN_EMITTER = "open_emitter"
+    NO_CONNECT = "no_connect"
+
+
+@dataclass
+class Pin:
+    """Schematic symbol pin."""
+    name: str
+    number: str
+    pin_type: PinType
+    position: Tuple[float, float]  # Relative to symbol origin
+    orientation: int  # 0=right, 90=up, 180=left, 270=down
+    length: float = 2.54
+
+
+@dataclass
+class SymbolInstance:
+    """Placed symbol instance in schematic."""
+    symbol_id: str  # Reference to lib_symbol
+    part_number: str
+    reference: str  # U1, R1, C1, etc.
+    position: Tuple[float, float]  # mm
+    rotation: int  # 0, 90, 180, 270
+    mirror: bool = False
+    unit: int = 1  # For multi-unit symbols
+    value: str = ""
+    footprint: str = ""
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    pins: List[Pin] = field(default_factory=list)
+
+    def get_absolute_pin_position(self, pin_name: str) -> Optional[Tuple[float, float]]:
+        """Get absolute position of a pin."""
+        for pin in self.pins:
+            if pin.name == pin_name or pin.number == pin_name:
+                # Apply rotation and translation
+                px, py = pin.position
+                if self.rotation == 90:
+                    px, py = -py, px
+                elif self.rotation == 180:
+                    px, py = -px, -py
+                elif self.rotation == 270:
+                    px, py = py, -px
+
+                return (self.position[0] + px, self.position[1] + py)
+        return None
+
+
+@dataclass
+class Wire:
+    """Schematic wire segment."""
+    start: Tuple[float, float]
+    end: Tuple[float, float]
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class Label:
+    """Schematic label (net name)."""
+    text: str
+    position: Tuple[float, float]
+    rotation: int = 0
+    label_type: str = "label"  # label, global_label, hierarchical_label
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class Junction:
+    """Wire junction dot."""
+    position: Tuple[float, float]
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class SchematicSheet:
+    """Complete schematic sheet."""
+    name: str
+    filename: str
+    symbols: List[SymbolInstance] = field(default_factory=list)
+    wires: List[Wire] = field(default_factory=list)
+    labels: List[Label] = field(default_factory=list)
+    junctions: List[Junction] = field(default_factory=list)
+    lib_symbols: Dict[str, str] = field(default_factory=dict)  # symbol_id -> S-expression
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class BOMItem:
+    """Bill of materials item."""
+    part_number: str
+    manufacturer: Optional[str] = None
+    reference: Optional[str] = None  # Pre-assigned reference
+    quantity: int = 1
+    category: str = "Other"
+    value: str = ""
+    footprint: str = ""
+    description: str = ""
+
+
+@dataclass
+class Connection:
+    """Net connection between pins."""
+    from_ref: str  # e.g., "U1"
+    from_pin: str  # e.g., "VCC" or "1"
+    to_ref: str
+    to_pin: str
+    net_name: Optional[str] = None  # Named net, or auto-generated
+
+
+@dataclass
+class BlockDiagram:
+    """High-level block diagram structure."""
+    blocks: Dict[str, Dict[str, Any]]  # block_name -> {components: [], external_pins: []}
+    connections: List[Dict[str, str]]  # Inter-block connections
+
+
+class SchematicAssemblerAgent:
+    """
+    Assembles KiCad schematics using real symbols.
+
+    Pipeline:
+    1. Resolve symbols for all BOM items
+    2. Plan hierarchical sheet structure
+    3. Place components with signal-flow optimization
+    4. Route wires using Manhattan routing
+    5. Add labels, junctions, power flags
+    6. Generate KiCad S-expression output
+    """
+
+    GRID_UNIT = 2.54  # mm (100 mil standard KiCad grid)
+    DEFAULT_SHEET_SIZE = (297, 210)  # A4 landscape in mm
+
+    # Reference designator prefixes by category
+    REF_PREFIXES = {
+        "MCU": "U",
+        "IC": "U",
+        "MOSFET": "Q",
+        "BJT": "Q",
+        "Transistor": "Q",
+        "Gate_Driver": "U",
+        "OpAmp": "U",
+        "Amplifier": "U",
+        "Capacitor": "C",
+        "Resistor": "R",
+        "Inductor": "L",
+        "Diode": "D",
+        "LED": "D",
+        "Connector": "J",
+        "Power": "U",
+        "Regulator": "U",
+        "Crystal": "Y",
+        "Fuse": "F",
+        "Relay": "K",
+        "Transformer": "T",
+        "Other": "U"
+    }
+
+    def __init__(self, symbol_fetcher: Any = None, graphrag_client: Any = None):
+        """
+        Initialize the assembler.
+
+        Args:
+            symbol_fetcher: SymbolFetcherAgent for getting real symbols
+            graphrag_client: GraphRAG client for symbol lookup
+        """
+        self.symbol_fetcher = symbol_fetcher
+        self.graphrag = graphrag_client
+        self.ref_counters: Dict[str, int] = {}
+
+    def _get_next_reference(self, category: str) -> str:
+        """Get next available reference designator."""
+        prefix = self.REF_PREFIXES.get(category, "U")
+        count = self.ref_counters.get(prefix, 0) + 1
+        self.ref_counters[prefix] = count
+        return f"{prefix}{count}"
+
+    async def assemble_schematic(
+        self,
+        bom: List[BOMItem],
+        block_diagram: Optional[BlockDiagram] = None,
+        connections: Optional[List[Connection]] = None,
+        design_name: str = "schematic"
+    ) -> List[SchematicSheet]:
+        """
+        Main entry point for schematic assembly.
+
+        Args:
+            bom: Bill of materials
+            block_diagram: Optional block diagram structure
+            connections: Net connections between components
+            design_name: Name for the schematic
+
+        Returns:
+            List of SchematicSheet objects
+        """
+        logger.info(f"Assembling schematic '{design_name}' with {len(bom)} components")
+
+        # Reset reference counters
+        self.ref_counters = {}
+
+        # Step 1: Resolve all symbols
+        resolved_symbols = await self._resolve_symbols(bom)
+
+        # Step 2: Plan sheet hierarchy
+        if block_diagram:
+            sheets = self._plan_hierarchical_sheets(block_diagram, bom, resolved_symbols)
+        else:
+            sheets = [SchematicSheet(
+                name=design_name,
+                filename=f"{design_name}.kicad_sch"
+            )]
+
+        # Step 3: Assign components to sheets and create instances
+        self._assign_components(sheets, bom, resolved_symbols)
+
+        # Step 4: Place components
+        for sheet in sheets:
+            self._place_components(sheet)
+
+        # Step 5: Route wires
+        if connections:
+            for sheet in sheets:
+                self._route_wires(sheet, connections)
+
+        # Step 6: Add power symbols and labels
+        for sheet in sheets:
+            self._add_power_symbols(sheet)
+
+        logger.info(f"Assembly complete: {len(sheets)} sheet(s)")
+        return sheets
+
+    async def _resolve_symbols(
+        self,
+        bom: List[BOMItem]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Resolve symbols for all BOM items."""
+        resolved = {}
+
+        for item in bom:
+            if item.part_number in resolved:
+                continue
+
+            symbol_data = None
+
+            # Try symbol fetcher first
+            if self.symbol_fetcher:
+                try:
+                    fetched = await self.symbol_fetcher.fetch_symbol(
+                        item.part_number,
+                        item.manufacturer,
+                        item.category
+                    )
+                    # Extract actual symbol name from the S-expression
+                    actual_symbol_name = self._extract_symbol_name(fetched.symbol_sexp)
+                    symbol_data = {
+                        "sexp": fetched.symbol_sexp,
+                        "symbol_name": actual_symbol_name or fetched.part_number,
+                        "pins": self._parse_pins_from_sexp(fetched.symbol_sexp),
+                        "source": fetched.source.value,
+                        "metadata": fetched.metadata
+                    }
+                except Exception as e:
+                    logger.warning(f"Symbol fetch failed for {item.part_number}: {e}")
+
+            # Fallback: create generic symbol
+            if not symbol_data:
+                symbol_data = self._create_generic_symbol(item)
+
+            resolved[item.part_number] = symbol_data
+
+        return resolved
+
+    def _extract_symbol_name(self, sexp: str) -> Optional[str]:
+        """Extract the actual symbol name from a KiCad S-expression."""
+        # Match: (symbol "NAME" ...) where NAME doesn't contain _0_1 or _1_1 suffixes
+        match = re.search(r'\(symbol\s+"([^"]+)"(?![^()]*_\d+_\d+)', sexp)
+        if match:
+            return match.group(1)
+        return None
+
+    def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
+        """Parse pin information from KiCad S-expression."""
+        pins = []
+
+        # Find all pin definitions
+        # Format: (pin <type> <shape> (at X Y angle) (length L) (name "NAME" ...) (number "NUM" ...))
+        pin_pattern = r'\(pin\s+(\w+)\s+\w+\s+\(at\s+([-\d.]+)\s+([-\d.]+)\s+(\d+)\).*?\(name\s+"([^"]*)"\s*.*?\)\s*\(number\s+"([^"]*)"\s*.*?\)\s*\)'
+
+        for match in re.finditer(pin_pattern, sexp, re.DOTALL):
+            pin_type_str, x, y, angle, name, number = match.groups()
+
+            # Map pin type
+            type_map = {
+                "input": PinType.INPUT,
+                "output": PinType.OUTPUT,
+                "bidirectional": PinType.BIDIRECTIONAL,
+                "tri_state": PinType.TRI_STATE,
+                "passive": PinType.PASSIVE,
+                "power_in": PinType.POWER_IN,
+                "power_out": PinType.POWER_OUT,
+                "open_collector": PinType.OPEN_COLLECTOR,
+                "open_emitter": PinType.OPEN_EMITTER,
+                "no_connect": PinType.NO_CONNECT,
+            }
+            pin_type = type_map.get(pin_type_str, PinType.UNSPECIFIED)
+
+            pins.append(Pin(
+                name=name,
+                number=number,
+                pin_type=pin_type,
+                position=(float(x), float(y)),
+                orientation=int(angle)
+            ))
+
+        return pins
+
+    def _create_generic_symbol(self, item: BOMItem) -> Dict[str, Any]:
+        """Create a generic symbol for items without real symbols."""
+        prefix = self.REF_PREFIXES.get(item.category, "U")
+
+        # Determine number of pins based on category
+        pin_count = {
+            "Resistor": 2,
+            "Capacitor": 2,
+            "Inductor": 2,
+            "Diode": 2,
+            "LED": 2,
+            "MOSFET": 3,
+            "BJT": 3,
+            "Crystal": 2,
+            "Fuse": 2,
+        }.get(item.category, 4)
+
+        # Generate generic symbol S-expression
+        pins_sexp = []
+        pin_positions = self._calculate_pin_positions(pin_count)
+
+        for i, (x, y, angle) in enumerate(pin_positions):
+            pin_name = f"P{i+1}"
+            pins_sexp.append(f'''      (pin passive line (at {x} {y} {angle}) (length 2.54)
+        (name "{pin_name}" (effects (font (size 1.27 1.27))))
+        (number "{i+1}" (effects (font (size 1.27 1.27))))
+      )''')
+
+        pins_str = "\n".join(pins_sexp)
+
+        # Rectangle size based on pin count
+        rect_height = max(5.08, (pin_count // 2 + 1) * 2.54)
+        rect_width = 7.62
+
+        sexp = f'''(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)
+  (symbol "{item.part_number}" (in_bom yes) (on_board yes)
+    (property "Reference" "{prefix}" (at 0 {rect_height/2 + 2.54} 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "{item.value or item.part_number}" (at 0 {-rect_height/2 - 2.54} 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "{item.footprint}" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "{item.part_number}_0_1"
+      (rectangle (start {-rect_width/2} {rect_height/2}) (end {rect_width/2} {-rect_height/2})
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+    )
+    (symbol "{item.part_number}_1_1"
+{pins_str}
+    )
+  )
+)'''
+
+        return {
+            "sexp": sexp,
+            "symbol_name": item.part_number,  # Generic symbols use part number as name
+            "pins": self._parse_pins_from_sexp(sexp),
+            "source": "generated",
+            "metadata": {"is_generic": True}
+        }
+
+    def _calculate_pin_positions(
+        self,
+        pin_count: int
+    ) -> List[Tuple[float, float, int]]:
+        """Calculate pin positions for a generic symbol."""
+        positions = []
+        half = pin_count // 2
+        spacing = 2.54
+
+        # Left side pins (input convention)
+        for i in range(half):
+            y = (half - 1) * spacing / 2 - i * spacing
+            positions.append((-7.62, y, 0))
+
+        # Right side pins (output convention)
+        for i in range(pin_count - half):
+            y = (pin_count - half - 1) * spacing / 2 - i * spacing
+            positions.append((7.62, y, 180))
+
+        return positions
+
+    def _plan_hierarchical_sheets(
+        self,
+        block_diagram: BlockDiagram,
+        bom: List[BOMItem],
+        symbols: Dict[str, Dict]
+    ) -> List[SchematicSheet]:
+        """Plan hierarchical sheet structure from block diagram."""
+        sheets = []
+
+        # Root sheet
+        root = SchematicSheet(
+            name="Root",
+            filename="root.kicad_sch"
+        )
+        sheets.append(root)
+
+        # Create sheet for each block
+        for block_name, block_data in block_diagram.blocks.items():
+            sheet = SchematicSheet(
+                name=block_name,
+                filename=f"{block_name.lower().replace(' ', '_')}.kicad_sch"
+            )
+            sheets.append(sheet)
+
+        return sheets
+
+    def _assign_components(
+        self,
+        sheets: List[SchematicSheet],
+        bom: List[BOMItem],
+        symbols: Dict[str, Dict]
+    ):
+        """Assign components to sheets and create symbol instances."""
+        # For now, put all components on first sheet
+        # TODO: Implement proper multi-sheet assignment based on block diagram
+        main_sheet = sheets[0]
+
+        for item in bom:
+            symbol_data = symbols.get(item.part_number, {})
+
+            # Get the actual symbol name (may differ from part number due to fuzzy matching)
+            actual_symbol_name = symbol_data.get("symbol_name", item.part_number)
+
+            # Get or assign reference
+            if item.reference:
+                reference = item.reference
+            else:
+                reference = self._get_next_reference(item.category)
+
+            instance = SymbolInstance(
+                symbol_id=actual_symbol_name,  # Use actual symbol name for lib_id
+                part_number=item.part_number,  # Keep original part number for BOM
+                reference=reference,
+                position=(0, 0),  # Will be set during placement
+                rotation=0,
+                value=item.value or item.part_number,
+                footprint=item.footprint,
+                pins=symbol_data.get("pins", [])
+            )
+
+            main_sheet.symbols.append(instance)
+
+            # Add lib symbol if not already present (keyed by actual symbol name)
+            if actual_symbol_name not in main_sheet.lib_symbols:
+                main_sheet.lib_symbols[actual_symbol_name] = symbol_data.get("sexp", "")
+
+    def _place_components(self, sheet: SchematicSheet):
+        """
+        Place components on schematic using signal-flow optimization.
+
+        Strategy:
+        - Power components at top
+        - Signal flow left-to-right
+        - Inputs on left, outputs on right
+        - Bypass capacitors near their ICs
+        - Passives in rows below ICs
+        """
+        # Categorize components
+        ics = []
+        passives = []
+        power = []
+        connectors = []
+
+        for symbol in sheet.symbols:
+            ref_prefix = symbol.reference[0] if symbol.reference else "U"
+            if ref_prefix == "U":
+                # Check if power IC
+                if "reg" in symbol.part_number.lower() or "ldo" in symbol.part_number.lower():
+                    power.append(symbol)
+                else:
+                    ics.append(symbol)
+            elif ref_prefix in ["R", "C", "L"]:
+                passives.append(symbol)
+            elif ref_prefix == "J":
+                connectors.append(symbol)
+            else:
+                ics.append(symbol)
+
+        # Starting positions
+        y_base = 50.0  # mm from top
+        x_spacing = 40.0
+        y_spacing = 30.0
+
+        # Place power ICs at top
+        for i, sym in enumerate(power):
+            sym.position = (50.0 + i * x_spacing, y_base)
+
+        # Place main ICs in center row
+        ic_y = y_base + y_spacing
+        for i, sym in enumerate(ics):
+            sym.position = (50.0 + i * x_spacing, ic_y)
+
+        # Place passives below ICs
+        passive_y = ic_y + y_spacing
+        passive_x_spacing = 15.0
+        for i, sym in enumerate(passives):
+            row = i // 10
+            col = i % 10
+            sym.position = (30.0 + col * passive_x_spacing, passive_y + row * 15.0)
+
+        # Place connectors on left edge
+        for i, sym in enumerate(connectors):
+            sym.position = (20.0, y_base + i * 20.0)
+
+        logger.info(f"Placed {len(sheet.symbols)} components on sheet '{sheet.name}'")
+
+    def _route_wires(self, sheet: SchematicSheet, connections: List[Connection]):
+        """Route wires between connected pins using Manhattan routing."""
+        # Build symbol lookup
+        symbol_map = {s.reference: s for s in sheet.symbols}
+
+        for conn in connections:
+            from_sym = symbol_map.get(conn.from_ref)
+            to_sym = symbol_map.get(conn.to_ref)
+
+            if not from_sym or not to_sym:
+                logger.warning(f"Cannot route: missing symbol {conn.from_ref} or {conn.to_ref}")
+                continue
+
+            # Get pin positions
+            from_pos = from_sym.get_absolute_pin_position(conn.from_pin)
+            to_pos = to_sym.get_absolute_pin_position(conn.to_pin)
+
+            if not from_pos or not to_pos:
+                # Fallback to symbol center
+                from_pos = from_sym.position
+                to_pos = to_sym.position
+
+            # Create Manhattan route
+            wires = self._manhattan_route(from_pos, to_pos)
+            sheet.wires.extend(wires)
+
+            # Add net label if named
+            if conn.net_name and not conn.net_name.startswith("Net-"):
+                mid_x = (from_pos[0] + to_pos[0]) / 2
+                mid_y = (from_pos[1] + to_pos[1]) / 2
+                sheet.labels.append(Label(
+                    text=conn.net_name,
+                    position=(mid_x, mid_y)
+                ))
+
+        # Add junctions at wire intersections
+        self._add_junctions(sheet)
+
+        logger.info(f"Routed {len(sheet.wires)} wire segments")
+
+    def _manhattan_route(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float]
+    ) -> List[Wire]:
+        """Create Manhattan (orthogonal) routing between two points."""
+        wires = []
+        sx, sy = start
+        ex, ey = end
+
+        # Snap to grid
+        sx = round(sx / self.GRID_UNIT) * self.GRID_UNIT
+        sy = round(sy / self.GRID_UNIT) * self.GRID_UNIT
+        ex = round(ex / self.GRID_UNIT) * self.GRID_UNIT
+        ey = round(ey / self.GRID_UNIT) * self.GRID_UNIT
+
+        # Simple L-route: horizontal then vertical
+        if abs(sx - ex) > 0.01:
+            wires.append(Wire(start=(sx, sy), end=(ex, sy)))
+
+        if abs(sy - ey) > 0.01:
+            wires.append(Wire(start=(ex, sy), end=(ex, ey)))
+
+        return wires
+
+    def _add_junctions(self, sheet: SchematicSheet):
+        """Add junction dots at wire intersections."""
+        # Track endpoints
+        endpoints: Dict[Tuple[float, float], int] = {}
+
+        for wire in sheet.wires:
+            for point in [wire.start, wire.end]:
+                # Round for comparison
+                key = (round(point[0], 2), round(point[1], 2))
+                endpoints[key] = endpoints.get(key, 0) + 1
+
+        # Add junctions where 3+ wires meet
+        for point, count in endpoints.items():
+            if count >= 3:
+                sheet.junctions.append(Junction(position=point))
+
+    def _add_power_symbols(self, sheet: SchematicSheet):
+        """Add power symbols (VCC, GND) as needed."""
+        # Find power pins and add appropriate symbols
+        for symbol in sheet.symbols:
+            for pin in symbol.pins:
+                if pin.pin_type == PinType.POWER_IN:
+                    # Add power flag or symbol
+                    pin_pos = symbol.get_absolute_pin_position(pin.name)
+                    if pin_pos:
+                        name_lower = pin.name.lower()
+                        if "gnd" in name_lower or "vss" in name_lower:
+                            sheet.labels.append(Label(
+                                text="GND",
+                                position=pin_pos,
+                                label_type="global_label"
+                            ))
+                        elif "vcc" in name_lower or "vdd" in name_lower:
+                            sheet.labels.append(Label(
+                                text="VCC",
+                                position=pin_pos,
+                                label_type="global_label"
+                            ))
+
+    def _extract_inner_symbol(self, sexp: str, symbol_id: str) -> Optional[str]:
+        """
+        Extract the inner symbol definition from a kicad_symbol_lib wrapper.
+
+        The input format is:
+        (kicad_symbol_lib (version ...) (generator ...)
+          (symbol "NAME" ...)
+        )
+
+        We need to extract just the (symbol "NAME" ...) part.
+        """
+        # Find the start of the symbol definition (not sub-symbols like _0_1)
+        # Pattern: (symbol "name" where name doesn't end in _0_1 etc.
+        pattern = rf'\(symbol\s+"{re.escape(symbol_id)}"'
+        match = re.search(pattern, sexp)
+
+        if not match:
+            # Try without exact match - find first symbol definition
+            match = re.search(r'\(symbol\s+"[^"_]+[^"]*"(?!\s*_\d)', sexp)
+
+        if not match:
+            logger.warning(f"Could not find symbol {symbol_id} in S-expression")
+            return None
+
+        # Extract the complete symbol by counting parentheses
+        start_pos = match.start()
+        depth = 0
+        end_pos = start_pos
+
+        for i, char in enumerate(sexp[start_pos:]):
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    end_pos = start_pos + i + 1
+                    break
+
+        # Convert tabs to spaces (KiCad schematic files use spaces, but symbol libraries use tabs)
+        extracted = sexp[start_pos:end_pos]
+        extracted = extracted.replace('\t', '  ')  # Replace tabs with 2 spaces
+        return extracted
+
+    def generate_kicad_sch(self, sheet: SchematicSheet) -> str:
+        """Generate KiCad S-expression schematic file."""
+        # Build the schematic file
+        lines = [
+            "(kicad_sch (version 20231120) (generator \"nexus_ee_design\")",
+            "",
+            f"  (uuid \"{sheet.uuid}\")",
+            "",
+            "  (paper \"A4\")",
+            "",
+        ]
+
+        # Add lib_symbols section
+        lines.append("  (lib_symbols")
+        for symbol_id, sexp in sheet.lib_symbols.items():
+            # Extract just the symbol definition from the library wrapper
+            symbol_content = self._extract_inner_symbol(sexp, symbol_id)
+            if symbol_content:
+                # Indent the symbol content
+                indented = "\n".join("    " + line for line in symbol_content.split("\n"))
+                lines.append(indented)
+        lines.append("  )")
+        lines.append("")
+
+        # Add symbol instances
+        for symbol in sheet.symbols:
+            lines.append(self._symbol_to_sexp(symbol))
+            lines.append("")
+
+        # Add wires
+        for wire in sheet.wires:
+            lines.append(self._wire_to_sexp(wire))
+
+        # Add junctions
+        for junction in sheet.junctions:
+            lines.append(f'  (junction (at {junction.position[0]} {junction.position[1]}) (diameter 0) (color 0 0 0 0) (uuid "{junction.uuid}"))')
+
+        # Add labels
+        for label in sheet.labels:
+            lines.append(self._label_to_sexp(label))
+
+        lines.append(")")
+
+        return "\n".join(lines)
+
+    def _symbol_to_sexp(self, symbol: SymbolInstance) -> str:
+        """Convert symbol instance to S-expression."""
+        x, y = symbol.position
+
+        return f'''  (symbol (lib_id "{symbol.symbol_id}") (at {x} {y} {symbol.rotation}) (unit {symbol.unit})
+    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
+    (uuid "{symbol.uuid}")
+    (property "Reference" "{symbol.reference}" (at {x} {y - 5} 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "{symbol.value}" (at {x} {y + 5} 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "{symbol.footprint}" (at {x} {y} 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "~" (at {x} {y} 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+  )'''
+
+    def _wire_to_sexp(self, wire: Wire) -> str:
+        """Convert wire to S-expression."""
+        sx, sy = wire.start
+        ex, ey = wire.end
+        return f'  (wire (pts (xy {sx} {sy}) (xy {ex} {ey})) (stroke (width 0) (type default)) (uuid "{wire.uuid}"))'
+
+    def _label_to_sexp(self, label: Label) -> str:
+        """Convert label to S-expression."""
+        x, y = label.position
+
+        if label.label_type == "global_label":
+            return f'''  (global_label "{label.text}" (shape input) (at {x} {y} {label.rotation})
+    (effects (font (size 1.27 1.27)))
+    (uuid "{label.uuid}")
+  )'''
+        else:
+            return f'''  (label "{label.text}" (at {x} {y} {label.rotation})
+    (effects (font (size 1.27 1.27)))
+    (uuid "{label.uuid}")
+  )'''
+
+
+# CLI entry point
+if __name__ == "__main__":
+    import sys
+
+    async def main():
+        assembler = SchematicAssemblerAgent()
+
+        # Create test BOM
+        test_bom = [
+            BOMItem(part_number="STM32G431CBT6", category="MCU", value="STM32G431"),
+            BOMItem(part_number="DRV8323RS", category="Gate_Driver", value="DRV8323"),
+            BOMItem(part_number="CSD19505KCS", category="MOSFET", value="80V/150A"),
+            BOMItem(part_number="100uF", category="Capacitor", value="100uF"),
+            BOMItem(part_number="10uF", category="Capacitor", value="10uF"),
+            BOMItem(part_number="0.1uF", category="Capacitor", value="0.1uF"),
+            BOMItem(part_number="10k", category="Resistor", value="10k"),
+            BOMItem(part_number="1k", category="Resistor", value="1k"),
+        ]
+
+        # Create test connections
+        test_connections = [
+            Connection(from_ref="U1", from_pin="VCC", to_ref="C1", to_pin="1", net_name="VCC"),
+            Connection(from_ref="U1", from_pin="GND", to_ref="C1", to_pin="2", net_name="GND"),
+            Connection(from_ref="U2", from_pin="VCC", to_ref="C2", to_pin="1", net_name="VCC"),
+        ]
+
+        print("Assembling schematic...")
+        sheets = await assembler.assemble_schematic(
+            test_bom,
+            connections=test_connections,
+            design_name="test_foc_esc"
+        )
+
+        print(f"\nGenerated {len(sheets)} sheet(s)")
+
+        for sheet in sheets:
+            print(f"\nSheet: {sheet.name}")
+            print(f"  Components: {len(sheet.symbols)}")
+            print(f"  Wires: {len(sheet.wires)}")
+            print(f"  Labels: {len(sheet.labels)}")
+
+            # Generate output
+            output = assembler.generate_kicad_sch(sheet)
+            output_path = Path(f"/tmp/{sheet.filename}")
+            output_path.write_text(output)
+            print(f"  Output: {output_path}")
+
+    asyncio.run(main())

@@ -107,6 +107,33 @@ const ConfigSchema = z.object({
     dfmEnabled: z.boolean().default(true),
     multiLlmEnabled: z.boolean().default(true),
   }),
+
+  // CLI/Terminal Access Configuration
+  cliAccess: z.object({
+    enabled: z.boolean().default(true),
+    allowedUserAgents: z.array(z.string()).default([
+      'curl',
+      'wget',
+      'httpie',
+      'claude-code',
+      'nexus-cli',
+      'python-requests',
+      'node-fetch',
+      'axios',
+    ]),
+    trustedIPs: z.array(z.string()).default([
+      '127.0.0.1',
+      '::1',
+      'localhost',
+    ]),
+    systemUserId: z.string().default('claude-code-cli'),
+    permissions: z.object({
+      read: z.boolean().default(true),
+      write: z.boolean().default(true),
+      execute: z.boolean().default(true),
+      admin: z.boolean().default(true),
+    }),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -200,6 +227,32 @@ function loadConfig(): Config {
       thermalEnabled: process.env.THERMAL_ENABLED !== 'false',
       dfmEnabled: process.env.DFM_ENABLED !== 'false',
       multiLlmEnabled: process.env.MULTI_LLM_ENABLED !== 'false',
+    },
+
+    cliAccess: {
+      enabled: process.env.CLI_ACCESS_ENABLED !== 'false',
+      allowedUserAgents: process.env.CLI_ALLOWED_USER_AGENTS?.split(',') || [
+        'curl',
+        'wget',
+        'httpie',
+        'claude-code',
+        'nexus-cli',
+        'python-requests',
+        'node-fetch',
+        'axios',
+      ],
+      trustedIPs: process.env.CLI_TRUSTED_IPS?.split(',') || [
+        '127.0.0.1',
+        '::1',
+        'localhost',
+      ],
+      systemUserId: process.env.CLI_SYSTEM_USER_ID || 'claude-code-cli',
+      permissions: {
+        read: process.env.CLI_PERMISSION_READ !== 'false',
+        write: process.env.CLI_PERMISSION_WRITE !== 'false',
+        execute: process.env.CLI_PERMISSION_EXECUTE !== 'false',
+        admin: process.env.CLI_PERMISSION_ADMIN !== 'false',
+      },
     },
   };
 

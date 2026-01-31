@@ -1,0 +1,12 @@
+{
+  "part_number": "TJA1051T",
+  "manufacturer": "NXP",
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-01-31T15:32:57.013758",
+  "needs_review": false,
+  "library": "Interface_CAN_LIN",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Interface_CAN_LIN.kicad_sym",
+  "match_type": "fuzzy",
+  "original_query": "TJA1051T/3"
+}

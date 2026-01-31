@@ -16,5 +16,5 @@ export { ValidationFramework } from './validators';
 export type { ValidationDomain, ValidationViolation, DomainResult, ValidationConfig } from './validators';
 
 // Python Executor
-export { PythonExecutor, pythonExecutor } from './python-executor';
-export type { PythonExecutorConfig, ScriptResult, ScriptJob } from './python-executor';
+export { PythonExecutor, pythonExecutor } from './python-executor.js';
+export type { PythonExecutorConfig, ScriptResult, ScriptJob } from './python-executor.js';
