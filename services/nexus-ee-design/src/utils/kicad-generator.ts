@@ -648,7 +648,7 @@ function buildSymbolInstances(components: SchematicComponent[], paper: { width: 
     )
     (instances
       (project ""
-        (path "/${comp.uuid}"
+        (path "/"
           (reference "${comp.reference}")
           (unit 1)
         )
@@ -702,7 +702,7 @@ function buildPowerSymbols(paper: { width: number; height: number }): string {
     )
     (instances
       (project ""
-        (path "/${vccUuid}"
+        (path "/"
           (reference "#PWR01")
           (unit 1)
         )
@@ -740,7 +740,7 @@ function buildPowerSymbols(paper: { width: number; height: number }): string {
     )
     (instances
       (project ""
-        (path "/${gndUuid}"
+        (path "/"
           (reference "#PWR02")
           (unit 1)
         )
