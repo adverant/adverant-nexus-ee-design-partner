@@ -18,12 +18,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Import enhanced wire router (with fallback to basic routing)
-try:
-    from agents.wire_router import EnhancedWireRouter, RoutingResult
-    ENHANCED_ROUTER_AVAILABLE = True
-except ImportError:
-    ENHANCED_ROUTER_AVAILABLE = False
+# Import enhanced wire router (MANDATORY - no fallback)
+from agents.wire_router import EnhancedWireRouter, RoutingResult
+
+# Import layout optimizer for intelligent component placement
+from agents.layout_optimizer import LayoutOptimizerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -208,11 +207,13 @@ class SchematicAssemblerAgent:
         self.graphrag = graphrag_client
         self.ref_counters: Dict[str, int] = {}
 
-        # Initialize enhanced wire router if available
-        self.enhanced_router = None
-        if ENHANCED_ROUTER_AVAILABLE:
-            self.enhanced_router = EnhancedWireRouter()
-            logger.info("Enhanced Wire Router initialized")
+        # Initialize enhanced wire router (MANDATORY)
+        self.enhanced_router = EnhancedWireRouter()
+        logger.info("Enhanced Wire Router initialized")
+
+        # Initialize layout optimizer for intelligent component placement
+        self.layout_optimizer = LayoutOptimizerAgent()
+        logger.info("Layout Optimizer initialized")
 
     def _get_next_reference(self, category: str) -> str:
         """Get next available reference designator."""
@@ -260,11 +261,11 @@ class SchematicAssemblerAgent:
         # Step 3: Assign components to sheets and create instances
         self._assign_components(sheets, bom, resolved_symbols)
 
-        # Step 4: Place components
+        # Step 4: Place components using Layout Optimizer (with connectivity analysis)
         for sheet in sheets:
-            self._place_components(sheet)
+            self._place_components_optimized(sheet, connections or [], bom)
 
-        # Step 5: Route wires
+        # Step 5: Route wires using Enhanced Wire Router
         if connections:
             for sheet in sheets:
                 self._route_wires(sheet, connections)
@@ -516,111 +517,80 @@ class SchematicAssemblerAgent:
             if actual_symbol_name not in main_sheet.lib_symbols:
                 main_sheet.lib_symbols[actual_symbol_name] = symbol_data.get("sexp", "")
 
-    def _place_components(self, sheet: SchematicSheet):
+    def _place_components_optimized(
+        self,
+        sheet: SchematicSheet,
+        connections: List[Connection],
+        bom: List[BOMItem]
+    ):
         """
-        Place components on schematic using signal-flow optimization.
+        Place components using Layout Optimizer with signal-flow optimization.
 
-        Strategy:
-        - Power components at top
-        - Signal flow left-to-right
-        - Inputs on left, outputs on right
-        - Bypass capacitors near their ICs
-        - Passives in rows below ICs
+        Uses the LayoutOptimizerAgent for professional placement:
+        - Zone-based placement (power/input/processing/output/passive)
+        - Signal flow left-to-right analysis
+        - Bypass capacitor placement near ICs
+        - Grid alignment and spacing verification
+        - IPC-2221/IEEE 315 compliance
         """
-        # Categorize components
-        ics = []
-        passives = []
-        power = []
-        connectors = []
+        logger.info(f"Placing {len(sheet.symbols)} components using Layout Optimizer")
 
+        # Build BOM dict for category lookup
+        bom_dict = []
+        for item in bom:
+            bom_dict.append({
+                "reference": None,  # Will be matched by part_number
+                "part_number": item.part_number,
+                "category": item.category,
+                "manufacturer": item.manufacturer,
+                "value": item.value,
+            })
+
+        # Match BOM items to symbol references
         for symbol in sheet.symbols:
-            ref_prefix = symbol.reference[0] if symbol.reference else "U"
-            if ref_prefix == "U":
-                # Check if power IC
-                if "reg" in symbol.part_number.lower() or "ldo" in symbol.part_number.lower():
-                    power.append(symbol)
-                else:
-                    ics.append(symbol)
-            elif ref_prefix in ["R", "C", "L"]:
-                passives.append(symbol)
-            elif ref_prefix == "J":
-                connectors.append(symbol)
-            else:
-                ics.append(symbol)
+            for bom_item in bom_dict:
+                if bom_item["part_number"] == symbol.part_number:
+                    bom_item["reference"] = symbol.reference
+                    break
 
-        # Starting positions
-        y_base = 50.0  # mm from top
-        x_spacing = 40.0
-        y_spacing = 30.0
+        # Filter to only items with references assigned
+        bom_with_refs = [b for b in bom_dict if b.get("reference")]
 
-        # Place power ICs at top
-        for i, sym in enumerate(power):
-            sym.position = (50.0 + i * x_spacing, y_base)
+        # Run Layout Optimizer
+        result = self.layout_optimizer.optimize_layout(
+            symbols=sheet.symbols,
+            connections=connections,
+            bom=bom_with_refs
+        )
 
-        # Place main ICs in center row
-        ic_y = y_base + y_spacing
-        for i, sym in enumerate(ics):
-            sym.position = (50.0 + i * x_spacing, ic_y)
+        # Log optimization results
+        logger.info(
+            f"Layout optimization: {len(result.improvements)} improvements, "
+            f"{len(result.violations)} violations, "
+            f"{result.grid_corrections} grid corrections"
+        )
 
-        # Place passives below ICs
-        passive_y = ic_y + y_spacing
-        passive_x_spacing = 15.0
-        for i, sym in enumerate(passives):
-            row = i // 10
-            col = i % 10
-            sym.position = (30.0 + col * passive_x_spacing, passive_y + row * 15.0)
-
-        # Place connectors on left edge
-        for i, sym in enumerate(connectors):
-            sym.position = (20.0, y_base + i * 20.0)
+        if result.violations:
+            for v in result.violations[:5]:  # Log first 5 violations
+                logger.warning(f"Layout violation: {v}")
 
         logger.info(f"Placed {len(sheet.symbols)} components on sheet '{sheet.name}'")
 
     def _route_wires(self, sheet: SchematicSheet, connections: List[Connection]):
-        """Route wires between connected pins using Manhattan routing."""
+        """Route wires between connected pins using Enhanced Wire Router.
+
+        Features:
+        - Professional Manhattan routing with IPC compliance
+        - Power rail optimization (VCC top, GND bottom)
+        - Bus routing for parallel signals
+        - 4-way junction avoidance
+        - Grid-aligned wire placement
+        """
         # Build symbol lookup
         symbol_map = {s.reference: s for s in sheet.symbols}
 
-        # Try enhanced router first
-        if self.enhanced_router:
-            self._route_wires_enhanced(sheet, connections, symbol_map)
-            return
-
-        # Fallback to basic routing
-        for conn in connections:
-            from_sym = symbol_map.get(conn.from_ref)
-            to_sym = symbol_map.get(conn.to_ref)
-
-            if not from_sym or not to_sym:
-                logger.warning(f"Cannot route: missing symbol {conn.from_ref} or {conn.to_ref}")
-                continue
-
-            # Get pin positions
-            from_pos = from_sym.get_absolute_pin_position(conn.from_pin)
-            to_pos = to_sym.get_absolute_pin_position(conn.to_pin)
-
-            if not from_pos or not to_pos:
-                # Fallback to symbol center
-                from_pos = from_sym.position
-                to_pos = to_sym.position
-
-            # Create Manhattan route
-            wires = self._manhattan_route(from_pos, to_pos)
-            sheet.wires.extend(wires)
-
-            # Add net label if named
-            if conn.net_name and not conn.net_name.startswith("Net-"):
-                mid_x = (from_pos[0] + to_pos[0]) / 2
-                mid_y = (from_pos[1] + to_pos[1]) / 2
-                sheet.labels.append(Label(
-                    text=conn.net_name,
-                    position=(mid_x, mid_y)
-                ))
-
-        # Add junctions at wire intersections
-        self._add_junctions(sheet)
-
-        logger.info(f"Routed {len(sheet.wires)} wire segments")
+        # Always use enhanced router (mandatory)
+        self._route_wires_enhanced(sheet, connections, symbol_map)
 
     def _route_wires_enhanced(
         self,
