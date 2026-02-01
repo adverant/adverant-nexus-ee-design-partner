@@ -503,8 +503,44 @@ class SymbolFetcherAgent:
                             }
                         )
 
-            # If specific symbol not found, try searching all libraries
-            # (This is slower, so only do it as a fallback)
+            # If specific symbol not found, try FUZZY MATCHING on guessed libraries
+            # KiCad uses wildcard naming like STM32G431CBTx that should match STM32G431CBT6
+            for lib_name in library_names:
+                try:
+                    lib_url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}"
+                    lib_response = await self.http_client.get(lib_url, timeout=15.0)
+                    if lib_response.status_code == 200:
+                        lib_data = lib_response.json()
+                        lib_content = lib_data.get('content', '')
+                        if lib_content:
+                            # Extract all symbol names from the library
+                            symbol_names = [
+                                name for name in re.findall(r'\(symbol\s+"([^"]+)"', lib_content)
+                                if not re.search(r'_\d+_\d+$', name)  # Skip sub-symbols
+                            ]
+
+                            # Try fuzzy matching against each symbol
+                            for symbol_name in symbol_names:
+                                if self._match_kicad_symbol_name(part_number, symbol_name):
+                                    symbol_sexp = self._extract_symbol_from_library(lib_content, symbol_name)
+                                    if symbol_sexp:
+                                        logger.info(f"Fuzzy match: '{symbol_name}' for '{part_number}' in '{lib_name}' from KiCad worker")
+                                        return FetchedSymbol(
+                                            part_number=symbol_name,  # Use actual KiCad symbol name
+                                            manufacturer=manufacturer,
+                                            symbol_sexp=symbol_sexp,
+                                            source=SymbolSource.KICAD_WORKER_INTERNAL,
+                                            metadata={
+                                                'library': lib_name,
+                                                'match_type': 'fuzzy_worker',
+                                                'original_query': part_number,
+                                                'matched_symbol': symbol_name
+                                            }
+                                        )
+                except Exception as e:
+                    logger.debug(f"Fuzzy match failed for {lib_name}: {e}")
+
+            # If still not found, try searching all libraries (broad search with fuzzy)
             list_url = f"{KICAD_WORKER_URL}/v1/symbols"
             list_response = await self.http_client.get(list_url, timeout=10.0)
             if list_response.status_code == 200:
@@ -513,6 +549,10 @@ class SymbolFetcherAgent:
                 # Search libraries that might contain this part
                 for lib_name in libraries:
                     if lib_name in self.SKIP_LIBRARIES:
+                        continue
+
+                    # Skip already-searched libraries
+                    if lib_name in library_names:
                         continue
 
                     url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}/symbol/{part_number}"
