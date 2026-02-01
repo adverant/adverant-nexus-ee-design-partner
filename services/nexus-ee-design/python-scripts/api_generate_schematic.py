@@ -160,6 +160,8 @@ async def run_generation(
     project_name: str = "FOC ESC",
     skip_validation: bool = True,  # Default skip for faster generation
     output_dir: Optional[str] = None,
+    project_id: Optional[str] = None,  # Project ID for NFS export organization
+    auto_export: bool = True,  # Enable auto-export to PDF/image and NFS
 ) -> Dict[str, Any]:
     """
     Run the MAPO schematic generation pipeline.
@@ -200,11 +202,18 @@ async def run_generation(
         logger.info(f"Starting schematic generation: {len(bom)} components")
         logger.info(f"Output directory: {output_path}")
 
-        # Configure pipeline
+        # Configure pipeline with auto-export to PDF/image and NFS
         config = PipelineConfig(
             output_dir=output_path,
             validation_threshold=0.85,
             max_iterations=3 if not skip_validation else 1,
+            # Enable auto-export to PDF/image and NFS sync
+            auto_export=auto_export,
+            export_pdf=True,
+            export_svg=True,
+            export_png=True,
+            nfs_base_path="/Volumes/Nexus/plugins/ee-design-plugin/artifacts",
+            project_id=project_id,
         )
 
         # Run generation
@@ -245,6 +254,20 @@ async def run_generation(
                 "passed": result.validation_report.passed,
                 "critical_issues": len(result.validation_report.critical_issues),
             }
+
+        # Include export results if auto-export was enabled
+        if result.export_result:
+            response["export"] = {
+                "success": result.export_result.success,
+                "pdf_path": str(result.pdf_path) if result.pdf_path else None,
+                "svg_path": str(result.svg_path) if result.svg_path else None,
+                "png_path": str(result.png_path) if result.png_path else None,
+                "nfs_synced": result.nfs_synced,
+                "nfs_paths": result.nfs_paths,
+                "errors": result.export_result.errors if result.export_result.errors else [],
+            }
+            if result.nfs_synced:
+                logger.info(f"Artifacts synced to NFS: {result.nfs_paths}")
 
         return response
 
@@ -315,6 +338,8 @@ def main():
         project_name=params.get("project_name", "FOC ESC"),
         skip_validation=params.get("skip_validation", True),
         output_dir=params.get("output_dir"),
+        project_id=params.get("project_id"),
+        auto_export=params.get("auto_export", True),
     ))
 
     # Output JSON result to stdout

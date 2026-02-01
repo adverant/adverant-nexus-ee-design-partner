@@ -1385,6 +1385,62 @@ export function createApiRoutes(io: SocketIOServer): Router {
     }
   });
 
+  /**
+   * Get the latest schematic for a project
+   * Returns the schematic URL for KiCanvas rendering
+   * IMPORTANT: This route MUST come before /schematic/:schematicId to avoid "latest" being matched as an ID
+   */
+  router.get('/projects/:projectId/schematic/latest', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.debug('Getting latest schematic', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getLatestSchematic' });
+      }
+
+      const schematics = await findSchematicsByProject(projectId);
+
+      if (!schematics.length) {
+        // No schematic yet - return null URL (frontend will show "Generate" message)
+        return res.json({
+          success: true,
+          data: { schematicUrl: null },
+          metadata: { projectId, message: 'No schematic generated yet' },
+        });
+      }
+
+      // Sort by updated_at descending to get the most recent
+      const sorted = schematics.sort((a, b) =>
+        new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
+      );
+      const latest = sorted[0];
+
+      // Build the URL for KiCanvas to fetch the raw schematic file
+      // Using the .kicad_sch extension route for proper file type detection
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const schematicUrl = `${baseUrl}/api/v1/projects/${projectId}/schematic/${latest.id}/schematic.kicad_sch`;
+
+      res.json({
+        success: true,
+        data: {
+          schematicId: latest.id,
+          schematicUrl,
+          name: latest.name,
+          version: latest.version,
+          componentCount: latest.components?.length || 0,
+          netCount: latest.nets?.length || 0,
+          updatedAt: latest.updatedAt || latest.createdAt,
+        },
+        metadata: { projectId },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/projects/:projectId/schematic/:schematicId', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { projectId, schematicId } = req.params;

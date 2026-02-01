@@ -7,7 +7,8 @@
  * and specialized panels for simulations and analysis.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import * as Tabs from "@radix-ui/react-tabs";
 import { cn } from "@/lib/utils";
 import {
@@ -605,7 +606,36 @@ function BenchTestingTab({ projectId }: { projectId: string }) {
 // ============================================================================
 
 export function DesignTabs({ projectId }: DesignTabsProps) {
-  const [activeTab, setActiveTab] = useState("schematic");
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // Get initial tab from URL or default to "schematic"
+  const urlTab = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState(
+    urlTab && TABS.some((t) => t.id === urlTab) ? urlTab : "schematic"
+  );
+
+  // Sync tab state with URL
+  useEffect(() => {
+    if (urlTab && TABS.some((t) => t.id === urlTab) && urlTab !== activeTab) {
+      setActiveTab(urlTab);
+    }
+  }, [urlTab, activeTab]);
+
+  // Update URL when tab changes
+  const handleTabChange = useCallback(
+    (newTab: string) => {
+      setActiveTab(newTab);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", newTab);
+      if (projectId) {
+        params.set("projectId", projectId);
+      }
+      router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [searchParams, router, pathname, projectId]
+  );
 
   if (!projectId) {
     return (
@@ -621,7 +651,7 @@ export function DesignTabs({ projectId }: DesignTabsProps) {
   return (
     <Tabs.Root
       value={activeTab}
-      onValueChange={setActiveTab}
+      onValueChange={handleTabChange}
       className="h-full flex flex-col"
     >
       {/* Tab List */}

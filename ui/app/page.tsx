@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { Terminal } from "@/components/Terminal";
 import { ProjectBrowser } from "@/components/ProjectBrowser";
@@ -10,7 +11,37 @@ import { PipelineStatus } from "@/components/PipelineStatus";
 import { Header } from "@/components/Header";
 
 export default function EEDesignPartner() {
-  const [activeProject, setActiveProject] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // Get initial project from URL or null
+  const urlProjectId = searchParams.get("projectId");
+  const [activeProject, setActiveProject] = useState<string | null>(urlProjectId);
+
+  // Sync project state with URL on initial load and URL changes
+  useEffect(() => {
+    if (urlProjectId && urlProjectId !== activeProject) {
+      setActiveProject(urlProjectId);
+    }
+  }, [urlProjectId, activeProject]);
+
+  // Update URL when project changes
+  const handleProjectSelect = useCallback(
+    (projectId: string | null) => {
+      setActiveProject(projectId);
+
+      // Update URL with new projectId
+      const params = new URLSearchParams(searchParams.toString());
+      if (projectId) {
+        params.set("projectId", projectId);
+      } else {
+        params.delete("projectId");
+      }
+      router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [searchParams, router, pathname]
+  );
 
   return (
     <div className="h-screen flex flex-col bg-background-primary">
@@ -26,7 +57,7 @@ export default function EEDesignPartner() {
           {/* Left Panel - Project Browser */}
           <ResizablePanel defaultSize={15} minSize={10} maxSize={25}>
             <ProjectBrowser
-              onProjectSelect={setActiveProject}
+              onProjectSelect={handleProjectSelect}
               activeProject={activeProject}
             />
           </ResizablePanel>
