@@ -326,18 +326,18 @@ class MAPOSchematicPipeline:
             # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
             if self._standards_compliance:
                 logger.info("Running standards compliance check...")
-                schematic_content = self._assembler.generate_kicad_sch(sheets[0])
-                compliance_report = self._standards_compliance.validate(
-                    schematic_sexp=schematic_content,
-                    bom=bom,
-                    connections=[vars(c) for c in connection_objs] if connection_objs else []
-                )
-                if not compliance_report.passed:
-                    logger.warning(f"Standards compliance: {len(compliance_report.violations)} violations")
-                    for violation in compliance_report.violations[:5]:
-                        logger.warning(f"  - {violation.check.value}: {violation.message}")
-                else:
-                    logger.info(f"Standards compliance: PASSED ({compliance_report.score:.1%})")
+                for sheet in sheets:
+                    compliance_report = self._standards_compliance.validate(
+                        sheet=sheet,
+                        bom=bom,
+                        auto_fix=True  # Auto-fix violations where possible
+                    )
+                    if not compliance_report.passed:
+                        logger.warning(f"Standards compliance: {len(compliance_report.violations)} violations")
+                        for violation in compliance_report.violations[:5]:
+                            logger.warning(f"  - {violation.check.value}: {violation.description}")
+                    else:
+                        logger.info(f"Standards compliance: PASSED ({compliance_report.score:.1%})")
 
             # Track symbol statistics
             for sheet in sheets:
