@@ -44,6 +44,7 @@ class SymbolSource(Enum):
     """Available symbol sources in priority order."""
     LOCAL_CACHE = "local_cache"
     KICAD_LOCAL_INSTALL = "kicad_local_install"  # Local KiCad installation
+    KICAD_WORKER_INTERNAL = "kicad_worker_internal"  # Internal K8s KiCad worker
     KICAD_OFFICIAL = "kicad_official"
     SNAPEDA = "snapeda"
     ULTRA_LIBRARIAN = "ultralibrarian"
@@ -52,6 +53,13 @@ class SymbolSource(Enum):
     INFINEON = "infineon"
     ANALOG_DEVICES = "analog_devices"
     LLM_GENERATED = "llm_generated"
+
+
+# Internal KiCad worker URL (for K8s deployment)
+KICAD_WORKER_URL = os.environ.get(
+    'KICAD_WORKER_URL',
+    'http://mapos-kicad-worker:8080'
+)
 
 
 # Platform-specific KiCad installation paths
@@ -130,36 +138,41 @@ DEFAULT_SOURCES = [
         local_path=DEFAULT_CACHE_PATH
     ),
     SymbolSourceConfig(
+        source=SymbolSource.KICAD_WORKER_INTERNAL,
+        priority=2,  # Internal K8s KiCad worker (preferred in containerized environments)
+        api_url=KICAD_WORKER_URL
+    ),
+    SymbolSourceConfig(
         source=SymbolSource.KICAD_LOCAL_INSTALL,
-        priority=2,  # After local cache, before GitLab
+        priority=3,  # Local KiCad installation (macOS/Linux/Windows)
     ),
     SymbolSourceConfig(
         source=SymbolSource.KICAD_OFFICIAL,
-        priority=3,
+        priority=4,
         api_url="https://gitlab.com/api/v4/projects/kicad%2Fkicad-symbols"
     ),
     SymbolSourceConfig(
         source=SymbolSource.SNAPEDA,
-        priority=4,
+        priority=5,
         api_url="https://www.snapeda.com/api/v1",
         requires_auth=False,  # Basic search works without auth
         api_key_env="SNAPEDA_API_KEY"  # Optional: for higher rate limits
     ),
     SymbolSourceConfig(
         source=SymbolSource.ULTRA_LIBRARIAN,
-        priority=5,
+        priority=6,
         api_url="https://app.ultralibrarian.com/api/v1",
         requires_auth=True,
         api_key_env="ULTRALIBRARIAN_API_KEY"
     ),
     SymbolSourceConfig(
         source=SymbolSource.TI_WEBENCH,
-        priority=6,
+        priority=7,
         api_url="https://www.ti.com/lit/ds"
     ),
     SymbolSourceConfig(
         source=SymbolSource.STM_CUBE,
-        priority=6,
+        priority=7,
         api_url="https://www.st.com"
     ),
     SymbolSourceConfig(
@@ -300,49 +313,52 @@ class SymbolFetcherAgent:
         """
         Fetch a generic passive symbol (C, R, L) from Device library.
 
-        These are standard KiCad symbols for passives that are always available.
-        Falls back to GitHub if no local KiCad installation.
+        Priority order:
+        1. Internal KiCad worker (K8s - has all libraries)
+        2. Local KiCad installation
+        3. Local cache
         """
-        # First try local KiCad installation
-        kicad_paths = _get_kicad_install_paths()
         lib_content = None
+        source = SymbolSource.KICAD_OFFICIAL
 
-        for kicad_path in kicad_paths:
-            device_lib = kicad_path / "Device.kicad_sym"
-            if device_lib.exists():
-                try:
-                    lib_content = device_lib.read_text(encoding='utf-8')
-                    logger.debug(f"Using local Device library: {device_lib}")
-                    break
-                except Exception as e:
-                    logger.debug(f"Error reading local Device library: {e}")
+        # PRIORITY 1: Try internal KiCad worker (K8s deployment)
+        try:
+            worker_url = f"{KICAD_WORKER_URL}/v1/symbols/Device"
+            logger.debug(f"Trying KiCad worker: {worker_url}")
+            response = await self.http_client.get(worker_url, timeout=10.0)
+            if response.status_code == 200:
+                data = response.json()
+                lib_content = data.get('content')
+                if lib_content:
+                    logger.info("Using Device library from internal KiCad worker")
+                    source = SymbolSource.KICAD_WORKER_INTERNAL
+        except Exception as e:
+            logger.debug(f"KiCad worker not available: {e}")
 
-        # If no local library, try fetching from GitHub and caching
+        # PRIORITY 2: Try local KiCad installation
+        if not lib_content:
+            kicad_paths = _get_kicad_install_paths()
+            for kicad_path in kicad_paths:
+                device_lib = kicad_path / "Device.kicad_sym"
+                if device_lib.exists():
+                    try:
+                        lib_content = device_lib.read_text(encoding='utf-8')
+                        logger.debug(f"Using local Device library: {device_lib}")
+                        source = SymbolSource.KICAD_LOCAL_INSTALL
+                        break
+                    except Exception as e:
+                        logger.debug(f"Error reading local Device library: {e}")
+
+        # PRIORITY 3: Try local cache
         if not lib_content:
             cached_device_lib = self.cache_path / "_libraries" / "Device.kicad_sym"
-
-            # Check cache first
             if cached_device_lib.exists():
                 try:
                     lib_content = cached_device_lib.read_text(encoding='utf-8')
-                    logger.debug("Using cached Device library from GitHub")
+                    logger.debug("Using cached Device library")
+                    source = SymbolSource.LOCAL_CACHE
                 except Exception as e:
                     logger.debug(f"Error reading cached Device library: {e}")
-
-            # Fetch from GitHub if not in cache
-            if not lib_content:
-                try:
-                    logger.info("Fetching Device library from GitHub (no local KiCad)")
-                    url = "https://raw.githubusercontent.com/KiCad/kicad-symbols/master/Device.kicad_sym"
-                    response = await self.http_client.get(url, timeout=30.0)
-                    if response.status_code == 200:
-                        lib_content = response.text
-                        # Cache for future use
-                        cached_device_lib.parent.mkdir(parents=True, exist_ok=True)
-                        cached_device_lib.write_text(lib_content)
-                        logger.info("Cached Device library from GitHub")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch Device library from GitHub: {e}")
 
         if not lib_content:
             return None
@@ -351,12 +367,12 @@ class SymbolFetcherAgent:
         try:
             symbol_sexp = self._extract_symbol_from_library(lib_content, generic_symbol)
             if symbol_sexp:
-                logger.info(f"Found generic symbol '{generic_symbol}' for {original_part}")
+                logger.info(f"Found generic symbol '{generic_symbol}' for {original_part} from {source.value}")
                 return FetchedSymbol(
                     part_number=original_part,  # Keep original part number
                     manufacturer=None,
                     symbol_sexp=symbol_sexp,
-                    source=SymbolSource.KICAD_OFFICIAL,
+                    source=source,
                     metadata={
                         'library': 'Device',
                         'match_type': 'generic_passive',
@@ -379,6 +395,7 @@ class SymbolFetcherAgent:
         handlers = {
             SymbolSource.LOCAL_CACHE: self._fetch_from_local_cache,
             SymbolSource.KICAD_LOCAL_INSTALL: self._fetch_from_kicad_local_install,
+            SymbolSource.KICAD_WORKER_INTERNAL: self._fetch_from_kicad_worker,
             SymbolSource.KICAD_OFFICIAL: self._fetch_from_kicad_official,
             SymbolSource.SNAPEDA: self._fetch_from_snapeda,
             SymbolSource.ULTRA_LIBRARIAN: self._fetch_from_ultralibrarian,
@@ -389,7 +406,7 @@ class SymbolFetcherAgent:
 
         handler = handlers.get(source_config.source)
         if handler:
-            if source_config.source in (SymbolSource.LOCAL_CACHE, SymbolSource.KICAD_LOCAL_INSTALL):
+            if source_config.source in (SymbolSource.LOCAL_CACHE, SymbolSource.KICAD_LOCAL_INSTALL, SymbolSource.KICAD_WORKER_INTERNAL):
                 return await handler(part_number, manufacturer, category)
             elif source_config.source == SymbolSource.LLM_GENERATED:
                 return await handler(part_number, manufacturer, category)
@@ -444,6 +461,85 @@ class SymbolFetcherAgent:
                             source=SymbolSource.LOCAL_CACHE,
                             metadata={'fuzzy_match': True, 'original_query': part_number}
                         )
+
+        return None
+
+    async def _fetch_from_kicad_worker(
+        self,
+        part_number: str,
+        manufacturer: Optional[str],
+        category: str
+    ) -> Optional[FetchedSymbol]:
+        """
+        Fetch symbol from internal KiCad worker service (K8s deployment).
+
+        The KiCad worker has all official KiCad libraries installed.
+        This is the preferred source in Docker/K8s environments.
+        """
+        try:
+            # Get list of likely library names for this part
+            library_names = self._guess_kicad_library(part_number, manufacturer)
+
+            for lib_name in library_names:
+                # Try to get the specific symbol from the library
+                url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}/symbol/{part_number}"
+                logger.debug(f"Trying KiCad worker: {url}")
+
+                response = await self.http_client.get(url, timeout=10.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    symbol_sexp = data.get('sexp')
+                    if symbol_sexp:
+                        logger.info(f"Found symbol '{part_number}' in library '{lib_name}' from KiCad worker")
+                        return FetchedSymbol(
+                            part_number=part_number,
+                            manufacturer=manufacturer,
+                            symbol_sexp=symbol_sexp,
+                            source=SymbolSource.KICAD_WORKER_INTERNAL,
+                            metadata={
+                                'library': lib_name,
+                                'match_type': 'exact',
+                                'source_url': url
+                            }
+                        )
+
+            # If specific symbol not found, try searching all libraries
+            # (This is slower, so only do it as a fallback)
+            list_url = f"{KICAD_WORKER_URL}/v1/symbols"
+            list_response = await self.http_client.get(list_url, timeout=10.0)
+            if list_response.status_code == 200:
+                libraries = list_response.json().get('libraries', [])
+
+                # Search libraries that might contain this part
+                for lib_name in libraries:
+                    if lib_name in self.SKIP_LIBRARIES:
+                        continue
+
+                    url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}/symbol/{part_number}"
+                    try:
+                        response = await self.http_client.get(url, timeout=5.0)
+                        if response.status_code == 200:
+                            data = response.json()
+                            symbol_sexp = data.get('sexp')
+                            if symbol_sexp:
+                                logger.info(f"Found symbol '{part_number}' in library '{lib_name}' from KiCad worker (broad search)")
+                                return FetchedSymbol(
+                                    part_number=part_number,
+                                    manufacturer=manufacturer,
+                                    symbol_sexp=symbol_sexp,
+                                    source=SymbolSource.KICAD_WORKER_INTERNAL,
+                                    metadata={
+                                        'library': lib_name,
+                                        'match_type': 'broad_search',
+                                        'source_url': url
+                                    }
+                                )
+                    except Exception:
+                        # Symbol not in this library, continue
+                        pass
+
+        except Exception as e:
+            logger.debug(f"KiCad worker fetch failed for {part_number}: {e}")
 
         return None
 

@@ -240,6 +240,113 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
+# ============================================================================
+# Symbol Library Endpoints (for schematic generation without local KiCad)
+# ============================================================================
+
+KICAD_SYMBOLS_PATH = Path("/usr/share/kicad/symbols")
+
+@app.get("/v1/symbols")
+async def list_symbol_libraries():
+    """List available KiCad symbol libraries."""
+    if not KICAD_SYMBOLS_PATH.exists():
+        raise HTTPException(status_code=404, detail="KiCad symbols directory not found")
+
+    libraries = [f.stem for f in KICAD_SYMBOLS_PATH.glob("*.kicad_sym")]
+    return {
+        "libraries": sorted(libraries),
+        "count": len(libraries),
+        "path": str(KICAD_SYMBOLS_PATH)
+    }
+
+
+@app.get("/v1/symbols/{library_name}")
+async def get_symbol_library(library_name: str):
+    """Get a full KiCad symbol library file content."""
+    # Remove .kicad_sym extension if provided
+    lib_name = library_name.replace(".kicad_sym", "")
+    lib_path = KICAD_SYMBOLS_PATH / f"{lib_name}.kicad_sym"
+
+    if not lib_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Library '{lib_name}' not found. Use /v1/symbols to list available libraries."
+        )
+
+    try:
+        content = lib_path.read_text(encoding='utf-8')
+        return {
+            "library": lib_name,
+            "content": content,
+            "size": len(content)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading library: {str(e)}")
+
+
+@app.get("/v1/symbols/{library_name}/symbol/{symbol_name}")
+async def get_symbol(library_name: str, symbol_name: str):
+    """Extract a specific symbol from a KiCad library."""
+    lib_name = library_name.replace(".kicad_sym", "")
+    lib_path = KICAD_SYMBOLS_PATH / f"{lib_name}.kicad_sym"
+
+    if not lib_path.exists():
+        raise HTTPException(status_code=404, detail=f"Library '{lib_name}' not found")
+
+    try:
+        content = lib_path.read_text(encoding='utf-8')
+
+        # Find the symbol in the library
+        # Symbols start with (symbol "name" and end with matching parenthesis
+        import re
+
+        # Escape the symbol name for regex
+        escaped_name = re.escape(symbol_name)
+
+        # Match the symbol definition - handles nested parentheses
+        pattern = rf'\(symbol\s+"{escaped_name}"'
+        match = re.search(pattern, content)
+
+        if not match:
+            # Try without quotes
+            pattern = rf'\(symbol\s+{escaped_name}\s'
+            match = re.search(pattern, content)
+
+        if not match:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Symbol '{symbol_name}' not found in library '{lib_name}'"
+            )
+
+        # Extract the full symbol S-expression
+        start = match.start()
+        depth = 0
+        end = start
+
+        for i, char in enumerate(content[start:], start):
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        symbol_sexp = content[start:end]
+
+        return {
+            "library": lib_name,
+            "symbol": symbol_name,
+            "sexp": symbol_sexp,
+            "size": len(symbol_sexp)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error extracting symbol: {str(e)}")
+
+
 @app.get("/v1/operations")
 async def list_operations():
     """List available pcbnew operations."""
