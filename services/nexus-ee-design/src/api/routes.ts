@@ -1420,8 +1420,12 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
       // Build the URL for KiCanvas to fetch the raw schematic file
       // Using the .kicad_sch extension route for proper file type detection
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const schematicUrl = `${baseUrl}/api/v1/projects/${projectId}/schematic/${latest.id}/schematic.kicad_sch`;
+      // Use X-Forwarded headers if behind a proxy, otherwise fall back to request values
+      const protocol = req.get('X-Forwarded-Proto') || req.protocol || 'https';
+      const host = req.get('X-Forwarded-Host') || req.get('host') || 'api.adverant.ai';
+      // The service is mounted at /ee-design prefix on the ingress
+      const basePath = '/ee-design';
+      const schematicUrl = `${protocol}://${host}${basePath}/api/v1/projects/${projectId}/schematic/${latest.id}/schematic.kicad_sch`;
 
       res.json({
         success: true,
