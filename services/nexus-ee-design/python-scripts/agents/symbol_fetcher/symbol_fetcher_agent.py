@@ -1423,12 +1423,125 @@ No explanation or markdown formatting."""
 
         return unique_libraries
 
+    def _flatten_inherited_symbol(
+        self,
+        library_content: str,
+        symbol_sexp: str,
+        symbol_name: str
+    ) -> str:
+        """
+        Flatten a symbol that uses (extends "parent") inheritance.
+
+        KiCanvas doesn't support the extends keyword, so we need to inline
+        the parent symbol's graphics and pins into the child symbol.
+        """
+        # Check if symbol uses extends
+        extends_match = re.search(r'\(extends\s+"([^"]+)"\)', symbol_sexp)
+        if not extends_match:
+            return symbol_sexp  # No inheritance, return as-is
+
+        parent_name = extends_match.group(1)
+        logger.info(f"Symbol '{symbol_name}' extends '{parent_name}', flattening...")
+
+        # Extract parent symbol from library
+        parent_pattern = rf'\(symbol\s+"{re.escape(parent_name)}"\s+'
+        parent_match = re.search(parent_pattern, library_content)
+
+        if not parent_match:
+            logger.warning(f"Parent symbol '{parent_name}' not found, returning child as-is")
+            # Remove extends clause since KiCanvas can't handle it
+            return re.sub(r'\s*\(extends\s+"[^"]+"\)', '', symbol_sexp)
+
+        # Extract parent symbol S-expression
+        start_pos = parent_match.start()
+        depth = 0
+        end_pos = start_pos
+        for i, char in enumerate(library_content[start_pos:]):
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    end_pos = start_pos + i + 1
+                    break
+        parent_sexp = library_content[start_pos:end_pos]
+
+        # Extract child's properties (Reference, Value, Footprint, etc.)
+        child_properties = []
+        for prop_match in re.finditer(r'\(property\s+"[^"]+"\s+[^)]+\)(?:\s*\([^)]+\))*', symbol_sexp):
+            child_properties.append(prop_match.group(0))
+
+        # Extract parent's sub-symbols (graphics and pins like _0_1, _1_1)
+        parent_subsymbols = []
+        for subsym_match in re.finditer(r'\(symbol\s+"' + re.escape(parent_name) + r'_\d+_\d+"[^)]*\)(?:\s*[^)]+)*\)', parent_sexp):
+            # Need to extract the full sub-symbol with balanced parens
+            sub_start = subsym_match.start()
+            sub_depth = 0
+            sub_end = sub_start
+            for i, char in enumerate(parent_sexp[sub_start:]):
+                if char == '(':
+                    sub_depth += 1
+                elif char == ')':
+                    sub_depth -= 1
+                    if sub_depth == 0:
+                        sub_end = sub_start + i + 1
+                        break
+            subsym = parent_sexp[sub_start:sub_end]
+            # Rename subsymbol from parent name to child name
+            renamed = subsym.replace(f'"{parent_name}_', f'"{symbol_name}_')
+            parent_subsymbols.append(renamed)
+
+        # If no subsymbols found with regex, try a different approach
+        if not parent_subsymbols:
+            # Find all (symbol "ParentName_X_Y" ...) blocks
+            pattern = rf'\(symbol\s+"{re.escape(parent_name)}_(\d+)_(\d+)"'
+            for m in re.finditer(pattern, parent_sexp):
+                sub_start = m.start()
+                sub_depth = 0
+                sub_end = sub_start
+                for i, char in enumerate(parent_sexp[sub_start:]):
+                    if char == '(':
+                        sub_depth += 1
+                    elif char == ')':
+                        sub_depth -= 1
+                        if sub_depth == 0:
+                            sub_end = sub_start + i + 1
+                            break
+                subsym = parent_sexp[sub_start:sub_end]
+                renamed = subsym.replace(f'"{parent_name}_', f'"{symbol_name}_')
+                parent_subsymbols.append(renamed)
+
+        # Build the flattened symbol
+        # Get other attributes from child (in_bom, on_board, etc.)
+        attrs_match = re.search(r'\(symbol\s+"[^"]+"\s*((?:\([^)]+\)\s*)*)', symbol_sexp)
+        attrs = ''
+        if attrs_match:
+            attrs_raw = attrs_match.group(1)
+            # Remove extends from attrs
+            attrs = re.sub(r'\s*\(extends\s+"[^"]+"\)', '', attrs_raw)
+
+        # Build final flattened symbol
+        flattened = f'(symbol "{symbol_name}" {attrs}\n'
+
+        # Add properties
+        for prop in child_properties:
+            flattened += f'    {prop}\n'
+
+        # Add parent's graphics and pins
+        for subsym in parent_subsymbols:
+            flattened += f'    {subsym}\n'
+
+        flattened += '  )'
+
+        logger.info(f"Flattened '{symbol_name}' with {len(parent_subsymbols)} sub-symbols from parent '{parent_name}'")
+        return flattened
+
     def _extract_symbol_from_library(
         self,
         library_content: str,
         part_number: str
     ) -> Optional[str]:
-        """Extract a specific symbol from a library file."""
+        """Extract a specific symbol from a library file, flattening inheritance."""
         # Try exact match first
         exact_pattern = rf'\(symbol\s+"{re.escape(part_number)}"\s+'
         match = re.search(exact_pattern, library_content)
@@ -1456,6 +1569,9 @@ No explanation or markdown formatting."""
                     break
 
         symbol_sexp = library_content[start_pos:end_pos]
+
+        # Flatten any inheritance (extends "parent") for KiCanvas compatibility
+        symbol_sexp = self._flatten_inherited_symbol(library_content, symbol_sexp, part_number)
 
         # Wrap in library format
         return f'(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)\n  {symbol_sexp}\n)'
