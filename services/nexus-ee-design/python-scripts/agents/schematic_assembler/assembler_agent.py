@@ -853,14 +853,30 @@ class SchematicAssemblerAgent:
         for label in sheet.labels:
             lines.append(self._label_to_sexp(label))
 
+        # Add sheet_instances section (required for KiCad 8)
+        lines.append("")
+        lines.append("  (sheet_instances")
+        lines.append(f'    (path "/" (page "1"))')
+        lines.append("  )")
+
+        # Add symbol_instances section (required for KiCad 8 to count components)
+        lines.append("")
+        lines.append("  (symbol_instances")
+        for symbol in sheet.symbols:
+            lines.append(f'    (path "/{symbol.uuid}"')
+            lines.append(f'      (reference "{symbol.reference}") (unit {symbol.unit})')
+            lines.append(f'    )')
+        lines.append("  )")
+
         lines.append(")")
 
         return "\n".join(lines)
 
     def _symbol_to_sexp(self, symbol: SymbolInstance) -> str:
-        """Convert symbol instance to S-expression."""
+        """Convert symbol instance to S-expression with KiCad 8 instances block."""
         x, y = symbol.position
 
+        # KiCad 8 requires (instances ...) block inside each symbol for proper tracking
         return f'''  (symbol (lib_id "{symbol.symbol_id}") (at {x} {y} {symbol.rotation}) (unit {symbol.unit})
     (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
     (uuid "{symbol.uuid}")
@@ -875,6 +891,14 @@ class SchematicAssemblerAgent:
     )
     (property "Datasheet" "~" (at {x} {y} 0)
       (effects (font (size 1.27 1.27)) hide)
+    )
+    (instances
+      (project ""
+        (path "/{symbol.uuid}"
+          (reference "{symbol.reference}")
+          (unit {symbol.unit})
+        )
+      )
     )
   )'''
 

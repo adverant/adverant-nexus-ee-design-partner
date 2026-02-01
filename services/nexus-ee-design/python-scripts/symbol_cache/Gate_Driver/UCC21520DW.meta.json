@@ -3,7 +3,7 @@
   "manufacturer": "TI",
   "source": "kicad_local_install",
   "datasheet_url": null,
-  "fetched_at": "2026-01-31T23:33:28.943456",
+  "fetched_at": "2026-01-31T23:53:58.453491",
   "needs_review": false,
   "library": "Driver_FET",
   "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Driver_FET.kicad_sym",

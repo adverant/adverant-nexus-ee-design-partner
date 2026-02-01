@@ -3,7 +3,7 @@
   "manufacturer": "TI",
   "source": "kicad_local_install",
   "datasheet_url": null,
-  "fetched_at": "2026-01-31T15:32:57.012193",
+  "fetched_at": "2026-01-31T23:53:58.459757",
   "needs_review": false,
   "library": "Amplifier_Current",
   "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Amplifier_Current.kicad_sym",

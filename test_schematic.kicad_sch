@@ -1,0 +1,567 @@
+(kicad_sch
+  (version 20231120)
+  (generator "nexus-ee-design")
+  (generator_version "1.0.0")
+  (uuid "3de543ba-7010-403d-bdb9-793044e64748")
+  (paper "A4")
+  (title_block
+    (title "FOC ESC Heavy Lift")
+    (date "2026-01-31")
+    (rev "1.0")
+    (company "Adverant EE Design")
+    (comment 1 "Subsystems: MCU Core")
+    (comment 2 "Project Type: power_electronics")
+  )
+  (lib_symbols
+    (symbol "MCU_ST_STM32G4:STM32G431KBTx"
+      (pin_numbers hide)
+      (pin_names
+        (offset 1.016)
+      )
+      (exclude_from_sim no)
+      (in_bom yes)
+      (on_board yes)
+      (property "Reference" "S"
+        (at 0 2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (property "Value" "MCU Core"
+        (at 0 -2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (property "Footprint" ""
+        (at 0 0 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (property "Datasheet" ""
+        (at 0 0 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (symbol "MCU_ST_STM32G4:STM32G431KBTx_0_1"
+        (rectangle
+          (start -2.54 2.54)
+          (end 2.54 -2.54)
+          (stroke
+            (width 0.254)
+            (type default)
+          )
+          (fill
+            (type background)
+          )
+        )
+      )
+      (symbol "MCU_ST_STM32G4:STM32G431KBTx_1_1"
+        (pin passive line
+          (at -5.08 0 0)
+          (length 2.54)
+          (name "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+        (pin passive line
+          (at 5.08 0 180)
+          (length 2.54)
+          (name "2"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "2"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+      )
+    )
+    (symbol "Device:Crystal"
+      (pin_numbers hide)
+      (pin_names
+        (offset 1.016)
+      )
+      (exclude_from_sim no)
+      (in_bom yes)
+      (on_board yes)
+      (property "Reference" "C"
+        (at 0 2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (property "Value" "MCU Core"
+        (at 0 -2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (property "Footprint" ""
+        (at 0 0 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (property "Datasheet" ""
+        (at 0 0 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (symbol "Device:Crystal_0_1"
+        (rectangle
+          (start -2.54 2.54)
+          (end 2.54 -2.54)
+          (stroke
+            (width 0.254)
+            (type default)
+          )
+          (fill
+            (type background)
+          )
+        )
+      )
+      (symbol "Device:Crystal_1_1"
+        (pin passive line
+          (at -5.08 0 0)
+          (length 2.54)
+          (name "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+        (pin passive line
+          (at 5.08 0 180)
+          (length 2.54)
+          (name "2"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "2"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+      )
+    )
+    (symbol "power:VCC"
+      (power)
+      (pin_numbers hide)
+      (pin_names
+        (offset 0) hide
+      )
+      (exclude_from_sim no)
+      (in_bom yes)
+      (on_board yes)
+      (property "Reference" "#PWR"
+        (at 0 2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (property "Value" "VCC"
+        (at 0 2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (symbol "power:VCC_0_1"
+        (polyline
+          (pts
+            (xy 0 0) (xy 0 1.27) (xy -0.635 1.905) (xy 0 2.54) (xy 0.635 1.905) (xy 0 1.27)
+          )
+          (stroke
+            (width 0)
+            (type default)
+          )
+          (fill
+            (type outline)
+          )
+        )
+      )
+      (symbol "power:VCC_1_1"
+        (pin power_in line
+          (at 0 0 270)
+          (length 0)
+          (name "VCC"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+      )
+    )
+    (symbol "power:GND"
+      (power)
+      (pin_numbers hide)
+      (pin_names
+        (offset 0) hide
+      )
+      (exclude_from_sim no)
+      (in_bom yes)
+      (on_board yes)
+      (property "Reference" "#PWR"
+        (at 0 -2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+          (hide yes)
+        )
+      )
+      (property "Value" "GND"
+        (at 0 -2.54 0)
+        (effects
+          (font
+            (size 1.27 1.27)
+          )
+        )
+      )
+      (symbol "power:GND_0_1"
+        (polyline
+          (pts
+            (xy -1.27 0) (xy 1.27 0) (xy 0 -1.27) (xy -1.27 0)
+          )
+          (stroke
+            (width 0)
+            (type default)
+          )
+          (fill
+            (type outline)
+          )
+        )
+      )
+      (symbol "power:GND_1_1"
+        (pin power_in line
+          (at 0 0 90)
+          (length 0)
+          (name "GND"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+          (number "1"
+            (effects
+              (font
+                (size 1.27 1.27)
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "power:VCC")
+    (at 25.40 25.40 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom no)
+    (on_board yes)
+    (dnp no)
+    (uuid "41b55d90-8030-4ce2-ae30-2e679fa1fc77")
+    (property "Reference" "#PWR01"
+      (at 25.40 27.94 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (property "Value" "VCC"
+      (at 25.40 22.86 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (pin "1"
+      (uuid "8ef2ce06-0813-4230-8965-c4d56cc14244")
+    )
+    (instances
+      (project ""
+        (path "/"
+          (reference "#PWR01")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "power:GND")
+    (at 25.40 184.60 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom no)
+    (on_board yes)
+    (dnp no)
+    (uuid "144ac9bc-5ef6-4107-9a34-6b8da543d32c")
+    (property "Reference" "#PWR02"
+      (at 25.40 182.06 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (property "Value" "GND"
+      (at 25.40 187.14 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (pin "1"
+      (uuid "0458b0c0-022c-45aa-9208-29f6a9d3cec4")
+    )
+    (instances
+      (project ""
+        (path "/"
+          (reference "#PWR02")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "MCU_ST_STM32G4:STM32G431KBTx")
+    (at 50.80 50.80 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "28cb03bd-9678-44ae-8c2b-601d69556146")
+    (property "Reference" "S1"
+      (at 50.80 46.99 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (property "Value" "MCU Core"
+      (at 50.80 54.61 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (property "Footprint" ""
+      (at 50.80 50.80 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (property "Datasheet" ""
+      (at 50.80 50.80 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (pin "1"
+      (uuid "92cf61bc-3282-48ab-9305-5d974bc105c7")
+    )
+    (pin "2"
+      (uuid "51d76473-f16b-49de-90ee-03caddf998d5")
+    )
+    (instances
+      (project ""
+        (path "/"
+          (reference "S1")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:Crystal")
+    (at 91.44 50.80 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "76825c5c-53fe-40ec-976c-7289d78b0ae9")
+    (property "Reference" "C2"
+      (at 91.44 46.99 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (property "Value" "MCU Core"
+      (at 91.44 54.61 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+      )
+    )
+    (property "Footprint" ""
+      (at 91.44 50.80 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (property "Datasheet" ""
+      (at 91.44 50.80 0)
+      (effects
+        (font
+          (size 1.27 1.27)
+        )
+        (hide yes)
+      )
+    )
+    (pin "1"
+      (uuid "b91862e8-98ab-4399-a055-d2926f1121ac")
+    )
+    (pin "2"
+      (uuid "85d01b86-21a3-4283-b416-896a9c92f0f9")
+    )
+    (instances
+      (project ""
+        (path "/"
+          (reference "C2")
+          (unit 1)
+        )
+      )
+    )
+  )
+  (wire
+    (pts
+      (xy 55.88 50.80) (xy 86.36 50.80)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "6e301acc-c11c-4de7-be11-590647084645")
+  )
+  (label "VCC"
+    (at 76.20 12.70 0)
+    (fields_autoplaced yes)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "a62d441a-0ddb-4085-abd0-ab3f6782d962")
+  )
+  (label "GND"
+    (at 101.60 12.70 0)
+    (fields_autoplaced yes)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "0ff63be2-091f-419d-a1d2-148ff2b028cd")
+  )
+  (label "MCU_Core_OUT"
+    (at 127.00 12.70 0)
+    (fields_autoplaced yes)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "bd9715a7-4d1c-4633-8f0a-04dc4a18e53e")
+  )
+  (sheet_instances
+    (path "/"
+      (page "1")
+    )
+  )
+)

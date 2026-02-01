@@ -3,7 +3,7 @@
   "manufacturer": "ST",
   "source": "kicad_local_install",
   "datasheet_url": null,
-  "fetched_at": "2026-01-31T23:33:34.964409",
+  "fetched_at": "2026-01-31T23:53:58.447070",
   "needs_review": false,
   "library": "MCU_ST_STM32G4",
   "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/MCU_ST_STM32G4.kicad_sym",

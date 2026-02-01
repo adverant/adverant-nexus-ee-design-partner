@@ -1,0 +1,12 @@
+{
+  "part_number": "WSL3637R0005FEA",
+  "manufacturer": null,
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-01-31T23:54:01.946089",
+  "needs_review": false,
+  "library": "Device",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/Device.kicad_sym",
+  "match_type": "generic_passive",
+  "generic_symbol": "R"
+}
