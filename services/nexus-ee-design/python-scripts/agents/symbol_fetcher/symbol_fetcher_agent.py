@@ -491,6 +491,25 @@ class SymbolFetcherAgent:
                     symbol_sexp = data.get('sexp')
                     if symbol_sexp:
                         logger.info(f"Found symbol '{part_number}' in library '{lib_name}' from KiCad worker")
+
+                        # Check if symbol uses extends - if so, fetch library and flatten
+                        if '(extends ' in symbol_sexp:
+                            logger.info(f"Symbol '{part_number}' uses extends, fetching library for flattening")
+                            lib_url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}"
+                            try:
+                                lib_response = await self.http_client.get(lib_url, timeout=15.0)
+                                if lib_response.status_code == 200:
+                                    lib_data = lib_response.json()
+                                    lib_content = lib_data.get('content', '')
+                                    if lib_content:
+                                        symbol_sexp = self._flatten_inherited_symbol(lib_content, symbol_sexp, part_number)
+                            except Exception as e:
+                                logger.warning(f"Failed to flatten inherited symbol: {e}")
+
+                        # Wrap in library format if not already
+                        if not symbol_sexp.strip().startswith('(kicad_symbol_lib'):
+                            symbol_sexp = f'(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)\n  {symbol_sexp}\n)'
+
                         return FetchedSymbol(
                             part_number=part_number,
                             manufacturer=manufacturer,
@@ -563,6 +582,25 @@ class SymbolFetcherAgent:
                             symbol_sexp = data.get('sexp')
                             if symbol_sexp:
                                 logger.info(f"Found symbol '{part_number}' in library '{lib_name}' from KiCad worker (broad search)")
+
+                                # Check if symbol uses extends - if so, fetch library and flatten
+                                if '(extends ' in symbol_sexp:
+                                    logger.info(f"Symbol '{part_number}' uses extends, fetching library for flattening")
+                                    lib_url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}"
+                                    try:
+                                        lib_response = await self.http_client.get(lib_url, timeout=15.0)
+                                        if lib_response.status_code == 200:
+                                            lib_data = lib_response.json()
+                                            lib_content = lib_data.get('content', '')
+                                            if lib_content:
+                                                symbol_sexp = self._flatten_inherited_symbol(lib_content, symbol_sexp, part_number)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to flatten inherited symbol: {e}")
+
+                                # Wrap in library format if not already
+                                if not symbol_sexp.strip().startswith('(kicad_symbol_lib'):
+                                    symbol_sexp = f'(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)\n  {symbol_sexp}\n)'
+
                                 return FetchedSymbol(
                                     part_number=part_number,
                                     manufacturer=manufacturer,
