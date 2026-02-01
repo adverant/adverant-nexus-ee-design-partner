@@ -18,6 +18,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Import enhanced wire router (with fallback to basic routing)
+try:
+    from agents.wire_router import EnhancedWireRouter, RoutingResult
+    ENHANCED_ROUTER_AVAILABLE = True
+except ImportError:
+    ENHANCED_ROUTER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -200,6 +207,12 @@ class SchematicAssemblerAgent:
         self.symbol_fetcher = symbol_fetcher
         self.graphrag = graphrag_client
         self.ref_counters: Dict[str, int] = {}
+
+        # Initialize enhanced wire router if available
+        self.enhanced_router = None
+        if ENHANCED_ROUTER_AVAILABLE:
+            self.enhanced_router = EnhancedWireRouter()
+            logger.info("Enhanced Wire Router initialized")
 
     def _get_next_reference(self, category: str) -> str:
         """Get next available reference designator."""
@@ -568,6 +581,12 @@ class SchematicAssemblerAgent:
         # Build symbol lookup
         symbol_map = {s.reference: s for s in sheet.symbols}
 
+        # Try enhanced router first
+        if self.enhanced_router:
+            self._route_wires_enhanced(sheet, connections, symbol_map)
+            return
+
+        # Fallback to basic routing
         for conn in connections:
             from_sym = symbol_map.get(conn.from_ref)
             to_sym = symbol_map.get(conn.to_ref)
@@ -602,6 +621,89 @@ class SchematicAssemblerAgent:
         self._add_junctions(sheet)
 
         logger.info(f"Routed {len(sheet.wires)} wire segments")
+
+    def _route_wires_enhanced(
+        self,
+        sheet: SchematicSheet,
+        connections: List[Connection],
+        symbol_map: Dict[str, SymbolInstance]
+    ):
+        """Route wires using Enhanced Wire Router."""
+        logger.info("Using Enhanced Wire Router for professional routing")
+
+        # Build data structures for enhanced router
+        conn_dicts = []
+        component_positions = {}
+        pin_positions = {}
+
+        for symbol in sheet.symbols:
+            component_positions[symbol.reference] = symbol.position
+            pin_positions[symbol.reference] = {}
+            for pin in symbol.pins:
+                abs_pos = symbol.get_absolute_pin_position(pin.name)
+                if abs_pos:
+                    pin_positions[symbol.reference][pin.name] = abs_pos
+                    # Also add by pin number
+                    pin_positions[symbol.reference][pin.number] = abs_pos
+
+        for conn in connections:
+            conn_dicts.append({
+                "from_ref": conn.from_ref,
+                "from_pin": conn.from_pin,
+                "to_ref": conn.to_ref,
+                "to_pin": conn.to_pin,
+                "net_name": conn.net_name or f"Net-({conn.from_ref}-{conn.from_pin})"
+            })
+
+        # Route with enhanced router
+        result = self.enhanced_router.route(
+            conn_dicts,
+            component_positions,
+            pin_positions,
+            sheet_bounds=(0, 0, self.DEFAULT_SHEET_SIZE[0], self.DEFAULT_SHEET_SIZE[1])
+        )
+
+        # Convert results to schematic format
+        for wire_seg in result.wires:
+            sheet.wires.append(Wire(
+                start=wire_seg.start,
+                end=wire_seg.end,
+                uuid=wire_seg.uuid
+            ))
+
+        for junc in result.junctions:
+            sheet.junctions.append(Junction(
+                position=junc.position,
+                uuid=junc.uuid
+            ))
+
+        # Add net labels for named nets
+        added_labels = set()
+        for conn in connections:
+            if conn.net_name and not conn.net_name.startswith("Net-"):
+                if conn.net_name in added_labels:
+                    continue
+                added_labels.add(conn.net_name)
+
+                from_sym = symbol_map.get(conn.from_ref)
+                to_sym = symbol_map.get(conn.to_ref)
+
+                if from_sym and to_sym:
+                    from_pos = from_sym.get_absolute_pin_position(conn.from_pin) or from_sym.position
+                    to_pos = to_sym.get_absolute_pin_position(conn.to_pin) or to_sym.position
+
+                    mid_x = (from_pos[0] + to_pos[0]) / 2
+                    mid_y = (from_pos[1] + to_pos[1]) / 2
+                    sheet.labels.append(Label(
+                        text=conn.net_name,
+                        position=(mid_x, mid_y)
+                    ))
+
+        logger.info(
+            f"Enhanced routing complete: {len(sheet.wires)} wires, "
+            f"{len(sheet.junctions)} junctions, "
+            f"{result.four_way_junctions_avoided} 4-way junctions avoided"
+        )
 
     def _manhattan_route(
         self,

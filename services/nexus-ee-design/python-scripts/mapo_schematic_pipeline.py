@@ -33,6 +33,12 @@ from agents.schematic_assembler import (
     Connection,
     BlockDiagram,
 )
+from agents.connection_generator import ConnectionGeneratorAgent
+from agents.layout_optimizer import LayoutOptimizerAgent
+from agents.standards_compliance import StandardsComplianceAgent
+from agents.wire_router import EnhancedWireRouter
+from agents.functional_validator import MAPOFunctionalValidator
+from agents.visual_validator import DualLLMVisualValidator, ValidationLoop
 from validation.schematic_vision_validator import (
     SchematicVisionValidator,
     MAPOSchematicLoop,
@@ -125,6 +131,11 @@ class MAPOSchematicPipeline:
         self._symbol_fetcher: Optional[SymbolFetcherAgent] = None
         self._graphrag_indexer: Optional[SymbolGraphRAGIndexer] = None
         self._assembler: Optional[SchematicAssemblerAgent] = None
+        self._connection_generator: Optional[ConnectionGeneratorAgent] = None
+        self._layout_optimizer: Optional[LayoutOptimizerAgent] = None
+        self._standards_compliance: Optional[StandardsComplianceAgent] = None
+        self._functional_validator: Optional[MAPOFunctionalValidator] = None
+        self._visual_validator: Optional[DualLLMVisualValidator] = None
         self._validator: Optional[SchematicVisionValidator] = None
         self._renderer: Optional[Any] = None  # KiCanvas renderer
 
@@ -159,7 +170,27 @@ class MAPOSchematicPipeline:
         )
         logger.info("Schematic assembler initialized")
 
-        # Initialize validator
+        # Initialize connection generator
+        self._connection_generator = ConnectionGeneratorAgent()
+        logger.info("Connection generator initialized")
+
+        # Initialize layout optimizer (Phase 12 - IPC-2221/IEEE 315 compliance)
+        self._layout_optimizer = LayoutOptimizerAgent()
+        logger.info("Layout optimizer initialized")
+
+        # Initialize standards compliance checker (Phase 13 - IEC 60750/IEEE 315)
+        self._standards_compliance = StandardsComplianceAgent()
+        logger.info("Standards compliance agent initialized")
+
+        # Initialize MAPO functional validator (Phase 15 - Competitive multi-agent)
+        self._functional_validator = MAPOFunctionalValidator()
+        logger.info("MAPO functional validator initialized")
+
+        # Initialize dual-LLM visual validator (Phase 16 - Opus 4.5 + Kimi K2.5)
+        self._visual_validator = DualLLMVisualValidator()
+        logger.info("Dual-LLM visual validator initialized")
+
+        # Initialize legacy validator
         self._validator = SchematicVisionValidator(
             primary_model=self.config.primary_model,
             verification_model=self.config.verification_model
@@ -167,7 +198,7 @@ class MAPOSchematicPipeline:
         self._validator.PASS_THRESHOLD = self.config.validation_threshold
         logger.info("Vision validator initialized")
 
-        logger.info("Pipeline initialization complete")
+        logger.info("Pipeline initialization complete (all MAPO agents ready)")
 
     async def generate(
         self,
@@ -217,7 +248,7 @@ class MAPOSchematicPipeline:
                 for item in bom
             ]
 
-            # Convert connections if provided
+            # Convert connections if provided, otherwise auto-generate
             connection_objs = None
             if connections:
                 connection_objs = [
@@ -230,6 +261,29 @@ class MAPOSchematicPipeline:
                     )
                     for conn in connections
                 ]
+                logger.info(f"Using {len(connection_objs)} explicit connections")
+            else:
+                # Auto-generate connections from BOM and design intent
+                logger.info("Auto-generating connections from BOM and design intent...")
+                try:
+                    generated_connections = await self._connection_generator.generate_connections(
+                        bom=bom,
+                        design_intent=design_intent
+                    )
+                    connection_objs = [
+                        Connection(
+                            from_ref=gc.from_ref,
+                            from_pin=gc.from_pin,
+                            to_ref=gc.to_ref,
+                            to_pin=gc.to_pin,
+                            net_name=gc.net_name
+                        )
+                        for gc in generated_connections
+                    ]
+                    logger.info(f"Auto-generated {len(connection_objs)} connections")
+                except Exception as e:
+                    logger.warning(f"Connection generation failed: {e}")
+                    connection_objs = []
 
             # Convert block diagram if provided
             block_diagram_obj = None
@@ -241,7 +295,7 @@ class MAPOSchematicPipeline:
 
             logger.info(f"Starting schematic generation: {len(bom_items)} components")
 
-            # Phase 1: Assemble schematic
+            # Phase 1: Assemble schematic (uses Enhanced Wire Router internally)
             sheets = await self._assembler.assemble_schematic(
                 bom=bom_items,
                 block_diagram=block_diagram_obj,
@@ -250,6 +304,39 @@ class MAPOSchematicPipeline:
             )
 
             result.sheets = sheets
+
+            # Phase 2: Layout Optimization (IPC-2221/IEEE 315 signal flow)
+            if self._layout_optimizer:
+                logger.info("Running layout optimization...")
+                for sheet in sheets:
+                    optimization_result = self._layout_optimizer.optimize_layout(
+                        components=sheet.symbols,
+                        connections=connection_objs if connection_objs else [],
+                        sheet_size=self._assembler.DEFAULT_SHEET_SIZE
+                    )
+                    # Apply optimized positions
+                    for comp_ref, position in optimization_result.positions.items():
+                        for symbol in sheet.symbols:
+                            if symbol.reference == comp_ref:
+                                symbol.position = position
+                                break
+                    logger.info(f"Layout optimization: {optimization_result.quality_score:.1%} score")
+
+            # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
+            if self._standards_compliance:
+                logger.info("Running standards compliance check...")
+                schematic_content = self._assembler.generate_kicad_sch(sheets[0])
+                compliance_report = self._standards_compliance.validate(
+                    schematic_sexp=schematic_content,
+                    bom=bom,
+                    connections=[vars(c) for c in connection_objs] if connection_objs else []
+                )
+                if not compliance_report.passed:
+                    logger.warning(f"Standards compliance: {len(compliance_report.violations)} violations")
+                    for violation in compliance_report.violations[:5]:
+                        logger.warning(f"  - {violation.check.value}: {violation.message}")
+                else:
+                    logger.info(f"Standards compliance: PASSED ({compliance_report.score:.1%})")
 
             # Track symbol statistics
             for sheet in sheets:
@@ -269,9 +356,64 @@ class MAPOSchematicPipeline:
 
             logger.info(f"Schematic assembled: {output_path}")
 
-            # Phase 2: MAPO Validation Loop (if not skipped)
-            if not skip_validation and self._validator:
-                logger.info("Starting MAPO validation loop...")
+            # Phase 4: MAPO Functional Validation (Competitive Multi-Agent)
+            if not skip_validation and self._functional_validator:
+                logger.info("Starting MAPO competitive functional validation...")
+
+                functional_result = await self._functional_validator.validate(
+                    schematic_sexp=schematic_content,
+                    design_intent=design_intent,
+                    bom=bom,
+                    connections=[vars(c) for c in connection_objs] if connection_objs else []
+                )
+
+                if not functional_result.passed:
+                    logger.warning(
+                        f"Functional validation: FAILED (score: {functional_result.overall_score:.1%})"
+                    )
+                    if functional_result.veto_triggered:
+                        logger.error(f"VETO: {functional_result.veto_reason}")
+                    for issue in functional_result.critical_issues[:3]:
+                        logger.warning(f"  - {issue.category.value}: {issue.message}")
+                else:
+                    logger.info(
+                        f"Functional validation: PASSED (score: {functional_result.overall_score:.1%})"
+                    )
+
+            # Phase 5: Dual-LLM Visual Validation Loop (Opus 4.5 + Kimi K2.5)
+            if not skip_validation and self._visual_validator:
+                logger.info("Starting dual-LLM visual validation loop...")
+                logger.info("CRITICAL: Exporting schematic to IMAGE for visual analysis")
+
+                # Create validation loop for iterative improvement
+                visual_loop = ValidationLoop(
+                    validator=self._visual_validator,
+                    target_score=self.config.validation_threshold,
+                    max_iterations=self.config.max_iterations
+                )
+
+                # Run visual validation loop
+                loop_result = await visual_loop.run(
+                    schematic_path=str(output_path),
+                    specification=design_intent
+                )
+
+                result.iterations = loop_result.iterations
+
+                if loop_result.final_passed:
+                    logger.info(
+                        f"Visual validation: PASSED after {loop_result.iterations} iterations "
+                        f"(score: {loop_result.final_score:.1%})"
+                    )
+                else:
+                    logger.warning(
+                        f"Visual validation: Did not reach target "
+                        f"(final: {loop_result.final_score:.1%}, target: {self.config.validation_threshold:.1%})"
+                    )
+
+            # Legacy validation (fallback if new validators unavailable)
+            elif not skip_validation and self._validator:
+                logger.info("Starting legacy MAPO validation loop...")
 
                 # Render schematic to image for validation
                 schematic_image = await self._render_schematic(schematic_content)

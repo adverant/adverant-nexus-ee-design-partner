@@ -83,6 +83,25 @@ const ConfigSchema = z.object({
     maxUploadSize: z.number().default(100 * 1024 * 1024), // 100MB
   }),
 
+  // NFS Share Artifacts Configuration (Terminal Computer)
+  artifacts: z.object({
+    enabled: z.boolean().default(true),
+    basePath: z.string().default('/plugins/ee-design-plugin/artifacts'),
+    paths: z.object({
+      schematics: z.string().default('/plugins/ee-design-plugin/artifacts/schematics'),
+      pcbLayouts: z.string().default('/plugins/ee-design-plugin/artifacts/pcb-layouts'),
+      threeDRenders: z.string().default('/plugins/ee-design-plugin/artifacts/3d-renders'),
+      gerbers: z.string().default('/plugins/ee-design-plugin/artifacts/gerbers'),
+      bom: z.string().default('/plugins/ee-design-plugin/artifacts/bom'),
+      benchTesting: z.string().default('/plugins/ee-design-plugin/artifacts/bench-testing'),
+      drcReports: z.string().default('/plugins/ee-design-plugin/artifacts/drc-reports'),
+      simulations: z.string().default('/plugins/ee-design-plugin/artifacts/simulations'),
+      validationReports: z.string().default('/plugins/ee-design-plugin/artifacts/validation-reports'),
+    }),
+    retentionDays: z.number().default(90), // Keep artifacts for 90 days
+    syncEnabled: z.boolean().default(true), // Sync to GraphRAG
+  }),
+
   // Layout Generation Configuration
   layout: z.object({
     maxIterations: z.number().default(100),
@@ -253,6 +272,24 @@ function loadConfig(): Config {
         execute: process.env.CLI_PERMISSION_EXECUTE !== 'false',
         admin: process.env.CLI_PERMISSION_ADMIN !== 'false',
       },
+    },
+
+    artifacts: {
+      enabled: process.env.ARTIFACTS_ENABLED !== 'false',
+      basePath: process.env.ARTIFACTS_BASE_PATH || '/plugins/ee-design-plugin/artifacts',
+      paths: {
+        schematics: process.env.ARTIFACTS_SCHEMATICS_PATH || '/plugins/ee-design-plugin/artifacts/schematics',
+        pcbLayouts: process.env.ARTIFACTS_PCB_LAYOUTS_PATH || '/plugins/ee-design-plugin/artifacts/pcb-layouts',
+        threeDRenders: process.env.ARTIFACTS_3D_RENDERS_PATH || '/plugins/ee-design-plugin/artifacts/3d-renders',
+        gerbers: process.env.ARTIFACTS_GERBERS_PATH || '/plugins/ee-design-plugin/artifacts/gerbers',
+        bom: process.env.ARTIFACTS_BOM_PATH || '/plugins/ee-design-plugin/artifacts/bom',
+        benchTesting: process.env.ARTIFACTS_BENCH_TESTING_PATH || '/plugins/ee-design-plugin/artifacts/bench-testing',
+        drcReports: process.env.ARTIFACTS_DRC_REPORTS_PATH || '/plugins/ee-design-plugin/artifacts/drc-reports',
+        simulations: process.env.ARTIFACTS_SIMULATIONS_PATH || '/plugins/ee-design-plugin/artifacts/simulations',
+        validationReports: process.env.ARTIFACTS_VALIDATION_REPORTS_PATH || '/plugins/ee-design-plugin/artifacts/validation-reports',
+      },
+      retentionDays: parseInt(process.env.ARTIFACTS_RETENTION_DAYS || '90', 10),
+      syncEnabled: process.env.ARTIFACTS_SYNC_ENABLED !== 'false',
     },
   };
 
