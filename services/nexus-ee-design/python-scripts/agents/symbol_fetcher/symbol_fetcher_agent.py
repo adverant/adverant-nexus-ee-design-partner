@@ -301,36 +301,70 @@ class SymbolFetcherAgent:
         Fetch a generic passive symbol (C, R, L) from Device library.
 
         These are standard KiCad symbols for passives that are always available.
+        Falls back to GitHub if no local KiCad installation.
         """
+        # First try local KiCad installation
         kicad_paths = _get_kicad_install_paths()
+        lib_content = None
 
         for kicad_path in kicad_paths:
             device_lib = kicad_path / "Device.kicad_sym"
-            if not device_lib.exists():
-                continue
+            if device_lib.exists():
+                try:
+                    lib_content = device_lib.read_text(encoding='utf-8')
+                    logger.debug(f"Using local Device library: {device_lib}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Error reading local Device library: {e}")
 
-            try:
-                lib_content = device_lib.read_text(encoding='utf-8')
+        # If no local library, try fetching from GitHub and caching
+        if not lib_content:
+            cached_device_lib = self.cache_path / "_libraries" / "Device.kicad_sym"
 
-                # Try to find the generic symbol
-                symbol_sexp = self._extract_symbol_from_library(lib_content, generic_symbol)
-                if symbol_sexp:
-                    logger.info(f"Found generic symbol '{generic_symbol}' for {original_part}")
-                    return FetchedSymbol(
-                        part_number=original_part,  # Keep original part number
-                        manufacturer=None,
-                        symbol_sexp=symbol_sexp,
-                        source=SymbolSource.KICAD_LOCAL_INSTALL,
-                        metadata={
-                            'library': 'Device',
-                            'library_path': str(device_lib),
-                            'match_type': 'generic_passive',
-                            'generic_symbol': generic_symbol,
-                        }
-                    )
+            # Check cache first
+            if cached_device_lib.exists():
+                try:
+                    lib_content = cached_device_lib.read_text(encoding='utf-8')
+                    logger.debug("Using cached Device library from GitHub")
+                except Exception as e:
+                    logger.debug(f"Error reading cached Device library: {e}")
 
-            except Exception as e:
-                logger.debug(f"Error fetching generic passive {generic_symbol}: {e}")
+            # Fetch from GitHub if not in cache
+            if not lib_content:
+                try:
+                    logger.info("Fetching Device library from GitHub (no local KiCad)")
+                    url = "https://raw.githubusercontent.com/KiCad/kicad-symbols/master/Device.kicad_sym"
+                    response = await self.http_client.get(url, timeout=30.0)
+                    if response.status_code == 200:
+                        lib_content = response.text
+                        # Cache for future use
+                        cached_device_lib.parent.mkdir(parents=True, exist_ok=True)
+                        cached_device_lib.write_text(lib_content)
+                        logger.info("Cached Device library from GitHub")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch Device library from GitHub: {e}")
+
+        if not lib_content:
+            return None
+
+        # Try to find the generic symbol
+        try:
+            symbol_sexp = self._extract_symbol_from_library(lib_content, generic_symbol)
+            if symbol_sexp:
+                logger.info(f"Found generic symbol '{generic_symbol}' for {original_part}")
+                return FetchedSymbol(
+                    part_number=original_part,  # Keep original part number
+                    manufacturer=None,
+                    symbol_sexp=symbol_sexp,
+                    source=SymbolSource.KICAD_OFFICIAL,
+                    metadata={
+                        'library': 'Device',
+                        'match_type': 'generic_passive',
+                        'generic_symbol': generic_symbol,
+                    }
+                )
+        except Exception as e:
+            logger.debug(f"Error extracting generic passive {generic_symbol}: {e}")
 
         return None
 
@@ -432,44 +466,114 @@ class SymbolFetcherAgent:
 
         Searches the official KiCad symbol libraries installed on the local system.
         These libraries contain multiple symbols per file (e.g., MCU_ST_STM32G4.kicad_sym).
+        Falls back to GitHub download when no local installation is found.
         """
         kicad_paths = _get_kicad_install_paths()
-
-        if not kicad_paths:
-            logger.debug("No local KiCad installation found")
-            return None
 
         # Get list of likely library names for this part
         library_names = self._guess_kicad_library(part_number, manufacturer)
 
-        for kicad_path in kicad_paths:
-            logger.debug(f"Searching KiCad libraries in: {kicad_path}")
+        # Try local KiCad installation first
+        if kicad_paths:
+            for kicad_path in kicad_paths:
+                logger.debug(f"Searching KiCad libraries in: {kicad_path}")
 
-            # First try the guessed library names
-            for lib_name in library_names:
-                lib_path = kicad_path / f"{lib_name}.kicad_sym"
-                if lib_path.exists():
+                # First try the guessed library names
+                for lib_name in library_names:
+                    lib_path = kicad_path / f"{lib_name}.kicad_sym"
+                    if lib_path.exists():
+                        result = await self._search_symbol_in_library_file(
+                            lib_path, part_number, manufacturer
+                        )
+                        if result:
+                            return result
+
+                # If not found, scan all library files (skip problematic libraries)
+                for lib_file in kicad_path.glob("*.kicad_sym"):
+                    # Skip already checked libraries
+                    if lib_file.stem in library_names:
+                        continue
+
+                    # Skip simulation and other non-component libraries
+                    if lib_file.stem in self.SKIP_LIBRARIES:
+                        continue
+
                     result = await self._search_symbol_in_library_file(
-                        lib_path, part_number, manufacturer
+                        lib_file, part_number, manufacturer
                     )
                     if result:
                         return result
+        else:
+            # No local KiCad - try fetching libraries from GitHub
+            logger.debug("No local KiCad installation, trying GitHub mirror")
+            cached_libs_dir = self.cache_path / "_libraries"
+            cached_libs_dir.mkdir(parents=True, exist_ok=True)
 
-            # If not found, scan all library files (skip problematic libraries)
-            for lib_file in kicad_path.glob("*.kicad_sym"):
-                # Skip already checked libraries
-                if lib_file.stem in library_names:
-                    continue
+            for lib_name in library_names:
+                # Check cache first
+                cached_lib = cached_libs_dir / f"{lib_name}.kicad_sym"
+                lib_content = None
 
-                # Skip simulation and other non-component libraries
-                if lib_file.stem in self.SKIP_LIBRARIES:
-                    continue
+                if cached_lib.exists():
+                    try:
+                        lib_content = cached_lib.read_text(encoding='utf-8')
+                    except Exception:
+                        pass
 
-                result = await self._search_symbol_in_library_file(
-                    lib_file, part_number, manufacturer
-                )
-                if result:
-                    return result
+                # Fetch from GitHub if not cached
+                if not lib_content:
+                    try:
+                        url = f"https://raw.githubusercontent.com/KiCad/kicad-symbols/master/{lib_name}.kicad_sym"
+                        response = await self.http_client.get(url, timeout=30.0)
+                        if response.status_code == 200:
+                            lib_content = response.text
+                            # Cache for future use
+                            cached_lib.write_text(lib_content)
+                            logger.info(f"Cached {lib_name} library from GitHub")
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch {lib_name} from GitHub: {e}")
+                        continue
+
+                if lib_content:
+                    # Search for the symbol in the fetched library
+                    symbol_sexp = self._extract_symbol_from_library(lib_content, part_number)
+                    if symbol_sexp:
+                        logger.info(f"Found {part_number} in GitHub {lib_name}")
+                        return FetchedSymbol(
+                            part_number=part_number,
+                            manufacturer=manufacturer,
+                            symbol_sexp=symbol_sexp,
+                            source=SymbolSource.KICAD_OFFICIAL,
+                            metadata={
+                                'library': lib_name,
+                                'match_type': 'github_fetch',
+                                'cached': True
+                            }
+                        )
+
+                    # Try fuzzy match with all symbols in library
+                    symbol_names = [
+                        name for name in re.findall(r'\(symbol\s+"([^"]+)"', lib_content)
+                        if not re.search(r'_\d+_\d+$', name)
+                    ]
+
+                    for symbol_name in symbol_names:
+                        if self._match_kicad_symbol_name(part_number, symbol_name):
+                            symbol_sexp = self._extract_symbol_from_library(lib_content, symbol_name)
+                            if symbol_sexp:
+                                logger.info(f"Found fuzzy match: {symbol_name} for {part_number} in GitHub {lib_name}")
+                                return FetchedSymbol(
+                                    part_number=symbol_name,
+                                    manufacturer=manufacturer,
+                                    symbol_sexp=symbol_sexp,
+                                    source=SymbolSource.KICAD_OFFICIAL,
+                                    metadata={
+                                        'library': lib_name,
+                                        'match_type': 'fuzzy_github_fetch',
+                                        'original_query': part_number,
+                                        'cached': True
+                                    }
+                                )
 
         return None
 
