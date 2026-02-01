@@ -39,6 +39,7 @@ from agents.standards_compliance import StandardsComplianceAgent
 from agents.wire_router import EnhancedWireRouter
 from agents.functional_validator import MAPOFunctionalValidator
 from agents.visual_validator import DualLLMVisualValidator, ValidationLoop
+from agents.artifact_exporter import ArtifactExporterAgent, ArtifactConfig, ExportResult
 from validation.schematic_vision_validator import (
     SchematicVisionValidator,
     MAPOSchematicLoop,
@@ -72,6 +73,14 @@ class PipelineConfig:
         default_factory=lambda: Path(__file__).parent / "output"
     )
 
+    # Artifact Export Configuration (auto-export to PDF/image and NFS sync)
+    auto_export: bool = True  # Enable auto-export after generation
+    export_pdf: bool = True
+    export_svg: bool = True
+    export_png: bool = True
+    nfs_base_path: str = "/Volumes/Nexus/plugins/ee-design-plugin/artifacts"
+    project_id: Optional[str] = None
+
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.symbol_cache_path.mkdir(parents=True, exist_ok=True)
@@ -91,6 +100,14 @@ class PipelineResult:
     total_time_seconds: float = 0
     errors: List[str] = field(default_factory=list)
 
+    # Artifact export results (PDF, image, NFS sync)
+    export_result: Optional[ExportResult] = None
+    pdf_path: Optional[Path] = None
+    svg_path: Optional[Path] = None
+    png_path: Optional[Path] = None
+    nfs_synced: bool = False
+    nfs_paths: Dict[str, str] = field(default_factory=dict)
+
     def to_dict(self) -> Dict:
         return {
             "success": self.success,
@@ -104,6 +121,12 @@ class PipelineResult:
             "iterations": self.iterations,
             "total_time_seconds": self.total_time_seconds,
             "errors": self.errors,
+            # Export results
+            "pdf_path": str(self.pdf_path) if self.pdf_path else None,
+            "svg_path": str(self.svg_path) if self.svg_path else None,
+            "png_path": str(self.png_path) if self.png_path else None,
+            "nfs_synced": self.nfs_synced,
+            "nfs_paths": self.nfs_paths,
         }
 
     def to_json(self) -> str:
@@ -138,6 +161,7 @@ class MAPOSchematicPipeline:
         self._visual_validator: Optional[DualLLMVisualValidator] = None
         self._validator: Optional[SchematicVisionValidator] = None
         self._renderer: Optional[Any] = None  # KiCanvas renderer
+        self._artifact_exporter: Optional[ArtifactExporterAgent] = None  # PDF/image export + NFS sync
 
     async def initialize(self):
         """Initialize all pipeline components."""
@@ -197,6 +221,19 @@ class MAPOSchematicPipeline:
         )
         self._validator.PASS_THRESHOLD = self.config.validation_threshold
         logger.info("Vision validator initialized")
+
+        # Initialize artifact exporter for auto-export to PDF/image and NFS sync
+        if self.config.auto_export:
+            artifact_config = ArtifactConfig(
+                nfs_base_path=self.config.nfs_base_path,
+                export_pdf=self.config.export_pdf,
+                export_svg=self.config.export_svg,
+                export_png=self.config.export_png,
+                project_id=self.config.project_id,
+            )
+            self._artifact_exporter = ArtifactExporterAgent(artifact_config)
+            nfs_status = self._artifact_exporter.get_nfs_status()
+            logger.info(f"Artifact exporter initialized (NFS: {nfs_status['mounted']}, path: {nfs_status['nfs_path']})")
 
         logger.info("Pipeline initialization complete (all MAPO agents ready)")
 
@@ -454,6 +491,37 @@ class MAPOSchematicPipeline:
 
             result.success = True
 
+            # Phase 6: Auto-export to PDF/image and sync to NFS
+            if self._artifact_exporter and result.schematic_path:
+                logger.info("Starting auto-export to PDF/image and NFS sync...")
+
+                export_result = await self._artifact_exporter.export_all(
+                    schematic_path=result.schematic_path,
+                    project_id=self.config.project_id,
+                    design_name=design_name,
+                )
+
+                result.export_result = export_result
+                result.pdf_path = export_result.pdf_path
+                result.svg_path = export_result.svg_path
+                result.png_path = export_result.png_path
+                result.nfs_synced = export_result.nfs_synced
+                result.nfs_paths = export_result.nfs_paths
+
+                if export_result.success:
+                    logger.info(f"Auto-export complete:")
+                    if export_result.pdf_path:
+                        logger.info(f"  PDF: {export_result.pdf_path}")
+                    if export_result.svg_path:
+                        logger.info(f"  SVG: {export_result.svg_path}")
+                    if export_result.png_path:
+                        logger.info(f"  PNG: {export_result.png_path}")
+                    if export_result.nfs_synced:
+                        logger.info(f"  NFS synced: {export_result.nfs_paths}")
+                else:
+                    logger.warning(f"Auto-export had errors: {export_result.errors}")
+                    result.errors.extend(export_result.errors)
+
         except Exception as e:
             logger.error(f"Pipeline error: {e}", exc_info=True)
             result.errors.append(str(e))
@@ -700,6 +768,15 @@ if __name__ == "__main__":
     parser.add_argument("--skip-validation", action="store_true", help="Skip MAPO validation")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
+    # Export options
+    parser.add_argument("--no-export", action="store_true", help="Skip auto-export to PDF/image")
+    parser.add_argument("--nfs-path", type=str, default="/Volumes/Nexus/plugins/ee-design-plugin/artifacts",
+                        help="NFS share base path for artifacts")
+    parser.add_argument("--project-id", type=str, help="Project ID for organizing artifacts")
+    parser.add_argument("--no-pdf", action="store_true", help="Skip PDF export")
+    parser.add_argument("--no-svg", action="store_true", help="Skip SVG export")
+    parser.add_argument("--no-png", action="store_true", help="Skip PNG export")
+
     args = parser.parse_args()
 
     # Configure logging
@@ -726,20 +803,37 @@ if __name__ == "__main__":
                 {"part_number": "1k", "category": "Resistor", "value": "1k"},
             ]
 
+        # Create pipeline config with export settings
+        config = PipelineConfig(
+            auto_export=not args.no_export,
+            export_pdf=not args.no_pdf,
+            export_svg=not args.no_svg,
+            export_png=not args.no_png,
+            nfs_base_path=args.nfs_path,
+            project_id=args.project_id,
+        )
+
         print(f"\n{'='*60}")
         print("MAPO Schematic Generation Pipeline")
         print(f"{'='*60}")
         print(f"Design Intent: {args.intent}")
         print(f"Components: {len(bom)}")
         print(f"Skip Validation: {args.skip_validation}")
+        print(f"Auto-Export: {config.auto_export}")
+        print(f"NFS Path: {config.nfs_base_path}")
         print(f"{'='*60}\n")
 
-        result = await generate_schematic(
-            bom=bom,
-            design_intent=args.intent,
-            design_name=args.output,
-            skip_validation=args.skip_validation
-        )
+        # Use custom pipeline with export config
+        pipeline = MAPOSchematicPipeline(config)
+        try:
+            result = await pipeline.generate(
+                bom=bom,
+                design_intent=args.intent,
+                design_name=args.output,
+                skip_validation=args.skip_validation
+            )
+        finally:
+            await pipeline.close()
 
         print(f"\n{'='*60}")
         print("RESULTS")
@@ -756,6 +850,26 @@ if __name__ == "__main__":
             print(f"\nValidation Score: {result.validation_report.overall_score:.2%}")
             print(f"Validation Passed: {result.validation_report.passed}")
             print(f"Critical Issues: {len(result.validation_report.critical_issues)}")
+
+        # Show export results
+        print(f"\nExport Artifacts:")
+        if result.pdf_path:
+            print(f"  PDF: {result.pdf_path}")
+        else:
+            print(f"  PDF: (not exported)")
+        if result.svg_path:
+            print(f"  SVG: {result.svg_path}")
+        else:
+            print(f"  SVG: (not exported)")
+        if result.png_path:
+            print(f"  PNG: {result.png_path}")
+        else:
+            print(f"  PNG: (not exported)")
+
+        print(f"\nNFS Sync: {'SYNCED' if result.nfs_synced else 'NOT SYNCED'}")
+        if result.nfs_paths:
+            for artifact_type, path in result.nfs_paths.items():
+                print(f"  {artifact_type}: {path}")
 
         if result.errors:
             print(f"\nErrors:")
