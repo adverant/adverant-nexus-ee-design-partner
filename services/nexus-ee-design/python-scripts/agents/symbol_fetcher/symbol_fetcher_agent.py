@@ -203,12 +203,24 @@ class SymbolFetcherAgent:
             raise ImportError("httpx package required. Install with: pip install httpx")
         self.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
 
-        # Initialize Anthropic client for LLM generation
+        # Initialize Anthropic client for LLM generation via OpenRouter
         self.anthropic_client = None
         if anthropic:
-            self.anthropic_client = anthropic.Anthropic(
-                api_key=anthropic_api_key
-            ) if anthropic_api_key else anthropic.Anthropic()
+            # Prefer OpenRouter API key, fallback to direct Anthropic API key
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+            anthropic_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+            if openrouter_key:
+                # Use OpenRouter for LLM (supports Claude via their API)
+                self.anthropic_client = anthropic.Anthropic(
+                    api_key=openrouter_key,
+                    base_url="https://openrouter.ai/api/v1"
+                )
+            elif anthropic_key:
+                # Fallback to direct Anthropic API
+                self.anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
+            else:
+                logger.warning("No LLM API key found (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
 
         # Ensure cache directory exists
         self.cache_path.mkdir(parents=True, exist_ok=True)
@@ -602,22 +614,23 @@ class SymbolFetcherAgent:
         manufacturer: Optional[str]
     ) -> Optional[FetchedSymbol]:
         """
-        Fetch from KiCad official symbol libraries on GitLab.
+        Fetch from KiCad official symbol libraries on GitHub mirror.
 
         The official library is organized by component category.
+        Note: GitLab requires auth, so we use the GitHub mirror instead.
         """
         # Map part numbers to likely library files
         library_mapping = self._guess_kicad_library(part_number, manufacturer)
 
         for library_name in library_mapping:
             try:
-                # GitLab raw file URL
+                # Use GitHub mirror (no auth required) instead of GitLab
                 url = (
-                    f"https://gitlab.com/kicad/kicad-symbols/-/raw/master/"
+                    f"https://raw.githubusercontent.com/KiCad/kicad-symbols/master/"
                     f"{library_name}.kicad_sym"
                 )
 
-                response = await self.http_client.get(url)
+                response = await self.http_client.get(url, follow_redirects=True)
                 if response.status_code == 200:
                     library_content = response.text
 
@@ -633,7 +646,7 @@ class SymbolFetcherAgent:
                             source=SymbolSource.KICAD_OFFICIAL,
                             metadata={
                                 'library': library_name,
-                                'gitlab_url': url
+                                'github_url': url
                             }
                         )
 

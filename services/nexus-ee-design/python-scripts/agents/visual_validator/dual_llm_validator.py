@@ -349,24 +349,43 @@ RESPOND IN THIS JSON FORMAT:
         openrouter_api_key: Optional[str] = None
     ):
         """
-        Initialize the dual-LLM validator.
+        Initialize the dual-LLM validator with OpenRouter support.
 
         Args:
-            opus_client: Anthropic client for Opus 4.5
-            kimi_client: Moonshot API client for Kimi K2.5
-            openrouter_api_key: OpenRouter API key (can access both models)
+            opus_client: Anthropic client for Opus 4.5 (optional, auto-configured)
+            kimi_client: Moonshot API client for Kimi K2.5 (optional)
+            openrouter_api_key: OpenRouter API key (recommended - can access both models)
         """
-        self.opus_client = opus_client
         self.kimi_client = kimi_client
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
-        # Import clients if not provided
-        if not self.opus_client:
+        # Configure Opus client via OpenRouter (preferred) or direct Anthropic API
+        if opus_client:
+            self.opus_client = opus_client
+            self.opus_model = "claude-opus-4-5-20250514"
+        elif self.openrouter_api_key:
+            try:
+                import anthropic
+                self.opus_client = anthropic.Anthropic(
+                    api_key=self.openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1"
+                )
+                self.opus_model = "anthropic/claude-opus-4.5"  # OpenRouter format
+                logger.info("Opus client configured via OpenRouter")
+            except ImportError:
+                logger.warning("Anthropic client not available")
+                self.opus_client = None
+                self.opus_model = None
+        else:
+            # Fallback to direct Anthropic API
             try:
                 import anthropic
                 self.opus_client = anthropic.Anthropic()
-            except ImportError:
-                logger.warning("Anthropic client not available")
+                self.opus_model = "claude-opus-4-5-20250514"
+            except Exception as e:
+                logger.warning(f"Anthropic client not available: {e}")
+                self.opus_client = None
+                self.opus_model = None
 
     async def validate(
         self,

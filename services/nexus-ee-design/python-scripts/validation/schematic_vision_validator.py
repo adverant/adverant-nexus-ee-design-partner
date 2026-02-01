@@ -277,20 +277,35 @@ Identify deviations from reference designs that may cause issues."""
         api_key: Optional[str] = None
     ):
         """
-        Initialize the validator.
+        Initialize the validator with OpenRouter support.
 
         Args:
             primary_model: Model for expert validation (faster, cheaper)
             verification_model: Model for fix generation (more capable)
-            api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            api_key: API key (deprecated - use OPENROUTER_API_KEY env var)
         """
-        self.primary_model = primary_model
-        self.verification_model = verification_model
-
         if anthropic is None:
             raise ImportError("anthropic package required. Install with: pip install anthropic")
 
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        # Prefer OpenRouter, fallback to direct Anthropic API
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+        if openrouter_key:
+            self.client = anthropic.Anthropic(
+                api_key=openrouter_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+            # Map to OpenRouter model names
+            self.primary_model = "anthropic/claude-sonnet-4"  # Faster for validation
+            self.verification_model = "anthropic/claude-opus-4.5"  # Best for fixes
+            logger.info("Vision validator using OpenRouter")
+        elif anthropic_key:
+            self.client = anthropic.Anthropic(api_key=anthropic_key)
+            self.primary_model = primary_model
+            self.verification_model = verification_model
+        else:
+            raise ValueError("No API key found. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY")
 
     async def _emit_progress(
         self,

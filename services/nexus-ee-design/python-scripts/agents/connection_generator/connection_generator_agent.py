@@ -116,10 +116,25 @@ class ConnectionGeneratorAgent:
         "ADC": ["ADC", "AIN", "ANALOG"],
     }
 
-    def __init__(self, anthropic_api_key: Optional[str] = None):
-        """Initialize the connection generator."""
-        self.api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self.client = anthropic.Anthropic(api_key=self.api_key) if self.api_key else None
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize the connection generator with OpenRouter support."""
+        # Prefer OpenRouter, fallback to direct Anthropic API
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+
+        if openrouter_key:
+            self.client = anthropic.Anthropic(
+                api_key=openrouter_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+            self.model = "anthropic/claude-opus-4.5"  # OpenRouter model format
+        elif anthropic_key:
+            self.client = anthropic.Anthropic(api_key=anthropic_key)
+            self.model = "claude-opus-4-5-20250514"  # Direct Anthropic model
+        else:
+            self.client = None
+            self.model = None
+            logger.warning("No LLM API key found (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
 
     async def generate_connections(
         self,

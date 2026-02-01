@@ -310,17 +310,18 @@ class MAPOSchematicPipeline:
                 logger.info("Running layout optimization...")
                 for sheet in sheets:
                     optimization_result = self._layout_optimizer.optimize_layout(
-                        components=sheet.symbols,
+                        symbols=sheet.symbols,
                         connections=connection_objs if connection_objs else [],
-                        sheet_size=self._assembler.DEFAULT_SHEET_SIZE
+                        bom=bom
                     )
                     # Apply optimized positions
-                    for comp_ref, position in optimization_result.positions.items():
+                    for comp_ref, position in optimization_result.optimized_positions.items():
                         for symbol in sheet.symbols:
                             if symbol.reference == comp_ref:
                                 symbol.position = position
                                 break
-                    logger.info(f"Layout optimization: {optimization_result.quality_score:.1%} score")
+                    success_str = "PASSED" if optimization_result.success else "needs work"
+                    logger.info(f"Layout optimization: {success_str}, {len(optimization_result.improvements)} improvements")
 
             # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
             if self._standards_compliance:
