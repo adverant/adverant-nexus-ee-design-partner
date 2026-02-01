@@ -10,6 +10,7 @@ Author: Nexus EE Design Team
 import asyncio
 import base64
 import json
+import os
 import re
 import logging
 from dataclasses import dataclass, field
