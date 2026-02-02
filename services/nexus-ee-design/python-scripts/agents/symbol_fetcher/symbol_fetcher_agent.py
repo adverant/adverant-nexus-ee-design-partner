@@ -252,26 +252,22 @@ class SymbolFetcherAgent:
         # Initialize HTTP client
         if httpx is None:
             raise ImportError("httpx package required. Install with: pip install httpx")
-        self.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        self.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
 
-        # Initialize Anthropic client for LLM generation via OpenRouter
+        # OpenRouter configuration for LLM-based symbol matching
+        # IMPORTANT: OpenRouter uses OpenAI-compatible API, NOT Anthropic API format
+        self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+        self._openrouter_base_url = "https://openrouter.ai/api/v1"
+        self._openrouter_model = "anthropic/claude-sonnet-4-20250514"  # Fast, accurate
+
+        # Direct Anthropic API (fallback)
         self.anthropic_client = None
-        if anthropic:
-            # Prefer OpenRouter API key, fallback to direct Anthropic API key
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-            anthropic_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        anthropic_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if anthropic and anthropic_key and not self._openrouter_api_key:
+            self.anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
 
-            if openrouter_key:
-                # Use OpenRouter for LLM (supports Claude via their API)
-                self.anthropic_client = anthropic.Anthropic(
-                    api_key=openrouter_key,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-            elif anthropic_key:
-                # Fallback to direct Anthropic API
-                self.anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
-            else:
-                logger.warning("No LLM API key found (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
+        if not self._openrouter_api_key and not self.anthropic_client:
+            logger.warning("No LLM API key found (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
 
         # Ensure cache directory exists
         self.cache_path.mkdir(parents=True, exist_ok=True)
@@ -358,8 +354,33 @@ class SymbolFetcherAgent:
             except Exception as e:
                 errors.append(f"generic_passive: {str(e)}")
 
-        # Try LLM generation if API key available
-        if self.anthropic_client:
+        # Search online for part information (Octopart, SnapEDA, manufacturer sites)
+        sources_tried.append("online_search")
+        try:
+            online_result = await self._search_online_for_part(part_number, manufacturer)
+            if online_result:
+                logger.info(f"Found part info online: {online_result.get('source')}")
+                if online_result.get('has_kicad_symbol'):
+                    errors.append(f"online_search: Symbol available on {online_result.get('source')} - manual download required: {online_result.get('url', 'N/A')}")
+                else:
+                    errors.append(f"online_search: Part exists on {online_result.get('source')} but no KiCad symbol available")
+            else:
+                errors.append("online_search: Part not found on Octopart or SnapEDA")
+        except Exception as e:
+            errors.append(f"online_search: {str(e)}")
+
+        # Try LLM-based symbol generation if API key available (OpenRouter)
+        if self._openrouter_api_key:
+            sources_tried.append("llm_generated")
+            try:
+                logger.warning(f"All sources exhausted for {part_number}, generating with LLM")
+                result = await self._generate_symbol_with_llm(part_number, manufacturer, category)
+                if result and not result.metadata.get("is_placeholder", False):
+                    return result
+                errors.append("llm_generated: Generation returned placeholder")
+            except Exception as e:
+                errors.append(f"llm_generated: {str(e)}")
+        elif self.anthropic_client:
             sources_tried.append("llm_generated")
             try:
                 logger.warning(f"All sources exhausted for {part_number}, generating with LLM")
@@ -372,28 +393,30 @@ class SymbolFetcherAgent:
         else:
             errors.append("llm_generated: No API key (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
 
-        # All sources exhausted
+        # All sources exhausted - ALWAYS raise exception now, NO PLACEHOLDERS
+        # User must resolve missing parts before schematic generation can proceed
         logger.error(
-            f"Symbol resolution FAILED for {part_number}. "
-            f"Tried {len(sources_tried)} sources: {', '.join(sources_tried)}"
+            f"CRITICAL: Symbol resolution FAILED for '{part_number}' (manufacturer: {manufacturer or 'Unknown'}). "
+            f"Tried {len(sources_tried)} sources: {', '.join(sources_tried)}. "
+            f"GENERATION STOPPED - this part must be resolved manually."
         )
 
-        # If placeholder not allowed, raise detailed exception
-        if not allow_placeholder:
-            raise SymbolResolutionError(
-                part_number=part_number,
-                category=category,
-                sources_tried=sources_tried,
-                errors=errors,
-                suggestion="Configure KICAD_WORKER_URL or add symbol to local cache"
-            )
+        # Build helpful suggestion based on what we found
+        suggestion = "Unable to find this part in any symbol source. Options:\n"
+        suggestion += "1. Check the part number is correct (search DigiKey/Mouser to verify)\n"
+        suggestion += "2. Download KiCad symbol from SnapEDA: https://www.snapeda.com/search/?q=" + part_number + "\n"
+        suggestion += "3. Download from Ultra Librarian: https://www.ultralibrarian.com/search?q=" + part_number + "\n"
+        suggestion += "4. Add symbol manually to project symbol_cache/ directory\n"
+        suggestion += "5. Set OPENROUTER_API_KEY for LLM-based symbol generation"
 
-        # Return placeholder with error tracking (for backwards compatibility)
-        placeholder = self._create_placeholder_symbol(part_number, manufacturer, category)
-        placeholder.metadata["sources_tried"] = sources_tried
-        placeholder.metadata["resolution_errors"] = errors
-        placeholder.metadata["error"] = f"All {len(sources_tried)} sources failed"
-        return placeholder
+        # ALWAYS raise exception - no more placeholder fallback
+        raise SymbolResolutionError(
+            part_number=part_number,
+            category=category,
+            sources_tried=sources_tried,
+            errors=errors,
+            suggestion=suggestion
+        )
 
     async def _fetch_generic_passive(
         self,
@@ -613,8 +636,8 @@ class SymbolFetcherAgent:
                             }
                         )
 
-            # If specific symbol not found, try FUZZY MATCHING on guessed libraries
-            # KiCad uses wildcard naming like STM32G431CBTx that should match STM32G431CBT6
+            # If specific symbol not found, use LLM to find best match in guessed libraries
+            # LLM understands KiCad naming conventions: wildcards (x), package variants (_6-8-B_), etc.
             for lib_name in library_names:
                 try:
                     lib_url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}"
@@ -623,32 +646,35 @@ class SymbolFetcherAgent:
                         lib_data = lib_response.json()
                         lib_content = lib_data.get('content', '')
                         if lib_content:
-                            # Extract all symbol names from the library
+                            # Extract all symbol names from the library (filter out sub-symbols)
                             symbol_names = [
                                 name for name in re.findall(r'\(symbol\s+"([^"]+)"', lib_content)
-                                if not re.search(r'_\d+_\d+$', name)  # Skip sub-symbols
+                                if not re.search(r'_\d+_\d+$', name)  # Skip sub-symbols like _0_1, _1_1
                             ]
 
-                            # Try fuzzy matching against each symbol
-                            for symbol_name in symbol_names:
-                                if self._match_kicad_symbol_name(part_number, symbol_name):
-                                    symbol_sexp = self._extract_symbol_from_library(lib_content, symbol_name)
-                                    if symbol_sexp:
-                                        logger.info(f"Fuzzy match: '{symbol_name}' for '{part_number}' in '{lib_name}' from KiCad worker")
-                                        return FetchedSymbol(
-                                            part_number=symbol_name,  # Use actual KiCad symbol name
-                                            manufacturer=manufacturer,
-                                            symbol_sexp=symbol_sexp,
-                                            source=SymbolSource.KICAD_WORKER_INTERNAL,
-                                            metadata={
-                                                'library': lib_name,
-                                                'match_type': 'fuzzy_worker',
-                                                'original_query': part_number,
-                                                'matched_symbol': symbol_name
-                                            }
-                                        )
+                            # Use LLM to find the best matching symbol
+                            matched_symbol = await self._llm_find_best_symbol_match(
+                                part_number, manufacturer, symbol_names, lib_name
+                            )
+
+                            if matched_symbol:
+                                symbol_sexp = self._extract_symbol_from_library(lib_content, matched_symbol)
+                                if symbol_sexp:
+                                    logger.info(f"LLM matched: '{matched_symbol}' for '{part_number}' in '{lib_name}'")
+                                    return FetchedSymbol(
+                                        part_number=matched_symbol,  # Use actual KiCad symbol name
+                                        manufacturer=manufacturer,
+                                        symbol_sexp=symbol_sexp,
+                                        source=SymbolSource.KICAD_WORKER_INTERNAL,
+                                        metadata={
+                                            'library': lib_name,
+                                            'match_type': 'llm_matched',
+                                            'original_query': part_number,
+                                            'matched_symbol': matched_symbol
+                                        }
+                                    )
                 except Exception as e:
-                    logger.debug(f"Fuzzy match failed for {lib_name}: {e}")
+                    logger.debug(f"LLM match failed for {lib_name}: {e}")
 
             # If still not found, try searching all libraries (broad search with fuzzy)
             list_url = f"{KICAD_WORKER_URL}/v1/symbols"
@@ -842,78 +868,192 @@ class SymbolFetcherAgent:
 
         return None
 
+    async def _llm_find_best_symbol_match(
+        self,
+        part_number: str,
+        manufacturer: Optional[str],
+        available_symbols: List[str],
+        library_name: str
+    ) -> Optional[str]:
+        """
+        Use LLM to find the best matching KiCad symbol for a part number.
+
+        NO REGEX MATCHING - Uses Claude to intelligently match part numbers to
+        KiCad's naming conventions (wildcards, package suffixes, etc.).
+
+        Args:
+            part_number: The actual part number (e.g., "STM32G431CBT6")
+            manufacturer: Manufacturer name (e.g., "STMicroelectronics")
+            available_symbols: List of symbol names in the KiCad library
+            library_name: Name of the library being searched
+
+        Returns:
+            The best matching symbol name, or None if no match found
+        """
+        if not self._openrouter_api_key:
+            logger.warning("No OpenRouter API key for LLM symbol matching")
+            return None
+
+        # Filter to symbols that have some textual similarity (basic pre-filter)
+        # This reduces the list size for the LLM to process
+        part_upper = part_number.upper()
+        part_prefix = part_upper[:6] if len(part_upper) >= 6 else part_upper[:3]
+        relevant_symbols = [
+            s for s in available_symbols
+            if part_prefix[:3] in s.upper() or s.upper()[:3] in part_prefix
+        ]
+
+        # If no relevant symbols found with prefix, include all (small list)
+        if not relevant_symbols and len(available_symbols) <= 50:
+            relevant_symbols = available_symbols
+        elif not relevant_symbols:
+            # Try broader search
+            relevant_symbols = [
+                s for s in available_symbols
+                if any(c in s.upper() for c in part_upper[:4])
+            ][:100]  # Limit to 100
+
+        if not relevant_symbols:
+            logger.debug(f"No potentially matching symbols found for {part_number}")
+            return None
+
+        prompt = f"""You are an electronic component expert matching part numbers to KiCad symbols.
+
+TASK: Find the EXACT KiCad symbol that matches this part number.
+
+Part Number: {part_number}
+Manufacturer: {manufacturer or 'Unknown'}
+KiCad Library: {library_name}
+
+Available symbols in this library:
+{chr(10).join(relevant_symbols[:80])}
+
+MATCHING RULES (KiCad naming conventions):
+1. 'x' in KiCad symbols is a wildcard: "STM32G431C_6-8-B_Tx" matches STM32G431CBT6
+2. "_6-8-B_" means "6, 8, or B package variant" - matches C6, C8, or CB
+3. Package suffixes (T6, T7, TX) may differ - T6 part matches Tx symbol
+4. Temperature grades may be omitted in symbols
+5. Some symbols use underscores/dashes where parts use none
+
+RESPOND WITH ONLY:
+- The EXACT symbol name from the list above that matches the part
+- "NO_MATCH" if no symbol matches this part
+
+DO NOT explain. Just output the symbol name or NO_MATCH."""
+
+        try:
+            response = await self.http_client.post(
+                f"{self._openrouter_base_url}/chat/completions",
+                json={
+                    "model": self._openrouter_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 100,
+                    "temperature": 0,
+                },
+                headers={
+                    "Authorization": f"Bearer {self._openrouter_api_key}",
+                    "HTTP-Referer": "https://adverant.ai",
+                    "X-Title": "Nexus EE Design Symbol Matcher",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0
+            )
+
+            if response.status_code != 200:
+                logger.error(f"OpenRouter API error: {response.status_code} - {response.text}")
+                return None
+
+            result = response.json()
+            matched_symbol = result['choices'][0]['message']['content'].strip()
+
+            if matched_symbol == "NO_MATCH":
+                logger.debug(f"LLM found no match for {part_number} in {library_name}")
+                return None
+
+            # Verify the matched symbol is actually in the list
+            if matched_symbol in available_symbols:
+                logger.info(f"LLM matched '{part_number}' to '{matched_symbol}' in {library_name}")
+                return matched_symbol
+            else:
+                # Sometimes LLM returns slightly modified name, find closest
+                for sym in available_symbols:
+                    if matched_symbol.lower() == sym.lower():
+                        logger.info(f"LLM matched '{part_number}' to '{sym}' (case-insensitive)")
+                        return sym
+
+                logger.warning(f"LLM returned '{matched_symbol}' but it's not in the symbol list")
+                return None
+
+        except Exception as e:
+            logger.error(f"LLM symbol matching failed: {e}")
+            return None
+
+    async def _search_online_for_part(
+        self,
+        part_number: str,
+        manufacturer: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Search online for part information when not found in KiCad libraries.
+
+        Searches:
+        1. Octopart API (aggregates DigiKey, Mouser, etc.)
+        2. SnapEDA for KiCad symbols
+        3. Manufacturer websites
+
+        Returns part info including potential symbol sources.
+        """
+        logger.info(f"Searching online for part: {part_number}")
+
+        # Try Octopart search (free tier, no API key needed for basic search)
+        try:
+            search_url = f"https://octopart.com/api/v4/rest/search"
+            params = {"q": part_number, "limit": 5}
+            response = await self.http_client.get(
+                search_url,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=15.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("results"):
+                    logger.info(f"Found {part_number} on Octopart")
+                    return {
+                        "source": "octopart",
+                        "data": data["results"][0],
+                        "part_number": part_number
+                    }
+        except Exception as e:
+            logger.debug(f"Octopart search failed: {e}")
+
+        # Try SnapEDA search (public search, no API key needed)
+        try:
+            snapeda_url = f"https://www.snapeda.com/search/?q={part_number}"
+            response = await self.http_client.get(snapeda_url, timeout=15.0)
+            if response.status_code == 200 and part_number.lower() in response.text.lower():
+                logger.info(f"Found {part_number} on SnapEDA")
+                return {
+                    "source": "snapeda",
+                    "url": snapeda_url,
+                    "part_number": part_number,
+                    "has_kicad_symbol": True
+                }
+        except Exception as e:
+            logger.debug(f"SnapEDA search failed: {e}")
+
+        return None
+
     def _match_kicad_symbol_name(self, query: str, symbol_name: str) -> bool:
         """
-        Check if a query matches a KiCad symbol name.
+        DEPRECATED: Basic regex matching - Use _llm_find_best_symbol_match instead.
 
-        KiCad uses 'x' as a wildcard for package variants in symbol names.
-        For example: STM32G431CBTxZ matches STM32G431CBT6, STM32G431CBT7, etc.
-
-        Also handles common suffixes like temperature grades.
+        This method is kept for backwards compatibility but LLM matching is preferred.
         """
-        # Reject very short symbol names (avoids false positives like "0", "1", "R", etc.)
-        if len(symbol_name) < 4:
-            return False
-
-        # Normalize both strings
-        query_norm = self._normalize_part_number(query)
-        symbol_norm = self._normalize_part_number(symbol_name)
-
-        # Reject if normalized symbol is too short
-        if len(symbol_norm) < 4:
-            return False
-
-        # Exact match
-        if query_norm == symbol_norm:
-            return True
-
-        # Simple containment - but require minimum overlap
-        if len(query_norm) >= 6 and query_norm in symbol_norm:
-            return True
-        if len(symbol_norm) >= 6 and symbol_norm in query_norm:
-            return True
-
-        # Convert KiCad 'x' wildcards to regex pattern
-        # 'x' in symbol name can match any character in query
-        pattern = symbol_norm.replace('X', '.')  # X was uppercased during normalization
-        try:
-            if re.fullmatch(pattern, query_norm):
-                return True
-        except re.error:
-            pass
-
-        # Handle common variations: T6, T7, TX, TxZ, TXZ all refer to package variants
-        # Strip trailing package variant suffixes and compare
-        query_base = re.sub(r'(T[0-9]|TX|TXZ)$', 'T', query_norm)
-        symbol_base = re.sub(r'(T[0-9]|TX|TXZ)$', 'T', symbol_norm)
-        if query_base == symbol_base:
-            return True
-
-        # Strip more aggressively - remove all trailing variant indicators
-        # STM32G431CB matches STM32G431CBTxZ
-        query_core = re.sub(r'[A-Z]?[0-9X]+$', '', query_norm)
-        symbol_core = re.sub(r'[A-Z]?[0-9X]+$', '', symbol_norm)
-        if len(query_core) >= 8 and query_core == symbol_core:
-            return True
-
-        # Levenshtein-like simple distance check for very similar names
-        # This helps with minor typos or suffix differences
-        if len(query_norm) >= 8 and len(symbol_norm) >= 8:
-            # Check if they share the same base (first 8 chars)
-            if query_norm[:8] == symbol_norm[:8]:
-                # And differ only in the suffix
-                diff_len = abs(len(query_norm) - len(symbol_norm))
-                if diff_len <= 3:
-                    return True
-
-        # Handle similar part numbers with slight variations
-        # UCC21530 should match UCC21520 (same family, different model)
-        if len(query_norm) >= 6 and len(symbol_norm) >= 6:
-            # Check if first 6 chars match and last char is a digit
-            if query_norm[:6] == symbol_norm[:6]:
-                return True
-
-        return False
+        # Exact match only - no fuzzy matching
+        query_norm = query.upper().replace('-', '').replace('_', '').replace(' ', '')
+        symbol_norm = symbol_name.upper().replace('-', '').replace('_', '').replace(' ', '')
+        return query_norm == symbol_norm
 
     async def _search_symbol_in_library_file(
         self,
@@ -1233,12 +1373,13 @@ class SymbolFetcherAgent:
         """
         Generate symbol using LLM when all other sources fail.
 
-        Uses datasheet context if available.
+        Uses OpenRouter API (OpenAI-compatible) for Claude access.
+        IMPORTANT: OpenRouter uses /chat/completions endpoint, NOT /messages endpoint.
         """
-        if not self.anthropic_client:
+        if not self._openrouter_api_key and not self.anthropic_client:
             raise RuntimeError(
-                "Anthropic client required for LLM symbol generation. "
-                "Install anthropic package and provide API key."
+                "No LLM API key available for symbol generation. "
+                "Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY environment variable."
             )
 
         logger.info(f"Generating symbol with LLM for {part_number}")
@@ -1269,13 +1410,38 @@ Output ONLY the KiCad S-expression, starting with (kicad_symbol_lib and ending w
 No explanation or markdown formatting."""
 
         try:
-            response = self.anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}]
-            )
+            # Use OpenRouter API (preferred) or fallback to direct Anthropic
+            if self._openrouter_api_key:
+                response = await self.http_client.post(
+                    f"{self._openrouter_base_url}/chat/completions",
+                    json={
+                        "model": "anthropic/claude-sonnet-4-20250514",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 8192,
+                        "temperature": 0.2,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {self._openrouter_api_key}",
+                        "HTTP-Referer": "https://adverant.ai",
+                        "X-Title": "Nexus EE Design Symbol Generator",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=120.0
+                )
 
-            generated_symbol = response.content[0].text
+                if response.status_code != 200:
+                    raise RuntimeError(f"OpenRouter API error: {response.status_code} - {response.text}")
+
+                result = response.json()
+                generated_symbol = result['choices'][0]['message']['content']
+            else:
+                # Fallback to direct Anthropic API
+                response = self.anthropic_client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=8192,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                generated_symbol = response.content[0].text
 
             # Validate the generated symbol has basic structure
             if not generated_symbol.strip().startswith("(kicad_symbol_lib"):
