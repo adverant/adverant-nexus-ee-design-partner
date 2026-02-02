@@ -273,8 +273,8 @@ Identify deviations from reference designs that may cause issues."""
 
     def __init__(
         self,
-        primary_model: str = "claude-sonnet-4-20250514",
-        verification_model: str = "claude-opus-4-20250514",
+        primary_model: str = "anthropic/claude-opus-4.5",
+        verification_model: str = "anthropic/claude-opus-4.5",
         api_key: Optional[str] = None
     ):
         """

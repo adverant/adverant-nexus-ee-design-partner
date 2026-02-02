@@ -362,7 +362,7 @@ RESPOND IN THIS JSON FORMAT:
         # Configure Opus client via OpenRouter (preferred) or direct Anthropic API
         if opus_client:
             self.opus_client = opus_client
-            self.opus_model = "claude-opus-4-5-20250514"
+            self.opus_model = "anthropic/claude-opus-4.5"
         elif self.openrouter_api_key:
             try:
                 import anthropic
@@ -381,7 +381,7 @@ RESPOND IN THIS JSON FORMAT:
             try:
                 import anthropic
                 self.opus_client = anthropic.Anthropic()
-                self.opus_model = "claude-opus-4-5-20250514"
+                self.opus_model = "anthropic/claude-opus-4.5"
             except Exception as e:
                 logger.warning(f"Anthropic client not available: {e}")
                 self.opus_client = None

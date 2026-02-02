@@ -258,7 +258,7 @@ class SymbolFetcherAgent:
         # IMPORTANT: OpenRouter uses OpenAI-compatible API, NOT Anthropic API format
         self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
         self._openrouter_base_url = "https://openrouter.ai/api/v1"
-        self._openrouter_model = "anthropic/claude-sonnet-4-20250514"  # Fast, accurate
+        self._openrouter_model = "anthropic/claude-opus-4.5"  # User directive: Opus 4.5 ONLY
 
         # Direct Anthropic API (fallback)
         self.anthropic_client = None
@@ -1415,7 +1415,7 @@ No explanation or markdown formatting."""
                 response = await self.http_client.post(
                     f"{self._openrouter_base_url}/chat/completions",
                     json={
-                        "model": "anthropic/claude-sonnet-4-20250514",
+                        "model": "anthropic/claude-opus-4.5",
                         "messages": [{"role": "user", "content": prompt}],
                         "max_tokens": 8192,
                         "temperature": 0.2,
@@ -1437,7 +1437,7 @@ No explanation or markdown formatting."""
             else:
                 # Fallback to direct Anthropic API
                 response = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-opus-4-5-20251101",  # Direct API requires full model ID
                     max_tokens=8192,
                     messages=[{"role": "user", "content": prompt}]
                 )
@@ -1459,7 +1459,7 @@ No explanation or markdown formatting."""
                 source=SymbolSource.LLM_GENERATED,
                 needs_review=True,
                 metadata={
-                    "generated_by": "claude-sonnet-4-20250514",
+                    "generated_by": "anthropic/claude-opus-4.5",
                     "category": category,
                     "datasheet_context_used": bool(datasheet_context)
                 }

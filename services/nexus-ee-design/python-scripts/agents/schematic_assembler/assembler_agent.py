@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # OpenRouter configuration for LLM-first approach
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4-5-20250514"  # Opus 4.5 via OpenRouter
+OPENROUTER_MODEL = "anthropic/claude-opus-4.5"  # Opus 4.5 via OpenRouter
 
 
 class PinType(Enum):

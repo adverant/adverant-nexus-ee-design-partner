@@ -104,9 +104,9 @@ class PipelineConfig:
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
 
-    # Validation
-    primary_model: str = "claude-sonnet-4-20250514"
-    verification_model: str = "claude-opus-4-20250514"
+    # Validation - MUST use Opus 4.5 only per user directive
+    primary_model: str = "anthropic/claude-opus-4.5"
+    verification_model: str = "anthropic/claude-opus-4.5"
     validation_threshold: float = 0.85
     max_iterations: int = 5
 
