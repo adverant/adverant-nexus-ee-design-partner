@@ -207,6 +207,14 @@ class SmokeTestAgent:
 
 A "smoke test" ensures the circuit will NOT smoke/burn/fail when power is applied. You must analyze the schematic and identify any issues that would cause immediate failure.
 
+IMPORTANT KICAD SEMANTICS:
+- In KiCad, global_label elements with the SAME TEXT are ELECTRICALLY CONNECTED implicitly
+- Example: (global_label "VCC" ...) at one location connects to ALL other (global_label "VCC" ...) elements
+- This means if power pin VDD has a global_label "VCC" nearby, it IS connected to the VCC power rail
+- Similarly, global_label "GND" elements are all connected to ground
+- Do NOT report "no power connection" if the power pin has a nearby global_label with matching power net name
+- Power net equivalents: VCC=VDD=3V3=5V, GND=VSS=GROUND, VDDA=analog power, VBAT=battery
+
 ANALYZE THE FOLLOWING TESTS:
 
 1. **POWER RAIL CHECK**: Are VCC/VDD/3V3/5V nets connected to all ICs that need power?
