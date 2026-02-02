@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # OpenRouter configuration (following mageagent pattern)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "anthropic/claude-opus-4-5-20250514"
+OPENROUTER_MODEL = "anthropic/claude-sonnet-4-20250514"
 
 
 class ConnectionType(Enum):
