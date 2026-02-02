@@ -266,7 +266,7 @@ class MAPOSchematicPipeline:
         # Initialize artifact exporter for auto-export to PDF/image and NFS sync
         if self.config.auto_export:
             artifact_config = ArtifactConfig(
-                nfs_base_path=self.config.nfs_base_path,
+                artifact_base_path=self.config.nfs_base_path,  # NFS mount path for artifacts
                 export_pdf=self.config.export_pdf,
                 export_svg=self.config.export_svg,
                 export_png=self.config.export_png,
