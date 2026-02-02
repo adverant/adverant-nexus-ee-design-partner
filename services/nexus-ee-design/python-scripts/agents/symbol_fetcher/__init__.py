@@ -10,6 +10,7 @@ from .symbol_fetcher_agent import (
     SymbolSourceConfig,
     FetchedSymbol,
     SymbolSearchResult,
+    SymbolResolutionError,
     DEFAULT_SOURCES,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     'SymbolSourceConfig',
     'FetchedSymbol',
     'SymbolSearchResult',
+    'SymbolResolutionError',
     'DEFAULT_SOURCES',
 ]

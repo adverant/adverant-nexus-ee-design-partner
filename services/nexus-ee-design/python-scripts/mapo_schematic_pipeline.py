@@ -32,6 +32,7 @@ from agents.schematic_assembler import (
     BOMItem,
     Connection,
     BlockDiagram,
+    SymbolQuality,
 )
 from agents.connection_generator import ConnectionGeneratorAgent
 from agents.layout_optimizer import LayoutOptimizerAgent
@@ -48,6 +49,46 @@ from validation.schematic_vision_validator import (
 from graphrag.symbol_indexer import SymbolGraphRAGIndexer, create_indexer
 
 logger = logging.getLogger(__name__)
+
+
+class SchematicGenerationError(Exception):
+    """
+    Raised when schematic generation fails due to validation errors.
+
+    This exception provides detailed information about what went wrong,
+    which components failed, and what the user can do to resolve the issue.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        failed_components: Optional[List[Dict[str, Any]]] = None,
+        validation_errors: Optional[List[str]] = None,
+        suggestion: Optional[str] = None
+    ):
+        self.message = message
+        self.failed_components = failed_components or []
+        self.validation_errors = validation_errors or []
+        self.suggestion = suggestion
+
+        # Build detailed error message
+        full_message = message
+
+        if failed_components:
+            component_list = "\n".join([
+                f"  - {c.get('reference', '?')} ({c.get('part_number', '?')}): {c.get('error', 'Unknown error')}"
+                for c in failed_components
+            ])
+            full_message += f"\n\nFailed components:\n{component_list}"
+
+        if validation_errors:
+            error_list = "\n".join([f"  - {e}" for e in validation_errors])
+            full_message += f"\n\nValidation errors:\n{error_list}"
+
+        if suggestion:
+            full_message += f"\n\nSuggestion: {suggestion}"
+
+        super().__init__(full_message)
 
 
 @dataclass
@@ -342,6 +383,84 @@ class MAPOSchematicPipeline:
 
             result.sheets = sheets
 
+            # ========================================
+            # VALIDATION GATE: Symbol Quality Check
+            # ========================================
+            # This gate prevents saving schematics with all-placeholder symbols
+            if sheets and sheets[0].symbols:
+                placeholder_symbols = [
+                    s for s in sheets[0].symbols
+                    if s.quality == SymbolQuality.PLACEHOLDER
+                ]
+                valid_symbols = [
+                    s for s in sheets[0].symbols
+                    if s.quality != SymbolQuality.PLACEHOLDER
+                ]
+
+                # Log symbol resolution summary
+                logger.info(f"Symbol Resolution Summary:")
+                logger.info(f"  Total components: {len(sheets[0].symbols)}")
+                logger.info(f"  Valid symbols: {len(valid_symbols)}")
+                logger.info(f"  Placeholder symbols: {len(placeholder_symbols)}")
+
+                # Track statistics
+                for symbol in sheets[0].symbols:
+                    if symbol.quality == SymbolQuality.VERIFIED:
+                        result.symbols_fetched += 1
+                    elif symbol.quality == SymbolQuality.CACHED:
+                        result.symbols_from_cache += 1
+                    elif symbol.quality in (SymbolQuality.LLM_GENERATED, SymbolQuality.PLACEHOLDER):
+                        result.symbols_generated += 1
+
+                # CRITICAL: Fail if ALL symbols are placeholders
+                if len(valid_symbols) == 0 and len(placeholder_symbols) > 0:
+                    failed_components = [
+                        {
+                            "reference": s.reference,
+                            "part_number": s.part_number,
+                            "error": s.resolution_error or "All symbol sources failed"
+                        }
+                        for s in placeholder_symbols
+                    ]
+
+                    error_msg = (
+                        f"Symbol resolution failed for all {len(bom_items)} components. "
+                        f"No valid symbols could be fetched from any source."
+                    )
+                    logger.error(error_msg)
+
+                    raise SchematicGenerationError(
+                        message=error_msg,
+                        failed_components=failed_components,
+                        validation_errors=[
+                            f"Tried sources: KiCad Worker, Local Cache, GitHub, SnapEDA, LLM",
+                            f"All {len(placeholder_symbols)} components returned placeholders"
+                        ],
+                        suggestion=(
+                            "1. Verify KICAD_WORKER_URL is accessible from this pod\n"
+                            "2. Check that mapos-kicad-worker service is running\n"
+                            "3. Configure OPENROUTER_API_KEY or ANTHROPIC_API_KEY for LLM fallback"
+                        )
+                    )
+
+                # WARN if any symbols are placeholders (but still proceed)
+                if len(placeholder_symbols) > 0:
+                    logger.warning(
+                        f"{len(placeholder_symbols)} of {len(sheets[0].symbols)} components "
+                        f"are using placeholder symbols and need manual resolution"
+                    )
+                    for s in placeholder_symbols:
+                        error_msg = f"Placeholder symbol for {s.reference} ({s.part_number})"
+                        result.errors.append(error_msg)
+                        logger.warning(f"  - {s.reference} ({s.part_number}): {s.resolution_error or 'Unknown'}")
+            else:
+                # No symbols at all - this is also an error
+                raise SchematicGenerationError(
+                    message="Schematic assembly produced no symbols",
+                    validation_errors=["BOM may be empty or all components filtered out"],
+                    suggestion="Verify BOM contains valid component entries"
+                )
+
             # Phase 2: Layout Optimization (IPC-2221/IEEE 315 signal flow)
             if self._layout_optimizer:
                 logger.info("Running layout optimization...")
@@ -375,16 +494,6 @@ class MAPOSchematicPipeline:
                             logger.warning(f"  - {violation.check.value}: {violation.description}")
                     else:
                         logger.info(f"Standards compliance: PASSED ({compliance_report.score:.1%})")
-
-            # Track symbol statistics
-            for sheet in sheets:
-                for symbol_id, sexp in sheet.lib_symbols.items():
-                    result.symbols_fetched += 1
-                    if "source" in str(sexp):
-                        if "local_cache" in str(sexp):
-                            result.symbols_from_cache += 1
-                        elif "llm_generated" in str(sexp) or "generated" in str(sexp):
-                            result.symbols_generated += 1
 
             # Generate output file
             output_path = self.config.output_dir / f"{design_name}.kicad_sch"
@@ -522,9 +631,20 @@ class MAPOSchematicPipeline:
                     logger.warning(f"Auto-export had errors: {export_result.errors}")
                     result.errors.extend(export_result.errors)
 
+        except SchematicGenerationError as e:
+            # Handle our custom validation errors with full details
+            logger.error(f"Schematic generation failed: {e.message}")
+            if e.failed_components:
+                logger.error(f"  Failed components: {len(e.failed_components)}")
+            if e.suggestion:
+                logger.info(f"  Suggestion: {e.suggestion}")
+            result.errors.append(str(e))
+            result.success = False
+
         except Exception as e:
             logger.error(f"Pipeline error: {e}", exc_info=True)
             result.errors.append(str(e))
+            result.success = False
 
         finally:
             result.total_time_seconds = (datetime.now() - start_time).total_seconds()

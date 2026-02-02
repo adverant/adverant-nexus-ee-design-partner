@@ -40,6 +40,44 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class SymbolResolutionError(Exception):
+    """
+    Raised when symbol resolution fails for a component.
+
+    This exception provides detailed information about why resolution failed,
+    which sources were tried, and what the user can do to fix it.
+    """
+
+    def __init__(
+        self,
+        part_number: str,
+        category: str,
+        sources_tried: List[str],
+        errors: List[str],
+        suggestion: Optional[str] = None
+    ):
+        self.part_number = part_number
+        self.category = category
+        self.sources_tried = sources_tried
+        self.errors = errors
+        self.suggestion = suggestion
+
+        # Build detailed error message
+        error_details = "\n".join([f"  - {e}" for e in errors]) if errors else "No specific errors logged"
+        sources_list = ", ".join(sources_tried) if sources_tried else "none"
+
+        message = (
+            f"Failed to resolve symbol for '{part_number}' (category: {category}).\n"
+            f"Sources tried: {sources_list}\n"
+            f"Errors:\n{error_details}"
+        )
+
+        if suggestion:
+            message += f"\nSuggestion: {suggestion}"
+
+        super().__init__(message)
+
+
 class SymbolSource(Enum):
     """Available symbol sources in priority order."""
     LOCAL_CACHE = "local_cache"
@@ -247,7 +285,8 @@ class SymbolFetcherAgent:
         self,
         part_number: str,
         manufacturer: Optional[str] = None,
-        category: str = "Other"
+        category: str = "Other",
+        allow_placeholder: bool = True
     ) -> FetchedSymbol:
         """
         Fetch symbol using priority fallback chain.
@@ -256,11 +295,19 @@ class SymbolFetcherAgent:
             part_number: Component part number (e.g., "STM32G431CBT6")
             manufacturer: Optional manufacturer name
             category: Component category for organization
+            allow_placeholder: If False, raises SymbolResolutionError instead of returning placeholder
 
         Returns:
             FetchedSymbol with KiCad S-expression data
+
+        Raises:
+            SymbolResolutionError: If all sources fail and allow_placeholder is False
         """
-        logger.info(f"Fetching symbol: {part_number} (manufacturer: {manufacturer})")
+        logger.info(f"Fetching symbol: {part_number} (manufacturer: {manufacturer}, category: {category})")
+
+        # Track sources tried and errors for verbose error reporting
+        sources_tried: List[str] = []
+        errors: List[str] = []
 
         # Sort sources by priority, excluding LLM_GENERATED (handled separately as last resort)
         sorted_sources = sorted(
@@ -269,12 +316,14 @@ class SymbolFetcherAgent:
         )
 
         for source_config in sorted_sources:
+            source_name = source_config.source.value
+            sources_tried.append(source_name)
             try:
                 result = await self._fetch_from_source(
                     source_config, part_number, manufacturer, category
                 )
                 if result:
-                    logger.info(f"Found symbol from {source_config.source.value}")
+                    logger.info(f"Found symbol from {source_name}")
 
                     # Cache the symbol
                     await self._cache_symbol(result, category)
@@ -284,25 +333,67 @@ class SymbolFetcherAgent:
                         await self._index_in_graphrag(result, category)
 
                     return result
+                else:
+                    errors.append(f"{source_name}: No matching symbol found")
 
             except Exception as e:
-                logger.warning(
-                    f"Source {source_config.source.value} failed for {part_number}: {e}"
-                )
+                error_msg = f"{source_name}: {str(e)}"
+                errors.append(error_msg)
+                logger.warning(f"Source {source_name} failed for {part_number}: {e}")
                 continue
 
         # For passives, try generic symbol before LLM generation
+        # Generic passive symbols (R, C, L) are acceptable quality
         generic_symbol = self.GENERIC_PASSIVE_SYMBOLS.get(category)
         if generic_symbol:
-            result = await self._fetch_generic_passive(generic_symbol, part_number, category)
-            if result:
-                logger.info(f"Using generic symbol {generic_symbol} for {part_number}")
-                await self._cache_symbol(result, category)
-                return result
+            sources_tried.append("generic_passive")
+            try:
+                result = await self._fetch_generic_passive(generic_symbol, part_number, category)
+                if result:
+                    logger.info(f"Using generic symbol {generic_symbol} for {part_number}")
+                    await self._cache_symbol(result, category)
+                    return result
+                else:
+                    errors.append("generic_passive: Device library not available")
+            except Exception as e:
+                errors.append(f"generic_passive: {str(e)}")
 
-        # All sources exhausted - generate with LLM as last resort
-        logger.warning(f"All sources exhausted for {part_number}, generating with LLM")
-        return await self._generate_symbol_with_llm(part_number, manufacturer, category)
+        # Try LLM generation if API key available
+        if self.anthropic_client:
+            sources_tried.append("llm_generated")
+            try:
+                logger.warning(f"All sources exhausted for {part_number}, generating with LLM")
+                result = await self._generate_symbol_with_llm(part_number, manufacturer, category)
+                if result and not result.metadata.get("is_placeholder", False):
+                    return result
+                errors.append("llm_generated: Generation returned placeholder")
+            except Exception as e:
+                errors.append(f"llm_generated: {str(e)}")
+        else:
+            errors.append("llm_generated: No API key (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
+
+        # All sources exhausted
+        logger.error(
+            f"Symbol resolution FAILED for {part_number}. "
+            f"Tried {len(sources_tried)} sources: {', '.join(sources_tried)}"
+        )
+
+        # If placeholder not allowed, raise detailed exception
+        if not allow_placeholder:
+            raise SymbolResolutionError(
+                part_number=part_number,
+                category=category,
+                sources_tried=sources_tried,
+                errors=errors,
+                suggestion="Configure KICAD_WORKER_URL or add symbol to local cache"
+            )
+
+        # Return placeholder with error tracking (for backwards compatibility)
+        placeholder = self._create_placeholder_symbol(part_number, manufacturer, category)
+        placeholder.metadata["sources_tried"] = sources_tried
+        placeholder.metadata["resolution_errors"] = errors
+        placeholder.metadata["error"] = f"All {len(sources_tried)} sources failed"
+        return placeholder
 
     async def _fetch_generic_passive(
         self,
@@ -1620,19 +1711,30 @@ No explanation or markdown formatting."""
         manufacturer: Optional[str],
         category: str
     ) -> FetchedSymbol:
-        """Create a minimal placeholder symbol when all else fails."""
+        """
+        Create a minimal placeholder symbol when all else fails.
+
+        IMPORTANT: Placeholder symbols are NOT production-ready. The schematic
+        validation pipeline should flag or reject schematics containing placeholders.
+
+        The placeholder is visually marked with "[PLACEHOLDER]" in the Value field
+        to make it obvious in schematic editors that it needs replacement.
+        """
         ref_prefix = {
             'MCU': 'U', 'MOSFET': 'Q', 'Gate_Driver': 'U', 'OpAmp': 'U',
             'Capacitor': 'C', 'Resistor': 'R', 'Inductor': 'L',
             'Connector': 'J', 'Power': 'U', 'Other': 'U'
         }.get(category, 'U')
 
+        # Mark the value clearly as a placeholder so it's visible in schematic editors
+        placeholder_value = f"{part_number} [PLACEHOLDER]"
+
         placeholder_sexp = f'''(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)
   (symbol "{part_number}" (in_bom yes) (on_board yes)
     (property "Reference" "{ref_prefix}" (at 0 1.27 0)
       (effects (font (size 1.27 1.27)))
     )
-    (property "Value" "{part_number}" (at 0 -1.27 0)
+    (property "Value" "{placeholder_value}" (at 0 -1.27 0)
       (effects (font (size 1.27 1.27)))
     )
     (property "Footprint" "" (at 0 0 0)
@@ -1641,10 +1743,16 @@ No explanation or markdown formatting."""
     (property "Datasheet" "~" (at 0 0 0)
       (effects (font (size 1.27 1.27)) hide)
     )
+    (property "PLACEHOLDER_WARNING" "This symbol is a placeholder - replace with real component" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
     (symbol "{part_number}_0_1"
       (rectangle (start -5.08 5.08) (end 5.08 -5.08)
         (stroke (width 0.254) (type default))
         (fill (type background))
+      )
+      (text "?" (at 0 0 0)
+        (effects (font (size 3.81 3.81)))
       )
     )
     (symbol "{part_number}_1_1"
@@ -1668,16 +1776,23 @@ No explanation or markdown formatting."""
   )
 )'''
 
+        logger.warning(
+            f"Created PLACEHOLDER symbol for {part_number} ({category}). "
+            f"This symbol is NOT production-ready and should be replaced."
+        )
+
         return FetchedSymbol(
             part_number=part_number,
             manufacturer=manufacturer,
             symbol_sexp=placeholder_sexp,
-            source=SymbolSource.LLM_GENERATED,
+            source=SymbolSource.LLM_GENERATED,  # Use LLM_GENERATED for backwards compat
             needs_review=True,
             metadata={
                 "is_placeholder": True,
+                "is_generic": True,  # Flag for quality detection
                 "category": category,
-                "reason": "All sources failed, created minimal placeholder"
+                "reason": "All sources failed, created minimal placeholder",
+                "warning": "This placeholder must be replaced with a real symbol before production"
             }
         )
 

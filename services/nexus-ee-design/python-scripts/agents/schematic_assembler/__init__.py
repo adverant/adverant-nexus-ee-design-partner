@@ -16,6 +16,7 @@ from .assembler_agent import (
     Junction,
     Pin,
     PinType,
+    SymbolQuality,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     'Junction',
     'Pin',
     'PinType',
+    'SymbolQuality',
 ]
