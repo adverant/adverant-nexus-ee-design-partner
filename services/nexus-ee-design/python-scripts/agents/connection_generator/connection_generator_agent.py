@@ -19,9 +19,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-import anthropic
+import httpx
 
 logger = logging.getLogger(__name__)
+
+# OpenRouter configuration (following mageagent pattern)
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "anthropic/claude-opus-4-5-20250514"
 
 
 class ConnectionType(Enum):
@@ -117,24 +121,18 @@ class ConnectionGeneratorAgent:
     }
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize the connection generator with OpenRouter support."""
-        # Prefer OpenRouter, fallback to direct Anthropic API
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        anthropic_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        """Initialize the connection generator with OpenRouter support (mageagent pattern)."""
+        # OpenRouter API key (required for LLM operations)
+        self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self._http_client: Optional[httpx.AsyncClient] = None
 
-        if openrouter_key:
-            self.client = anthropic.Anthropic(
-                api_key=openrouter_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-            self.model = "anthropic/claude-opus-4.5"  # OpenRouter model format
-        elif anthropic_key:
-            self.client = anthropic.Anthropic(api_key=anthropic_key)
-            self.model = "claude-opus-4-5-20250514"  # Direct Anthropic model
+        if self._openrouter_api_key:
+            logger.info("ConnectionGeneratorAgent: OpenRouter API key configured")
         else:
-            self.client = None
-            self.model = None
-            logger.warning("No LLM API key found (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)")
+            logger.error(
+                "CRITICAL: OPENROUTER_API_KEY not set! LLM connection generation will fail. "
+                "Set OPENROUTER_API_KEY environment variable with a valid key from https://openrouter.ai/keys"
+            )
 
     async def generate_connections(
         self,
@@ -169,18 +167,13 @@ class ConnectionGeneratorAgent:
         connections.extend(bypass_connections)
         logger.info(f"Generated {len(bypass_connections)} bypass cap connections")
 
-        # Step 4: Use LLM to infer signal connections
-        if self.client:
-            signal_connections = await self._generate_signal_connections_llm(
-                components, design_intent
-            )
-            connections.extend(signal_connections)
-            logger.info(f"Generated {len(signal_connections)} signal connections via LLM")
-        else:
-            # Fallback: basic interface matching
-            signal_connections = self._generate_signal_connections_rules(components)
-            connections.extend(signal_connections)
-            logger.info(f"Generated {len(signal_connections)} signal connections via rules")
+        # Step 4: Use LLM to infer signal connections (NO FALLBACK - LLM required)
+        # Following user directive: "do not use any algorithmic approaches unless LLM can't be used"
+        signal_connections = await self._generate_signal_connections_llm(
+            components, design_intent
+        )
+        connections.extend(signal_connections)
+        logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
 
         # Step 5: Deduplicate and prioritize
         connections = self._deduplicate_connections(connections)
@@ -513,9 +506,19 @@ class ConnectionGeneratorAgent:
         components: List[ComponentInfo],
         design_intent: str
     ) -> List[GeneratedConnection]:
-        """Use LLM to infer signal connections from design intent."""
-        if not self.client:
-            return []
+        """Use LLM (Opus 4.5 via OpenRouter) to infer signal connections from design intent.
+
+        Following mageagent pattern: uses httpx with OpenRouter /chat/completions endpoint.
+        """
+        # Validate API key
+        if not self._openrouter_api_key:
+            error_msg = (
+                "CRITICAL: Cannot generate signal connections - OPENROUTER_API_KEY not set!\n"
+                "Action Required: Set OPENROUTER_API_KEY environment variable\n"
+                "Documentation: https://openrouter.ai/keys"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         # Build component summary for LLM
         comp_summary = []
@@ -558,49 +561,113 @@ Rules:
 
 Generate the connections:"""
 
+        # Initialize HTTP client if needed (following mageagent pattern)
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+
+        # Build OpenRouter request (OpenAI-compatible format, NOT Anthropic format)
+        request_payload = {
+            "model": OPENROUTER_MODEL,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 4096,
+            "temperature": 0.1,  # Low temperature for structured output
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self._openrouter_api_key}",
+            "HTTP-Referer": "https://adverant.ai",
+            "X-Title": "Nexus EE Design Connection Generator",
+            "Content-Type": "application/json",
+        }
+
         try:
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}]
+            logger.info(f"Calling OpenRouter API ({OPENROUTER_MODEL}) for connection generation...")
+
+            response = await self._http_client.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                json=request_payload,
+                headers=headers,
             )
 
+            # Check for HTTP errors
+            if response.status_code != 200:
+                error_body = response.text
+                error_msg = (
+                    f"OpenRouter API Error:\n"
+                    f"  Status: {response.status_code}\n"
+                    f"  Response: {error_body[:500]}...\n"
+                    f"  Model: {OPENROUTER_MODEL}\n"
+                    f"  API Key: {self._openrouter_api_key[:15]}...\n"
+                    f"  Action: Check API key validity at https://openrouter.ai/keys"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
             # Parse response
-            response_text = response.content[0].text.strip()
+            response_data = response.json()
+
+            # Extract content from OpenAI-format response
+            if "choices" not in response_data or len(response_data["choices"]) == 0:
+                error_msg = f"OpenRouter returned empty response: {json.dumps(response_data)}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            response_text = response_data["choices"][0]["message"]["content"].strip()
+            logger.info(f"Received {len(response_text)} chars from OpenRouter")
 
             # Extract JSON from response
             json_match = re.search(r'\[[\s\S]*\]', response_text)
-            if json_match:
-                connections_data = json.loads(json_match.group())
+            if not json_match:
+                error_msg = f"LLM did not return valid JSON array. Response: {response_text[:500]}..."
+                logger.error(error_msg)
+                raise ValueError(error_msg)
 
-                connections = []
-                for conn in connections_data:
-                    conn_type = ConnectionType.SIGNAL
-                    type_str = conn.get("connection_type", "signal").lower()
-                    if type_str == "digital":
-                        conn_type = ConnectionType.DIGITAL
-                    elif type_str == "analog":
-                        conn_type = ConnectionType.ANALOG
-                    elif type_str == "power":
-                        conn_type = ConnectionType.POWER
+            connections_data = json.loads(json_match.group())
+            logger.info(f"Parsed {len(connections_data)} connections from LLM response")
 
-                    connections.append(GeneratedConnection(
-                        from_ref=conn.get("from_ref", ""),
-                        from_pin=conn.get("from_pin", ""),
-                        to_ref=conn.get("to_ref", ""),
-                        to_pin=conn.get("to_pin", ""),
-                        net_name=conn.get("net_name", "NET"),
-                        connection_type=conn_type,
-                        priority=5,
-                        notes=conn.get("notes", "LLM generated")
-                    ))
+            connections = []
+            for conn in connections_data:
+                conn_type = ConnectionType.SIGNAL
+                type_str = conn.get("connection_type", "signal").lower()
+                if type_str == "digital":
+                    conn_type = ConnectionType.DIGITAL
+                elif type_str == "analog":
+                    conn_type = ConnectionType.ANALOG
+                elif type_str == "power":
+                    conn_type = ConnectionType.POWER
 
-                return connections
+                connections.append(GeneratedConnection(
+                    from_ref=conn.get("from_ref", ""),
+                    from_pin=conn.get("from_pin", ""),
+                    to_ref=conn.get("to_ref", ""),
+                    to_pin=conn.get("to_pin", ""),
+                    net_name=conn.get("net_name", "NET"),
+                    connection_type=conn_type,
+                    priority=5,
+                    notes=conn.get("notes", "LLM generated")
+                ))
 
+            return connections
+
+        except httpx.RequestError as e:
+            error_msg = (
+                f"OpenRouter HTTP Request Failed:\n"
+                f"  Error: {str(e)}\n"
+                f"  URL: {OPENROUTER_BASE_URL}/chat/completions\n"
+                f"  Action: Check network connectivity"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse LLM response as JSON: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         except Exception as e:
-            logger.error(f"LLM connection generation failed: {e}")
-
-        return []
+            error_msg = f"LLM connection generation failed: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
     def _deduplicate_connections(
         self,

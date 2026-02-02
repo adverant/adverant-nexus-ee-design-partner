@@ -15,7 +15,7 @@ import path from 'path';
 import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
-import { generateSchematic as generateKicadSchematic, generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-generator.js';
+import { generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-generator.js';
 import { PythonExecutor } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
@@ -1117,18 +1117,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           }))
         : [];
 
-      // Extract component definitions if provided
-      const componentDefs = Array.isArray(req.body.components)
-        ? req.body.components.map((c: Record<string, unknown>) => ({
-            reference: String(c.reference || 'U1'),
-            value: String(c.value || 'Component'),
-            library: String(c.library || 'Device'),
-            symbol: String(c.symbol || 'R'),
-            footprint: c.footprint ? String(c.footprint) : undefined,
-          }))
-        : [];
-
-      // Generate KiCad schematic content using MAPO pipeline
+      // Generate KiCad schematic content using MAPO pipeline (NO PLACEHOLDER FALLBACK)
       interface GeneratedSchematic {
         content: string;
         sheets: Array<{ name: string; uuid: string; page: number }>;
@@ -1170,23 +1159,39 @@ export function createApiRoutes(io: SocketIOServer): Router {
           );
 
           if (!result.success) {
-            log.warn('MAPO pipeline failed, falling back to placeholder generator', {
+            // NO FALLBACK - Return verbose error message
+            log.error(
+              'MAPO pipeline failed - NO FALLBACK (placeholder generator removed)',
+              new Error(result.stderr || 'Unknown pipeline error'),
+              { projectId, stdout: result.stdout }
+            );
+
+            // Emit detailed error to client
+            io.to(`project:${projectId}`).emit('schematic:error', {
               projectId,
-              error: result.stderr,
-            });
-            // Fallback to placeholder generator
-            generatedSchematic = generateKicadSchematic({
-              architecture: {
-                subsystems,
-                projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
-                title: req.body.name || project.name,
-                company: 'Adverant EE Design',
+              status: 'failed',
+              message: 'Schematic generation failed',
+              details: {
+                error: result.stderr || 'Unknown error',
+                action: 'Check server logs for full error details. Ensure OPENROUTER_API_KEY is set.',
               },
-              components: componentDefs.length > 0 ? componentDefs : undefined,
-              projectName: req.body.name || project.name,
-              paperSize: 'A4',
             });
-          } else {
+
+            // Return detailed error response
+            return res.status(500).json({
+              error: 'Schematic generation failed',
+              message: 'MAPO pipeline failed. Placeholder generation has been removed.',
+              details: {
+                stderr: result.stderr,
+                stdout: result.stdout,
+                action: 'Check that OPENROUTER_API_KEY is configured correctly in k8s/secrets.yaml',
+                documentation: 'https://openrouter.ai/keys',
+              },
+            });
+          }
+
+          // MAPO succeeded - process the result
+          {
             // Parse MAPO pipeline output
             const mapoResult = result.output as {
               success: boolean;
@@ -1234,21 +1239,35 @@ export function createApiRoutes(io: SocketIOServer): Router {
             }
           }
         } catch (mapoError) {
-          log.error('MAPO pipeline error, using fallback', {
+          // NO FALLBACK - Return verbose error to client
+          const errorMessage = mapoError instanceof Error ? mapoError.message : 'Unknown error';
+
+          log.error(
+            'MAPO pipeline error - NO FALLBACK (placeholder generator removed)',
+            mapoError instanceof Error ? mapoError : new Error(String(mapoError)),
+            { projectId }
+          );
+
+          // Emit detailed error to client
+          io.to(`project:${projectId}`).emit('schematic:error', {
             projectId,
-            error: mapoError instanceof Error ? mapoError.message : 'Unknown error',
-          });
-          // Fallback to placeholder generator
-          generatedSchematic = generateKicadSchematic({
-            architecture: {
-              subsystems,
-              projectType: architectureData.projectType ? String(architectureData.projectType) : project.type,
-              title: req.body.name || project.name,
-              company: 'Adverant EE Design',
+            status: 'failed',
+            message: 'Schematic generation failed',
+            details: {
+              error: errorMessage,
+              action: 'Check server logs for full error details. Ensure OPENROUTER_API_KEY is set.',
             },
-            components: componentDefs.length > 0 ? componentDefs : undefined,
-            projectName: req.body.name || project.name,
-            paperSize: 'A4',
+          });
+
+          // Return detailed error response
+          return res.status(500).json({
+            error: 'Schematic generation failed',
+            message: `MAPO pipeline error: ${errorMessage}`,
+            details: {
+              error: errorMessage,
+              action: 'Check that OPENROUTER_API_KEY is configured correctly in k8s/secrets.yaml',
+              documentation: 'https://openrouter.ai/keys',
+            },
           });
         }
       } else {
@@ -1328,10 +1347,11 @@ export function createApiRoutes(io: SocketIOServer): Router {
         },
       });
     } catch (error) {
-      log.error('Schematic generation failed', {
-        projectId: req.params.projectId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
+      log.error(
+        'Schematic generation failed',
+        error instanceof Error ? error : new Error(String(error)),
+        { projectId: req.params.projectId }
+      );
       next(error);
     }
   });
