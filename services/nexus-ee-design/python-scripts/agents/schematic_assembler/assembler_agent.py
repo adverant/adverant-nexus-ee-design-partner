@@ -4,19 +4,26 @@ Schematic Assembler Agent - Assembles KiCad schematics using real symbols.
 Takes a BOM, block diagram, and connections to produce properly laid out
 KiCad schematic files with real component symbols.
 
+Uses LLM-first approach via OpenRouter with Claude Opus 4.5 for:
+- Pin parsing from KiCad S-expressions
+- Wire routing validation
+- Connection verification
+
 Author: Nexus EE Design Team
 """
 
 import asyncio
 import json
 import logging
-import re
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 # Import enhanced wire router (MANDATORY - no fallback)
 from agents.wire_router import EnhancedWireRouter, RoutingResult
@@ -25,6 +32,11 @@ from agents.wire_router import EnhancedWireRouter, RoutingResult
 from agents.layout_optimizer import LayoutOptimizerAgent
 
 logger = logging.getLogger(__name__)
+
+# OpenRouter configuration for LLM-first approach
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "anthropic/claude-opus-4-5-20250514"  # Opus 4.5 via OpenRouter
 
 
 class PinType(Enum):
@@ -139,6 +151,7 @@ class SchematicSheet:
     junctions: List[Junction] = field(default_factory=list)
     lib_symbols: Dict[str, str] = field(default_factory=dict)  # symbol_id -> S-expression
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    metadata: Dict[str, Any] = field(default_factory=dict)  # For LLM validation results, etc.
 
 
 @dataclass
@@ -214,7 +227,12 @@ class SchematicAssemblerAgent:
 
     def __init__(self, symbol_fetcher: Any = None, graphrag_client: Any = None):
         """
-        Initialize the assembler.
+        Initialize the assembler with LLM-first approach.
+
+        Uses Claude Opus 4.5 via OpenRouter for:
+        - Pin parsing from KiCad S-expressions
+        - Wire routing validation
+        - Connection verification
 
         Args:
             symbol_fetcher: SymbolFetcherAgent for getting real symbols
@@ -223,6 +241,18 @@ class SchematicAssemblerAgent:
         self.symbol_fetcher = symbol_fetcher
         self.graphrag = graphrag_client
         self.ref_counters: Dict[str, int] = {}
+
+        # LLM-first: OpenRouter client for Claude Opus 4.5
+        self._openrouter_api_key = OPENROUTER_API_KEY
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._pin_parse_cache: Dict[str, List[Pin]] = {}  # Cache parsed pins by sexp hash
+        if not self._openrouter_api_key:
+            logger.warning(
+                "OPENROUTER_API_KEY not set - LLM-based pin parsing unavailable. "
+                "Set OPENROUTER_API_KEY environment variable for AI-first approach."
+            )
+        else:
+            logger.info("LLM-first mode enabled via OpenRouter (Claude Opus 4.5)")
 
         # Initialize enhanced wire router (MANDATORY)
         self.enhanced_router = EnhancedWireRouter()
@@ -335,7 +365,7 @@ class SchematicAssemblerAgent:
         # Step 5: Route wires using Enhanced Wire Router
         if connections:
             for sheet in sheets:
-                self._route_wires(sheet, connections)
+                await self._route_wires(sheet, connections)
 
         # Step 6: Add power symbols and labels
         for sheet in sheets:
@@ -365,12 +395,12 @@ class SchematicAssemblerAgent:
                         item.manufacturer,
                         item.category
                     )
-                    # Extract actual symbol name from the S-expression
-                    actual_symbol_name = self._extract_symbol_name(fetched.symbol_sexp)
+                    # Extract actual symbol name from the S-expression (LLM-based)
+                    actual_symbol_name = await self._extract_symbol_name(fetched.symbol_sexp)
                     symbol_data = {
                         "sexp": fetched.symbol_sexp,
                         "symbol_name": actual_symbol_name or fetched.part_number,
-                        "pins": self._parse_pins_from_sexp(fetched.symbol_sexp),
+                        "pins": await self._parse_pins_from_sexp(fetched.symbol_sexp),
                         "source": fetched.source.value,
                         "metadata": fetched.metadata
                     }
@@ -385,52 +415,214 @@ class SchematicAssemblerAgent:
 
         return resolved
 
-    def _extract_symbol_name(self, sexp: str) -> Optional[str]:
-        """Extract the actual symbol name from a KiCad S-expression."""
-        # Match: (symbol "NAME" ...) where NAME doesn't contain _0_1 or _1_1 suffixes
-        match = re.search(r'\(symbol\s+"([^"]+)"(?![^()]*_\d+_\d+)', sexp)
-        if match:
-            return match.group(1)
-        return None
+    async def _extract_symbol_name(self, sexp: str) -> Optional[str]:
+        """
+        Extract the actual symbol name from a KiCad S-expression using LLM.
 
-    def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
-        """Parse pin information from KiCad S-expression."""
-        pins = []
+        AI-first approach: Uses Claude Opus 4.5 to intelligently identify the
+        primary symbol name, excluding sub-symbol suffixes like _0_1 or _1_1.
+        """
+        if not self._openrouter_api_key:
+            logger.warning("OpenRouter API key not set - cannot extract symbol name via LLM")
+            return None
 
-        # Find all pin definitions
-        # Format: (pin <type> <shape> (at X Y angle) (length L) (name "NAME" ...) (number "NUM" ...))
-        pin_pattern = r'\(pin\s+(\w+)\s+\w+\s+\(at\s+([-\d.]+)\s+([-\d.]+)\s+(\d+)\).*?\(name\s+"([^"]*)"\s*.*?\)\s*\(number\s+"([^"]*)"\s*.*?\)\s*\)'
+        # Initialize HTTP client if needed
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
 
-        for match in re.finditer(pin_pattern, sexp, re.DOTALL):
-            pin_type_str, x, y, angle, name, number = match.groups()
+        prompt = f"""You are a KiCad schematic symbol parser. Extract the PRIMARY symbol name from this S-expression.
 
-            # Map pin type
+Rules:
+1. Find the main (symbol "NAME" ...) definition
+2. EXCLUDE sub-symbols that end with suffixes like _0_1, _1_1, _2_1, etc.
+3. Return ONLY the symbol name as a plain string, nothing else
+4. If no valid symbol name is found, return "null" (without quotes)
+
+S-expression to parse:
+```
+{sexp[:3000]}
+```
+
+Return ONLY the symbol name (no quotes, no explanation):"""
+
+        try:
+            response = await self._http_client.post(
+                OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {self._openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://nexus.adverant.com",
+                    "X-Title": "Nexus EE Design - Symbol Name Extraction"
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are a precise KiCad S-expression parser. Return only the requested data, no explanations."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 100
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            content = result["choices"][0]["message"]["content"].strip()
+            # Clean up any quotes that might have been added
+            content = content.strip('"\'').strip()
+
+            if content.lower() == "null" or not content:
+                return None
+
+            logger.debug(f"LLM extracted symbol name: {content}")
+            return content
+
+        except Exception as e:
+            logger.error(f"LLM symbol name extraction failed: {e}")
+            return None
+
+    async def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
+        """
+        Parse pin information from KiCad S-expression using LLM (Opus 4.5 via OpenRouter).
+
+        AI-first approach: Uses Claude Opus 4.5 to intelligently parse pin definitions
+        from any KiCad S-expression format (v6, v7, v8, custom). The LLM understands
+        the semantic structure and extracts pins reliably regardless of format variations.
+
+        Args:
+            sexp: KiCad symbol S-expression string
+
+        Returns:
+            List of Pin objects extracted by the LLM.
+            Cached for subsequent calls with the same sexp.
+        """
+        # Cache key based on sexp content hash
+        import hashlib
+        cache_key = hashlib.md5(sexp.encode()).hexdigest()
+
+        # Return cached result if available
+        if cache_key in self._pin_parse_cache:
+            logger.debug(f"Pin parse cache hit for {cache_key[:8]}")
+            return self._pin_parse_cache[cache_key]
+
+        # Check if LLM is available
+        if not self._openrouter_api_key:
+            logger.error("LLM pin parsing unavailable - OPENROUTER_API_KEY not set")
+            return []
+
+        # Initialize HTTP client if needed
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=60.0)
+
+        # Construct LLM prompt for pin extraction
+        prompt = f"""You are a KiCad schematic symbol parser. Extract ALL pin definitions from this KiCad S-expression.
+
+For each pin, extract:
+- name: The pin name (from the (name "...") field)
+- number: The pin number (from the (number "...") field)
+- type: The pin type (input, output, bidirectional, passive, power_in, power_out, etc.)
+- x: X position from (at X Y angle)
+- y: Y position from (at X Y angle)
+- angle: Orientation angle from (at X Y angle)
+
+Return ONLY a JSON array of pin objects, no explanation:
+[
+  {{"name": "VCC", "number": "1", "type": "power_in", "x": -7.62, "y": 5.08, "angle": 0}},
+  ...
+]
+
+If no pins are found, return an empty array: []
+
+KiCad S-expression:
+```
+{sexp[:8000]}
+```
+
+JSON array of pins:"""
+
+        try:
+            response = await self._http_client.post(
+                OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {self._openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://nexus.adverant.com",
+                    "X-Title": "Nexus EE Design - Pin Parser"
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.0,  # Deterministic parsing
+                    "max_tokens": 4096
+                }
+            )
+
+            if response.status_code != 200:
+                logger.error(f"OpenRouter API error: {response.status_code} - {response.text}")
+                return []
+
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            # Parse JSON response
+            pin_data = json.loads(content)
+
+            # Pin type mapping
             type_map = {
                 "input": PinType.INPUT,
                 "output": PinType.OUTPUT,
                 "bidirectional": PinType.BIDIRECTIONAL,
                 "tri_state": PinType.TRI_STATE,
                 "passive": PinType.PASSIVE,
+                "free": PinType.FREE,
+                "unspecified": PinType.UNSPECIFIED,
                 "power_in": PinType.POWER_IN,
                 "power_out": PinType.POWER_OUT,
                 "open_collector": PinType.OPEN_COLLECTOR,
                 "open_emitter": PinType.OPEN_EMITTER,
                 "no_connect": PinType.NO_CONNECT,
             }
-            pin_type = type_map.get(pin_type_str, PinType.UNSPECIFIED)
 
-            pins.append(Pin(
-                name=name,
-                number=number,
-                pin_type=pin_type,
-                position=(float(x), float(y)),
-                orientation=int(angle)
-            ))
+            pins = []
+            for p in pin_data:
+                pin_type = type_map.get(p.get("type", "unspecified").lower(), PinType.UNSPECIFIED)
+                pins.append(Pin(
+                    name=str(p.get("name", "")),
+                    number=str(p.get("number", "")),
+                    pin_type=pin_type,
+                    position=(float(p.get("x", 0)), float(p.get("y", 0))),
+                    orientation=int(p.get("angle", 0))
+                ))
 
-        return pins
+            # Cache the result
+            self._pin_parse_cache[cache_key] = pins
+            logger.info(f"LLM parsed {len(pins)} pins from symbol (cached as {cache_key[:8]})")
+            return pins
+
+        except json.JSONDecodeError as e:
+            logger.error(f"LLM returned invalid JSON for pin parsing: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"LLM pin parsing failed: {e}")
+            return []
 
     def _create_generic_symbol(self, item: BOMItem) -> Dict[str, Any]:
-        """Create a generic symbol for items without real symbols."""
+        """Create a generic symbol for items without real symbols.
+
+        Note: For generated symbols, we directly create Pin objects since we know
+        the exact structure. LLM parsing is reserved for external/unknown data.
+        """
         prefix = self.REF_PREFIXES.get(item.category, "U")
 
         # Determine number of pins based on category
@@ -450,12 +642,23 @@ class SchematicAssemblerAgent:
         pins_sexp = []
         pin_positions = self._calculate_pin_positions(pin_count)
 
+        # Directly create Pin objects (no need to parse what we just generated)
+        pins: List[Pin] = []
+
         for i, (x, y, angle) in enumerate(pin_positions):
             pin_name = f"P{i+1}"
             pins_sexp.append(f'''      (pin passive line (at {x} {y} {angle}) (length 2.54)
         (name "{pin_name}" (effects (font (size 1.27 1.27))))
         (number "{i+1}" (effects (font (size 1.27 1.27))))
       )''')
+            # Create Pin object directly
+            pins.append(Pin(
+                name=pin_name,
+                number=str(i + 1),
+                pin_type=PinType.PASSIVE,
+                position=(x, y),
+                orientation=angle
+            ))
 
         pins_str = "\n".join(pins_sexp)
 
@@ -492,7 +695,7 @@ class SchematicAssemblerAgent:
         return {
             "sexp": sexp,
             "symbol_name": item.part_number,  # Generic symbols use part number as name
-            "pins": self._parse_pins_from_sexp(sexp),
+            "pins": pins,  # Directly use created Pin objects
             "source": "generated",
             "metadata": {"is_generic": True}
         }
@@ -651,7 +854,7 @@ class SchematicAssemblerAgent:
 
         logger.info(f"Placed {len(sheet.symbols)} components on sheet '{sheet.name}'")
 
-    def _route_wires(self, sheet: SchematicSheet, connections: List[Connection]):
+    async def _route_wires(self, sheet: SchematicSheet, connections: List[Connection]):
         """Route wires between connected pins using Enhanced Wire Router.
 
         Features:
@@ -665,48 +868,156 @@ class SchematicAssemblerAgent:
         symbol_map = {s.reference: s for s in sheet.symbols}
 
         # Always use enhanced router (mandatory)
-        self._route_wires_enhanced(sheet, connections, symbol_map)
+        await self._route_wires_enhanced(sheet, connections, symbol_map)
 
-    def _route_wires_enhanced(
+    async def _route_wires_enhanced(
         self,
         sheet: SchematicSheet,
         connections: List[Connection],
         symbol_map: Dict[str, SymbolInstance]
     ):
-        """Route wires using Enhanced Wire Router."""
+        """
+        Route wires using Enhanced Wire Router with comprehensive validation.
+
+        Includes:
+        - Pre-routing validation (structural checks on pins/positions)
+        - Post-routing validation (verify wires were generated)
+        - LLM-based semantic validation (verify connections make sense)
+        """
         logger.info("Using Enhanced Wire Router for professional routing")
 
-        # Build data structures for enhanced router
+        # ========================================
+        # PRE-ROUTING VALIDATION
+        # ========================================
+
+        # Build data structures for enhanced router with validation
         conn_dicts = []
         component_positions = {}
         pin_positions = {}
+        pins_found = 0
+        pins_missing = 0
+        symbols_without_pins = []
 
         for symbol in sheet.symbols:
             component_positions[symbol.reference] = symbol.position
             pin_positions[symbol.reference] = {}
+
+            # VALIDATION: Check if symbol has pins
+            if not symbol.pins:
+                symbols_without_pins.append(f"{symbol.reference} ({symbol.part_number})")
+                logger.warning(
+                    f"Symbol {symbol.reference} ({symbol.part_number}) has NO PINS - "
+                    f"wire routing will fail for connections to this component"
+                )
+                continue
+
             for pin in symbol.pins:
                 abs_pos = symbol.get_absolute_pin_position(pin.name)
                 if abs_pos:
                     pin_positions[symbol.reference][pin.name] = abs_pos
                     # Also add by pin number
                     pin_positions[symbol.reference][pin.number] = abs_pos
+                    pins_found += 1
+                else:
+                    pins_missing += 1
+
+        # VALIDATION: Fail fast if no pins found
+        if pins_found == 0:
+            error_msg = (
+                f"CRITICAL: No pin positions found for {len(sheet.symbols)} components. "
+                f"Wire routing cannot proceed. Check symbol pin parsing."
+            )
+            logger.error(error_msg)
+            if symbols_without_pins:
+                logger.error(f"Symbols without pins: {', '.join(symbols_without_pins[:10])}")
+            raise ValueError(error_msg)
+
+        logger.info(f"Pin validation: {pins_found} found, {pins_missing} missing, {len(symbols_without_pins)} symbols without pins")
+
+        # Build connection list with validation
+        valid_connections = 0
+        invalid_connections = []
 
         for conn in connections:
-            conn_dicts.append({
-                "from_ref": conn.from_ref,
-                "from_pin": conn.from_pin,
-                "to_ref": conn.to_ref,
-                "to_pin": conn.to_pin,
-                "net_name": conn.net_name or f"Net-({conn.from_ref}-{conn.from_pin})"
-            })
+            # VALIDATION: Check if we have positions for both ends
+            from_ref = conn.from_ref
+            to_ref = conn.to_ref
 
-        # Route with enhanced router
+            issues = []
+            if from_ref not in pin_positions:
+                issues.append(f"from_ref '{from_ref}' not found")
+            elif conn.from_pin not in pin_positions.get(from_ref, {}):
+                issues.append(f"from_pin '{conn.from_pin}' not found on {from_ref}")
+
+            if to_ref not in pin_positions:
+                issues.append(f"to_ref '{to_ref}' not found")
+            elif conn.to_pin not in pin_positions.get(to_ref, {}):
+                issues.append(f"to_pin '{conn.to_pin}' not found on {to_ref}")
+
+            if issues:
+                invalid_connections.append({
+                    "net": conn.net_name,
+                    "from": f"{from_ref}.{conn.from_pin}",
+                    "to": f"{to_ref}.{conn.to_pin}",
+                    "issues": issues
+                })
+                logger.warning(f"Connection {conn.net_name}: {'; '.join(issues)}")
+                continue
+
+            conn_dicts.append({
+                "from_ref": from_ref,
+                "from_pin": conn.from_pin,
+                "to_ref": to_ref,
+                "to_pin": conn.to_pin,
+                "net_name": conn.net_name or f"Net-({from_ref}-{conn.from_pin})"
+            })
+            valid_connections += 1
+
+        # VALIDATION: Check if any connections remain
+        if not conn_dicts:
+            error_msg = (
+                f"CRITICAL: No valid connections after filtering. "
+                f"Original: {len(connections)}, Valid: 0. "
+                f"Check that BOM references match connection references."
+            )
+            logger.error(error_msg)
+            if invalid_connections:
+                logger.error(f"Sample invalid connections: {invalid_connections[:5]}")
+            raise ValueError(error_msg)
+
+        logger.info(f"Connection validation: {valid_connections} valid of {len(connections)} total")
+
+        # ========================================
+        # ROUTE WIRES
+        # ========================================
+
         result = self.enhanced_router.route(
             conn_dicts,
             component_positions,
             pin_positions,
             sheet_bounds=(0, 0, self.DEFAULT_SHEET_SIZE[0], self.DEFAULT_SHEET_SIZE[1])
         )
+
+        # ========================================
+        # POST-ROUTING VALIDATION
+        # ========================================
+
+        # VALIDATION: Check if wires were generated
+        if not result.wires:
+            error_msg = (
+                f"CRITICAL: Wire router returned 0 wires for {len(conn_dicts)} connections. "
+                f"This indicates a routing algorithm failure."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # VALIDATION: Check wire-to-connection ratio
+        wire_connection_ratio = len(result.wires) / len(conn_dicts) if conn_dicts else 0
+        if wire_connection_ratio < 0.5:
+            logger.warning(
+                f"Low wire generation ratio: {len(result.wires)} wires for {len(conn_dicts)} connections "
+                f"(ratio: {wire_connection_ratio:.2f}). Some connections may be missing."
+            )
 
         # Convert results to schematic format
         for wire_seg in result.wires:
@@ -749,6 +1060,126 @@ class SchematicAssemblerAgent:
             f"{len(sheet.junctions)} junctions, "
             f"{result.four_way_junctions_avoided} 4-way junctions avoided"
         )
+
+        # ========================================
+        # LLM-BASED SEMANTIC VALIDATION (Optional)
+        # ========================================
+        if self._openrouter_api_key and len(sheet.wires) > 0:
+            await self._validate_routing_with_llm(sheet, connections, valid_connections)
+
+    async def _validate_routing_with_llm(
+        self,
+        sheet: SchematicSheet,
+        connections: List[Connection],
+        valid_connection_count: int
+    ):
+        """
+        Use LLM to semantically validate the wire routing.
+
+        AI-first approach: Uses Claude Opus 4.5 to analyze the routing and
+        identify potential issues that simple structural checks might miss.
+        """
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=60.0)
+
+        # Build summary of routing for LLM analysis
+        wire_summary = []
+        for i, wire in enumerate(sheet.wires[:50]):  # Limit to first 50 for token efficiency
+            wire_summary.append(f"Wire {i+1}: ({wire.start[0]:.2f}, {wire.start[1]:.2f}) → ({wire.end[0]:.2f}, {wire.end[1]:.2f})")
+
+        connection_summary = []
+        for conn in connections[:30]:  # Limit to first 30
+            connection_summary.append(
+                f"{conn.from_ref}.{conn.from_pin} → {conn.to_ref}.{conn.to_pin} ({conn.net_name or 'unnamed'})"
+            )
+
+        component_summary = []
+        for sym in sheet.symbols[:20]:  # Limit to first 20
+            pin_count = len(sym.pins)
+            component_summary.append(f"{sym.reference}: {sym.part_number} ({pin_count} pins) at ({sym.position[0]:.1f}, {sym.position[1]:.1f})")
+
+        prompt = f"""You are an expert electronics engineer validating schematic wire routing.
+
+Analyze this routing and identify any CRITICAL issues. Focus on:
+1. Missing power connections (VCC/GND not connected to ICs)
+2. Floating pins on critical components
+3. Obvious short circuits or crossed wires
+4. Components that appear to be isolated (no connections)
+
+SCHEMATIC SUMMARY:
+- Total Components: {len(sheet.symbols)}
+- Total Wires: {len(sheet.wires)}
+- Total Connections Attempted: {len(connections)}
+- Valid Connections Routed: {valid_connection_count}
+
+COMPONENTS:
+{chr(10).join(component_summary)}
+
+CONNECTIONS:
+{chr(10).join(connection_summary)}
+
+WIRE SEGMENTS (first 50):
+{chr(10).join(wire_summary)}
+
+Return a JSON object with:
+{{
+  "validation_passed": true/false,
+  "critical_issues": ["list of critical issues found"],
+  "warnings": ["list of non-critical warnings"],
+  "recommendations": ["list of recommendations"]
+}}
+
+If everything looks reasonable, set validation_passed to true with empty issues.
+Return ONLY the JSON, no explanations."""
+
+        try:
+            response = await self._http_client.post(
+                OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {self._openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://nexus.adverant.com",
+                    "X-Title": "Nexus EE Design - Routing Validation"
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert electronics engineer. Analyze schematic routing and return structured JSON validation results."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 2000
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            content = result["choices"][0]["message"]["content"].strip()
+
+            # Clean up JSON if wrapped in code block
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+
+            validation_result = json.loads(content)
+
+            if validation_result.get("validation_passed"):
+                logger.info("LLM routing validation: PASSED")
+            else:
+                logger.warning("LLM routing validation: ISSUES FOUND")
+                for issue in validation_result.get("critical_issues", []):
+                    logger.warning(f"  CRITICAL: {issue}")
+                for warning in validation_result.get("warnings", []):
+                    logger.warning(f"  WARNING: {warning}")
+
+            # Store validation results for later use
+            sheet.metadata = sheet.metadata or {}
+            sheet.metadata["llm_routing_validation"] = validation_result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"LLM routing validation returned invalid JSON: {e}")
+        except Exception as e:
+            logger.warning(f"LLM routing validation failed (non-critical): {e}")
 
     def _manhattan_route(
         self,
@@ -867,9 +1298,12 @@ class SchematicAssemblerAgent:
     )
   )'''
 
-    def _extract_inner_symbol(self, sexp: str, symbol_id: str) -> Optional[str]:
+    async def _extract_inner_symbol(self, sexp: str, symbol_id: str) -> Optional[str]:
         """
-        Extract the inner symbol definition from a kicad_symbol_lib wrapper.
+        Extract the inner symbol definition from a kicad_symbol_lib wrapper using LLM.
+
+        AI-first approach: Uses Claude Opus 4.5 to intelligently identify and extract
+        the primary symbol definition from a KiCad symbol library S-expression.
 
         The input format is:
         (kicad_symbol_lib (version ...) (generator ...)
@@ -878,39 +1312,84 @@ class SchematicAssemblerAgent:
 
         We need to extract just the (symbol "NAME" ...) part.
         """
-        # Find the start of the symbol definition (not sub-symbols like _0_1)
-        # Pattern: (symbol "name" where name doesn't end in _0_1 etc.
-        pattern = rf'\(symbol\s+"{re.escape(symbol_id)}"'
-        match = re.search(pattern, sexp)
-
-        if not match:
-            # Try without exact match - find first symbol definition
-            match = re.search(r'\(symbol\s+"[^"_]+[^"]*"(?!\s*_\d)', sexp)
-
-        if not match:
-            logger.warning(f"Could not find symbol {symbol_id} in S-expression")
+        if not self._openrouter_api_key:
+            logger.warning("OpenRouter API key not set - cannot extract symbol via LLM")
             return None
 
-        # Extract the complete symbol by counting parentheses
-        start_pos = match.start()
-        depth = 0
-        end_pos = start_pos
+        # Initialize HTTP client if needed
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=60.0)
 
-        for i, char in enumerate(sexp[start_pos:]):
-            if char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    end_pos = start_pos + i + 1
-                    break
+        prompt = f"""You are a KiCad S-expression parser. Extract the PRIMARY symbol definition from this symbol library.
 
-        # Convert tabs to spaces (KiCad schematic files use spaces, but symbol libraries use tabs)
-        extracted = sexp[start_pos:end_pos]
-        extracted = extracted.replace('\t', '  ')  # Replace tabs with 2 spaces
-        return extracted
+Task: Extract the complete (symbol "NAME" ...) block for symbol ID "{symbol_id}" or the closest matching primary symbol.
 
-    def generate_kicad_sch(self, sheet: SchematicSheet) -> str:
+Rules:
+1. Find the PRIMARY symbol definition (not sub-symbols like _0_1, _1_1, etc.)
+2. Extract the COMPLETE symbol block including ALL nested content (properties, pins, shapes, sub-symbols)
+3. The block starts with (symbol "NAME" and includes all matching closing parentheses
+4. Replace tabs with 2 spaces in the output
+5. Return ONLY the extracted S-expression, no explanations
+
+Example output format:
+(symbol "STM32G431CBT6" (in_bom yes) (on_board yes)
+  (property "Reference" "U" ...)
+  ...
+)
+
+S-expression to parse:
+```
+{sexp[:8000]}
+```
+
+Return ONLY the extracted (symbol ...) block:"""
+
+        try:
+            response = await self._http_client.post(
+                OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {self._openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://nexus.adverant.com",
+                    "X-Title": "Nexus EE Design - Symbol Extraction"
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are a precise KiCad S-expression parser. Extract complete symbol blocks preserving all nested structures. Return only the requested S-expression, no explanations."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 8000
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            content = result["choices"][0]["message"]["content"].strip()
+
+            # Clean up code blocks if present
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+
+            # Ensure it starts with (symbol
+            content = content.strip()
+            if not content.startswith("(symbol"):
+                logger.warning(f"LLM extraction did not return valid symbol: {content[:100]}")
+                return None
+
+            # Replace tabs with spaces
+            content = content.replace('\t', '  ')
+
+            logger.debug(f"LLM extracted symbol definition ({len(content)} chars)")
+            return content
+
+        except Exception as e:
+            logger.error(f"LLM symbol extraction failed: {e}")
+            return None
+
+    async def generate_kicad_sch(self, sheet: SchematicSheet) -> str:
         """Generate KiCad S-expression schematic file."""
         # Build the schematic file
         lines = [
@@ -925,8 +1404,8 @@ class SchematicAssemblerAgent:
         # Add lib_symbols section
         lines.append("  (lib_symbols")
         for symbol_id, sexp in sheet.lib_symbols.items():
-            # Extract just the symbol definition from the library wrapper
-            symbol_content = self._extract_inner_symbol(sexp, symbol_id)
+            # Extract just the symbol definition from the library wrapper (LLM-based)
+            symbol_content = await self._extract_inner_symbol(sexp, symbol_id)
             if symbol_content:
                 # Indent the symbol content
                 indented = "\n".join("    " + line for line in symbol_content.split("\n"))
@@ -1070,7 +1549,7 @@ if __name__ == "__main__":
             print(f"  Labels: {len(sheet.labels)}")
 
             # Generate output
-            output = assembler.generate_kicad_sch(sheet)
+            output = await assembler.generate_kicad_sch(sheet)
             output_path = Path(f"/tmp/{sheet.filename}")
             output_path.write_text(output)
             print(f"  Output: {output_path}")

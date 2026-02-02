@@ -20,6 +20,13 @@ from .schematic_assembler import (
     BlockDiagram,
 )
 
+from .smoke_test import (
+    SmokeTestAgent,
+    SmokeTestResult,
+    SmokeTestIssue,
+    SmokeTestSeverity,
+)
+
 __all__ = [
     # Symbol Fetcher
     'SymbolFetcherAgent',
@@ -33,4 +40,9 @@ __all__ = [
     'BOMItem',
     'Connection',
     'BlockDiagram',
+    # Smoke Test
+    'SmokeTestAgent',
+    'SmokeTestResult',
+    'SmokeTestIssue',
+    'SmokeTestSeverity',
 ]

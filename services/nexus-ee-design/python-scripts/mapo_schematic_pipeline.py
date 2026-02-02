@@ -41,6 +41,7 @@ from agents.wire_router import EnhancedWireRouter
 from agents.functional_validator import MAPOFunctionalValidator
 from agents.visual_validator import DualLLMVisualValidator, ValidationLoop
 from agents.artifact_exporter import ArtifactExporterAgent, ArtifactConfig, ExportResult
+from agents.smoke_test import SmokeTestAgent, SmokeTestResult
 from validation.schematic_vision_validator import (
     SchematicVisionValidator,
     MAPOSchematicLoop,
@@ -141,6 +142,10 @@ class PipelineResult:
     total_time_seconds: float = 0
     errors: List[str] = field(default_factory=list)
 
+    # Smoke test results (circuit validation)
+    smoke_test_result: Optional[SmokeTestResult] = None
+    smoke_test_passed: bool = False
+
     # Artifact export results (PDF, image, NFS sync)
     export_result: Optional[ExportResult] = None
     pdf_path: Optional[Path] = None
@@ -162,6 +167,9 @@ class PipelineResult:
             "iterations": self.iterations,
             "total_time_seconds": self.total_time_seconds,
             "errors": self.errors,
+            # Smoke test results
+            "smoke_test_passed": self.smoke_test_passed,
+            "smoke_test": self.smoke_test_result.to_dict() if self.smoke_test_result else None,
             # Export results
             "pdf_path": str(self.pdf_path) if self.pdf_path else None,
             "svg_path": str(self.svg_path) if self.svg_path else None,
@@ -203,6 +211,7 @@ class MAPOSchematicPipeline:
         self._validator: Optional[SchematicVisionValidator] = None
         self._renderer: Optional[Any] = None  # KiCanvas renderer
         self._artifact_exporter: Optional[ArtifactExporterAgent] = None  # PDF/image export + NFS sync
+        self._smoke_test: Optional[SmokeTestAgent] = None  # SPICE-based circuit validation
 
     async def initialize(self):
         """Initialize all pipeline components."""
@@ -275,6 +284,10 @@ class MAPOSchematicPipeline:
             self._artifact_exporter = ArtifactExporterAgent(artifact_config)
             storage_status = self._artifact_exporter.get_storage_status()
             logger.info(f"Artifact exporter initialized (path: {storage_status['storage_path']}, writable: {storage_status['writable']})")
+
+        # Initialize smoke test agent (LLM-based circuit validation)
+        self._smoke_test = SmokeTestAgent()
+        logger.info("Smoke test agent initialized (LLM-based circuit validation)")
 
         logger.info("Pipeline initialization complete (all MAPO agents ready)")
 
@@ -497,11 +510,41 @@ class MAPOSchematicPipeline:
 
             # Generate output file
             output_path = self.config.output_dir / f"{design_name}.kicad_sch"
-            schematic_content = self._assembler.generate_kicad_sch(sheets[0])
+            schematic_content = await self._assembler.generate_kicad_sch(sheets[0])
             output_path.write_text(schematic_content)
             result.schematic_path = output_path
 
             logger.info(f"Schematic assembled: {output_path}")
+
+            # Phase 3.5: Smoke Test (LLM-based circuit validation)
+            # Ensures circuit won't "smoke" when power is applied
+            if self._smoke_test:
+                logger.info("Running LLM-based smoke test (circuit validation)...")
+                smoke_result = await self._smoke_test.run_smoke_test(
+                    kicad_sch_content=schematic_content,
+                    bom_items=bom,
+                    power_sources=None  # Auto-detect from schematic
+                )
+                result.smoke_test_result = smoke_result
+                result.smoke_test_passed = smoke_result.passed
+
+                if smoke_result.passed:
+                    logger.info("Smoke test: PASSED - circuit appears safe to power")
+                else:
+                    fatal_count = sum(1 for i in smoke_result.issues
+                                     if i.severity.value == "fatal")
+                    error_count = sum(1 for i in smoke_result.issues
+                                     if i.severity.value == "error")
+                    logger.warning(
+                        f"Smoke test: FAILED - {fatal_count} fatal issues, {error_count} errors"
+                    )
+                    for issue in smoke_result.issues[:5]:
+                        logger.warning(f"  [{issue.severity.value.upper()}] {issue.message}")
+
+                    # Add smoke test issues to result errors
+                    for issue in smoke_result.issues:
+                        if issue.severity.value in ("fatal", "error"):
+                            result.errors.append(f"[Smoke Test] {issue.message}")
 
             # Phase 4: MAPO Functional Validation (Competitive Multi-Agent)
             if not skip_validation and self._functional_validator:
