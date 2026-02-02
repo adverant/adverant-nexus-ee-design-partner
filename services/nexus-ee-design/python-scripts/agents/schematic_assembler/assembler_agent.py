@@ -976,16 +976,53 @@ JSON array of pins:"""
                 continue  # Don't try to route wire for power connections
 
             # Regular connection - validate both ends exist
+            # Helper to find pin with normalization (handles "PF0-OSC_IN" -> "PF0" matching)
+            def find_pin_position(ref: str, pin_name: str) -> tuple:
+                """Find pin position, trying multiple name formats."""
+                ref_pins = pin_positions.get(ref, {})
+
+                # Try exact match first
+                if pin_name in ref_pins:
+                    return ref_pins[pin_name], pin_name
+
+                # Try stripping suffixes like "-OSC_IN", "-Pad1", "_A"
+                base_name = pin_name.split('-')[0].split('_')[0]
+                if base_name in ref_pins:
+                    return ref_pins[base_name], base_name
+
+                # Try uppercase/lowercase variations
+                for variant in [pin_name.upper(), pin_name.lower(), base_name.upper(), base_name.lower()]:
+                    if variant in ref_pins:
+                        return ref_pins[variant], variant
+
+                # Try partial match (pin_name starts with or contains symbol pin)
+                for sym_pin, pos in ref_pins.items():
+                    if sym_pin in pin_name or pin_name in sym_pin:
+                        return pos, sym_pin
+
+                return None, None
+
             issues = []
+            resolved_from_pin = conn.from_pin
+            resolved_to_pin = conn.to_pin
+
             if from_ref not in pin_positions:
                 issues.append(f"from_ref '{from_ref}' not found")
-            elif conn.from_pin not in pin_positions.get(from_ref, {}):
-                issues.append(f"from_pin '{conn.from_pin}' not found on {from_ref}")
+            else:
+                pos, resolved = find_pin_position(from_ref, conn.from_pin)
+                if pos is None:
+                    issues.append(f"from_pin '{conn.from_pin}' not found on {from_ref}")
+                else:
+                    resolved_from_pin = resolved
 
             if to_ref not in pin_positions:
                 issues.append(f"to_ref '{to_ref}' not found")
-            elif conn.to_pin not in pin_positions.get(to_ref, {}):
-                issues.append(f"to_pin '{conn.to_pin}' not found on {to_ref}")
+            else:
+                pos, resolved = find_pin_position(to_ref, conn.to_pin)
+                if pos is None:
+                    issues.append(f"to_pin '{conn.to_pin}' not found on {to_ref}")
+                else:
+                    resolved_to_pin = resolved
 
             if issues:
                 invalid_connections.append({
@@ -999,12 +1036,14 @@ JSON array of pins:"""
 
             conn_dicts.append({
                 "from_ref": from_ref,
-                "from_pin": conn.from_pin,
+                "from_pin": resolved_from_pin,  # Use resolved pin name
                 "to_ref": to_ref,
-                "to_pin": conn.to_pin,
-                "net_name": conn.net_name or f"Net-({from_ref}-{conn.from_pin})"
+                "to_pin": resolved_to_pin,  # Use resolved pin name
+                "net_name": conn.net_name or f"Net-({from_ref}-{resolved_from_pin})"
             })
             valid_connections += 1
+            if resolved_from_pin != conn.from_pin or resolved_to_pin != conn.to_pin:
+                logger.info(f"Pin name resolved: {conn.from_pin}->{resolved_from_pin}, {conn.to_pin}->{resolved_to_pin}")
 
         if power_labels_added:
             logger.info(f"Added {len(power_labels_added)} power labels: {power_labels_added[:5]}")
