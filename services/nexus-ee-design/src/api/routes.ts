@@ -15,7 +15,7 @@ import path from 'path';
 import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
-import { generateSchematic as generateKicadSchematic, generateMinimalSchematic } from '../utils/kicad-generator.js';
+import { generateSchematic as generateKicadSchematic, generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-generator.js';
 import { PythonExecutor } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
@@ -1197,15 +1197,20 @@ export function createApiRoutes(io: SocketIOServer): Router {
             };
 
             if (mapoResult.success && mapoResult.schematic_content) {
+              // Parse the generated KiCad schematic to extract component/net metadata
+              const parsed = parseKicadSchematic(mapoResult.schematic_content);
+
               generatedSchematic = {
                 content: mapoResult.schematic_content,
-                sheets: (mapoResult.sheets || []).map((s, i) => ({
-                  name: s.name,
-                  uuid: s.uuid,
-                  page: i + 1,
-                })),
-                components: [], // Components are embedded in the schematic content
-                nets: [],
+                sheets: parsed.sheets.length > 0
+                  ? parsed.sheets
+                  : (mapoResult.sheets || []).map((s, i) => ({
+                      name: s.name,
+                      uuid: s.uuid,
+                      page: i + 1,
+                    })),
+                components: parsed.components,
+                nets: parsed.nets,
               };
 
               // Emit success with real component count
@@ -1219,6 +1224,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
               log.info('MAPO pipeline generated schematic successfully', {
                 projectId,
                 componentCount: mapoResult.component_count,
+                parsedComponents: parsed.components.length,
+                parsedNets: parsed.nets.length,
                 contentLength: mapoResult.schematic_content.length,
               });
             } else {
