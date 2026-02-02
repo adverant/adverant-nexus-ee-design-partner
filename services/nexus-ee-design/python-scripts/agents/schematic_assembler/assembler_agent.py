@@ -935,14 +935,47 @@ JSON array of pins:"""
         logger.info(f"Pin validation: {pins_found} found, {pins_missing} missing, {len(symbols_without_pins)} symbols without pins")
 
         # Build connection list with validation
+        # Handle power connections separately (they use virtual refs like "PWR", "GND")
+        POWER_REFS = {"PWR", "GND", "POWER", "GROUND", "VCC", "VDD", "VSS"}
         valid_connections = 0
         invalid_connections = []
+        power_labels_added = []
 
         for conn in connections:
-            # VALIDATION: Check if we have positions for both ends
             from_ref = conn.from_ref
             to_ref = conn.to_ref
 
+            # Handle power connections specially - add labels instead of wires
+            is_power_from = from_ref.upper() in POWER_REFS
+            is_power_to = to_ref.upper() in POWER_REFS
+
+            if is_power_from or is_power_to:
+                # Power connection - add label at the component pin
+                if is_power_to and from_ref in pin_positions:
+                    # Connection from component to power rail
+                    pin_pos = pin_positions.get(from_ref, {}).get(conn.from_pin)
+                    if pin_pos:
+                        label_text = conn.net_name or conn.to_pin or "VCC"
+                        sheet.labels.append(Label(
+                            text=label_text,
+                            position=(pin_pos[0] + 2.54, pin_pos[1]),
+                            rotation=0
+                        ))
+                        power_labels_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
+                elif is_power_from and to_ref in pin_positions:
+                    # Connection from power rail to component
+                    pin_pos = pin_positions.get(to_ref, {}).get(conn.to_pin)
+                    if pin_pos:
+                        label_text = conn.net_name or conn.from_pin or "VCC"
+                        sheet.labels.append(Label(
+                            text=label_text,
+                            position=(pin_pos[0] + 2.54, pin_pos[1]),
+                            rotation=0
+                        ))
+                        power_labels_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
+                continue  # Don't try to route wire for power connections
+
+            # Regular connection - validate both ends exist
             issues = []
             if from_ref not in pin_positions:
                 issues.append(f"from_ref '{from_ref}' not found")
@@ -973,8 +1006,11 @@ JSON array of pins:"""
             })
             valid_connections += 1
 
-        # VALIDATION: Check if any connections remain
-        if not conn_dicts:
+        if power_labels_added:
+            logger.info(f"Added {len(power_labels_added)} power labels: {power_labels_added[:5]}")
+
+        # VALIDATION: Check if any connections remain (allow if we added power labels)
+        if not conn_dicts and not power_labels_added:
             error_msg = (
                 f"CRITICAL: No valid connections after filtering. "
                 f"Original: {len(connections)}, Valid: 0. "
@@ -988,36 +1024,42 @@ JSON array of pins:"""
         logger.info(f"Connection validation: {valid_connections} valid of {len(connections)} total")
 
         # ========================================
-        # ROUTE WIRES
+        # ROUTE WIRES (only if we have non-power connections)
         # ========================================
 
-        result = self.enhanced_router.route(
-            conn_dicts,
-            component_positions,
-            pin_positions,
-            sheet_bounds=(0, 0, self.DEFAULT_SHEET_SIZE[0], self.DEFAULT_SHEET_SIZE[1])
-        )
-
-        # ========================================
-        # POST-ROUTING VALIDATION
-        # ========================================
-
-        # VALIDATION: Check if wires were generated
-        if not result.wires:
-            error_msg = (
-                f"CRITICAL: Wire router returned 0 wires for {len(conn_dicts)} connections. "
-                f"This indicates a routing algorithm failure."
+        if conn_dicts:
+            result = self.enhanced_router.route(
+                conn_dicts,
+                component_positions,
+                pin_positions,
+                sheet_bounds=(0, 0, self.DEFAULT_SHEET_SIZE[0], self.DEFAULT_SHEET_SIZE[1])
             )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
 
-        # VALIDATION: Check wire-to-connection ratio
-        wire_connection_ratio = len(result.wires) / len(conn_dicts) if conn_dicts else 0
-        if wire_connection_ratio < 0.5:
-            logger.warning(
-                f"Low wire generation ratio: {len(result.wires)} wires for {len(conn_dicts)} connections "
-                f"(ratio: {wire_connection_ratio:.2f}). Some connections may be missing."
-            )
+            # ========================================
+            # POST-ROUTING VALIDATION
+            # ========================================
+
+            # VALIDATION: Check if wires were generated
+            if not result.wires:
+                error_msg = (
+                    f"CRITICAL: Wire router returned 0 wires for {len(conn_dicts)} connections. "
+                    f"This indicates a routing algorithm failure."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+        else:
+            # Only power labels, no wires needed
+            logger.info(f"No non-power connections to route - only power labels added")
+            result = type('RouterResult', (), {'wires': [], 'junctions': [], 'four_way_junctions_avoided': 0})()
+
+        # VALIDATION: Check wire-to-connection ratio (only if we have connections to route)
+        if conn_dicts:
+            wire_connection_ratio = len(result.wires) / len(conn_dicts)
+            if wire_connection_ratio < 0.5:
+                logger.warning(
+                    f"Low wire generation ratio: {len(result.wires)} wires for {len(conn_dicts)} connections "
+                    f"(ratio: {wire_connection_ratio:.2f}). Some connections may be missing."
+                )
 
         # Convert results to schematic format
         for wire_seg in result.wires:
