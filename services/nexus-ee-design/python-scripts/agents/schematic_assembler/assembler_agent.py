@@ -533,9 +533,11 @@ Return ONLY a JSON array of pin objects, no explanation:
 
 If no pins are found, return an empty array: []
 
+IMPORTANT: You MUST extract ALL pins, even if there are 48+ pins. Do not truncate or summarize.
+
 KiCad S-expression:
 ```
-{sexp[:8000]}
+{sexp[:40000]}
 ```
 
 JSON array of pins:"""
@@ -558,7 +560,7 @@ JSON array of pins:"""
                         }
                     ],
                     "temperature": 0.0,  # Deterministic parsing
-                    "max_tokens": 4096
+                    "max_tokens": 16384  # Increased for symbols with 48+ pins
                 }
             )
 
@@ -940,68 +942,81 @@ JSON array of pins:"""
         valid_connections = 0
         invalid_connections = []
         power_labels_added = []
+        power_wires_added = []  # Track wires to power symbols
+
+        # Helper to find pin with normalization (handles "PF0-OSC_IN" -> "PF0" matching)
+        # MUST be defined before power connection handling
+        def find_pin_position(ref: str, pin_name: str) -> tuple:
+            """Find pin position, trying multiple name formats."""
+            ref_pins = pin_positions.get(ref, {})
+
+            # Try exact match first
+            if pin_name in ref_pins:
+                return ref_pins[pin_name], pin_name
+
+            # Try stripping suffixes like "-OSC_IN", "-Pad1", "_A"
+            base_name = pin_name.split('-')[0].split('_')[0]
+            if base_name in ref_pins:
+                return ref_pins[base_name], base_name
+
+            # Try uppercase/lowercase variations
+            for variant in [pin_name.upper(), pin_name.lower(), base_name.upper(), base_name.lower()]:
+                if variant in ref_pins:
+                    return ref_pins[variant], variant
+
+            # Try partial match (pin_name starts with or contains symbol pin)
+            for sym_pin, pos in ref_pins.items():
+                if sym_pin in pin_name or pin_name in sym_pin:
+                    return pos, sym_pin
+
+            return None, None
+
+        # Track power symbol positions for wire routing
+        power_symbol_positions = {}  # {"VCC": (x, y), "GND": (x, y)}
 
         for conn in connections:
             from_ref = conn.from_ref
             to_ref = conn.to_ref
 
-            # Handle power connections specially - add labels instead of wires
+            # Handle power connections specially
             is_power_from = from_ref.upper() in POWER_REFS
             is_power_to = to_ref.upper() in POWER_REFS
 
             if is_power_from or is_power_to:
-                # Power connection - add label at the component pin
+                # Power connection - find the component pin position using normalization
                 if is_power_to and from_ref in pin_positions:
-                    # Connection from component to power rail
-                    pin_pos = pin_positions.get(from_ref, {}).get(conn.from_pin)
+                    # Connection from component to power rail (e.g., U1.VDD -> PWR.VCC)
+                    pin_pos, resolved_pin = find_pin_position(from_ref, conn.from_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.to_pin or "VCC"
+                        # Place power label at the pin position
                         sheet.labels.append(Label(
                             text=label_text,
                             position=(pin_pos[0] + 2.54, pin_pos[1]),
-                            rotation=0
+                            rotation=0,
+                            label_type="global_label"
                         ))
                         power_labels_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
+                    else:
+                        logger.warning(f"Power pin {conn.from_pin} not found on {from_ref} (tried normalization)")
                 elif is_power_from and to_ref in pin_positions:
-                    # Connection from power rail to component
-                    pin_pos = pin_positions.get(to_ref, {}).get(conn.to_pin)
+                    # Connection from power rail to component (e.g., PWR.VCC -> U1.VDD)
+                    pin_pos, resolved_pin = find_pin_position(to_ref, conn.to_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.from_pin or "VCC"
+                        # Place power label at the pin position
                         sheet.labels.append(Label(
                             text=label_text,
                             position=(pin_pos[0] + 2.54, pin_pos[1]),
-                            rotation=0
+                            rotation=0,
+                            label_type="global_label"
                         ))
                         power_labels_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
+                    else:
+                        logger.warning(f"Power pin {conn.to_pin} not found on {to_ref} (tried normalization)")
                 continue  # Don't try to route wire for power connections
 
             # Regular connection - validate both ends exist
-            # Helper to find pin with normalization (handles "PF0-OSC_IN" -> "PF0" matching)
-            def find_pin_position(ref: str, pin_name: str) -> tuple:
-                """Find pin position, trying multiple name formats."""
-                ref_pins = pin_positions.get(ref, {})
-
-                # Try exact match first
-                if pin_name in ref_pins:
-                    return ref_pins[pin_name], pin_name
-
-                # Try stripping suffixes like "-OSC_IN", "-Pad1", "_A"
-                base_name = pin_name.split('-')[0].split('_')[0]
-                if base_name in ref_pins:
-                    return ref_pins[base_name], base_name
-
-                # Try uppercase/lowercase variations
-                for variant in [pin_name.upper(), pin_name.lower(), base_name.upper(), base_name.lower()]:
-                    if variant in ref_pins:
-                        return ref_pins[variant], variant
-
-                # Try partial match (pin_name starts with or contains symbol pin)
-                for sym_pin, pos in ref_pins.items():
-                    if sym_pin in pin_name or pin_name in sym_pin:
-                        return pos, sym_pin
-
-                return None, None
-
             issues = []
             resolved_from_pin = conn.from_pin
             resolved_to_pin = conn.to_pin
