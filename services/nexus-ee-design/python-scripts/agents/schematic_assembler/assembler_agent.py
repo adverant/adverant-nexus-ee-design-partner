@@ -947,8 +947,17 @@ JSON array of pins:"""
         # Helper to find pin with normalization (handles "PF0-OSC_IN" -> "PF0" matching)
         # MUST be defined before power connection handling
         def find_pin_position(ref: str, pin_name: str) -> tuple:
-            """Find pin position, trying multiple name formats."""
+            """Find pin position, trying multiple name formats and power net equivalents."""
             ref_pins = pin_positions.get(ref, {})
+
+            # Power net equivalents - VCC/VDD/3V3 are interchangeable, GND/VSS/GROUND are interchangeable
+            POWER_EQUIVALENTS = {
+                "VCC": ["VDD", "VDD1", "VDD2", "VDD3", "VDDA", "VDDIO", "3V3", "5V", "+3.3V", "+5V"],
+                "VDD": ["VCC", "VDD1", "VDD2", "VDD3", "VDDA", "VDDIO", "3V3", "5V"],
+                "GND": ["VSS", "VSS1", "VSS2", "VSSA", "GROUND", "DGND", "AGND", "GND1", "GND2"],
+                "VSS": ["GND", "VSS1", "VSS2", "VSSA", "GROUND", "DGND", "AGND"],
+                "VBAT": ["VBAT", "BAT", "VBACKUP"],
+            }
 
             # Try exact match first
             if pin_name in ref_pins:
@@ -963,6 +972,17 @@ JSON array of pins:"""
             for variant in [pin_name.upper(), pin_name.lower(), base_name.upper(), base_name.lower()]:
                 if variant in ref_pins:
                     return ref_pins[variant], variant
+
+            # Try power net equivalents
+            pin_upper = pin_name.upper()
+            for canonical, equivalents in POWER_EQUIVALENTS.items():
+                if pin_upper == canonical or pin_upper in equivalents:
+                    # Try all equivalents
+                    for equiv in [canonical] + equivalents:
+                        if equiv in ref_pins:
+                            return ref_pins[equiv], equiv
+                        if equiv.lower() in ref_pins:
+                            return ref_pins[equiv.lower()], equiv.lower()
 
             # Try partial match (pin_name starts with or contains symbol pin)
             for sym_pin, pos in ref_pins.items():
