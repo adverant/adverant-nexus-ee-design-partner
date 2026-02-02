@@ -814,6 +814,59 @@ class SchematicAssemblerAgent:
                                 label_type="global_label"
                             ))
 
+    def _generate_placeholder_lib_symbol(self, symbol_id: str) -> str:
+        """
+        Generate a placeholder lib_symbol definition for KiCanvas compatibility.
+
+        When a symbol definition is missing, KiCanvas crashes. This generates
+        a minimal valid symbol definition to prevent crashes while making it
+        obvious the symbol needs to be replaced.
+        """
+        # Escape quotes in symbol_id
+        safe_id = symbol_id.replace('"', '\\"')
+
+        return f'''(symbol "{safe_id}" (in_bom yes) (on_board yes)
+    (property "Reference" "?" (at 0 1.27 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "{safe_id} [MISSING]" (at 0 -1.27 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "{safe_id}_0_1"
+      (rectangle (start -5.08 5.08) (end 5.08 -5.08)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+      (text "?" (at 0 0 0)
+        (effects (font (size 3.81 3.81)))
+      )
+    )
+    (symbol "{safe_id}_1_1"
+      (pin passive line (at -7.62 2.54 0) (length 2.54)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at -7.62 0 0) (length 2.54)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 7.62 2.54 180) (length 2.54)
+        (name "3" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 7.62 0 180) (length 2.54)
+        (name "4" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )'''
+
     def _extract_inner_symbol(self, sexp: str, symbol_id: str) -> Optional[str]:
         """
         Extract the inner symbol definition from a kicad_symbol_lib wrapper.
@@ -877,6 +930,12 @@ class SchematicAssemblerAgent:
             if symbol_content:
                 # Indent the symbol content
                 indented = "\n".join("    " + line for line in symbol_content.split("\n"))
+                lines.append(indented)
+            else:
+                # Generate a placeholder lib_symbol to prevent KiCanvas crashes
+                logger.warning(f"Missing lib_symbol for {symbol_id}, generating placeholder")
+                placeholder = self._generate_placeholder_lib_symbol(symbol_id)
+                indented = "\n".join("    " + line for line in placeholder.split("\n"))
                 lines.append(indented)
         lines.append("  )")
         lines.append("")
