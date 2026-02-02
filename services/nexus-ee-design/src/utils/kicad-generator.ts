@@ -879,23 +879,40 @@ export function parseKicadSchematic(content: string): {
   }
 
   // Parse symbol instances to extract components
-  // Pattern: (symbol (lib_id "name") ... (uuid "uuid") ... (property "Reference" "R1" ...) (property "Value" "10k" ...)
-  // We need to match symbol blocks that are NOT inside lib_symbols section
+  // Symbol instances have (at X Y angle) which distinguishes them from lib_symbols definitions
+  // Pattern: (symbol (lib_id "name") (at X Y angle) ... (uuid "uuid") ... properties
 
-  // First, find the end of lib_symbols section
-  const libSymbolsEnd = content.indexOf(')\n  (');
-  const schematicBody = libSymbolsEnd > 0 ? content.substring(libSymbolsEnd) : content;
+  // Find symbol placements by looking for (symbol (lib_id with (at pattern
+  // This ensures we're matching placed symbols, not library definitions
+  const symbolBlockPattern = /\(symbol\s+\(lib_id\s+"([^"]+)"\)\s+\(at\s+[\d.\-]+\s+[\d.\-]+\s+[\d.\-]+\)/g;
 
-  // Match symbol placements (not definitions)
-  const symbolPattern = /\(symbol\s+\(lib_id\s+"([^"]+)"\)[^]*?\(uuid\s+"([^"]+)"\)[^]*?\(property\s+"Reference"\s+"([^"]+)"[^]*?\(property\s+"Value"\s+"([^"]+)"/g;
+  let blockMatch;
+  while ((blockMatch = symbolBlockPattern.exec(content)) !== null) {
+    const startIdx = blockMatch.index;
+    const libId = blockMatch[1];
 
-  let match;
-  while ((match = symbolPattern.exec(schematicBody)) !== null) {
-    const [, libId, uuid, reference, value] = match;
-    // Skip power symbols (VCC, GND, etc.)
-    if (reference.startsWith('#') || reference.match(/^(VCC|GND|PWR)/)) {
+    // Find the uuid and properties within this symbol block
+    // We need to find the matching closing parenthesis, but for simplicity
+    // we'll extract from a reasonable chunk of text after the match
+    const searchChunk = content.substring(startIdx, startIdx + 2000);
+
+    // Extract UUID
+    const uuidMatch = searchChunk.match(/\(uuid\s+"([^"]+)"\)/);
+    const uuid = uuidMatch ? uuidMatch[1] : '';
+
+    // Extract Reference property
+    const refMatch = searchChunk.match(/\(property\s+"Reference"\s+"([^"]+)"/);
+    const reference = refMatch ? refMatch[1] : '';
+
+    // Extract Value property
+    const valueMatch = searchChunk.match(/\(property\s+"Value"\s+"([^"]+)"/);
+    const value = valueMatch ? valueMatch[1] : '';
+
+    // Skip power symbols (VCC, GND, etc.) and invalid matches
+    if (!reference || reference.startsWith('#') || reference.match(/^(VCC|GND|PWR)/i)) {
       continue;
     }
+
     components.push({
       reference,
       value,
@@ -906,36 +923,36 @@ export function parseKicadSchematic(content: string): {
   }
 
   // Parse wires to count net connections
-  const wirePattern = /\(wire\s+\(pts\s+\(xy\s+[\d.]+\s+[\d.]+\)\s+\(xy\s+[\d.]+\s+[\d.]+\)\)/g;
+  const wirePattern = /\(wire\s+\(pts\s+\(xy\s+[\d.\-]+\s+[\d.\-]+\)\s+\(xy\s+[\d.\-]+\s+[\d.\-]+\)\)/g;
   const wireMatches = content.match(wirePattern) || [];
 
   // Parse labels for named nets
-  const labelPattern = /\(label\s+"([^"]+)"[^)]+\(uuid\s+"([^"]+)"\)/g;
+  const labelPattern = /\(label\s+"([^"]+)"/g;
   let labelMatch;
   let netCode = 1;
   const seenNets = new Set<string>();
 
   while ((labelMatch = labelPattern.exec(content)) !== null) {
-    const [, name, uuid] = labelMatch;
+    const name = labelMatch[1];
     if (!seenNets.has(name)) {
       seenNets.add(name);
       nets.push({
         name,
-        uuid,
+        uuid: randomUUID(),
         code: netCode++,
       });
     }
   }
 
   // Also parse global labels
-  const globalLabelPattern = /\(global_label\s+"([^"]+)"[^)]+\(uuid\s+"([^"]+)"\)/g;
+  const globalLabelPattern = /\(global_label\s+"([^"]+)"/g;
   while ((labelMatch = globalLabelPattern.exec(content)) !== null) {
-    const [, name, uuid] = labelMatch;
+    const name = labelMatch[1];
     if (!seenNets.has(name)) {
       seenNets.add(name);
       nets.push({
         name,
-        uuid,
+        uuid: randomUUID(),
         code: netCode++,
       });
     }
