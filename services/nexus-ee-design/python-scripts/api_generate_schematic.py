@@ -33,7 +33,6 @@ from mapo_schematic_pipeline import (
     MAPOSchematicPipeline,
     PipelineConfig,
     PipelineResult,
-    generate_schematic
 )
 
 logging.basicConfig(
@@ -216,13 +215,18 @@ async def run_generation(
             project_id=project_id,
         )
 
-        # Run generation
-        result = await generate_schematic(
-            bom=bom,
-            design_intent=design_intent,
-            design_name=design_name,
-            skip_validation=skip_validation
-        )
+        # Run generation using pipeline with config (not convenience function)
+        # The config includes auto_export settings for PDF/image and NFS sync
+        pipeline = MAPOSchematicPipeline(config)
+        try:
+            result = await pipeline.generate(
+                bom=bom,
+                design_intent=design_intent,
+                design_name=design_name,
+                skip_validation=skip_validation
+            )
+        finally:
+            await pipeline.close()
 
         # Read generated schematic content
         schematic_content = ""
