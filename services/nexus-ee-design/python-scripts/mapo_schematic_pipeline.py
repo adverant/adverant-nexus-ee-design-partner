@@ -273,8 +273,8 @@ class MAPOSchematicPipeline:
                 project_id=self.config.project_id,
             )
             self._artifact_exporter = ArtifactExporterAgent(artifact_config)
-            nfs_status = self._artifact_exporter.get_nfs_status()
-            logger.info(f"Artifact exporter initialized (NFS: {nfs_status['mounted']}, path: {nfs_status['nfs_path']})")
+            storage_status = self._artifact_exporter.get_storage_status()
+            logger.info(f"Artifact exporter initialized (path: {storage_status['storage_path']}, writable: {storage_status['writable']})")
 
         logger.info("Pipeline initialization complete (all MAPO agents ready)")
 
