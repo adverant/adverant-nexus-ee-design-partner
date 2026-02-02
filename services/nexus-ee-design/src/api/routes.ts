@@ -1264,13 +1264,41 @@ export function createApiRoutes(io: SocketIOServer): Router {
       });
 
       // Create schematic record with generated content
-      // The CreateSchematicInput type allows simplified sheet/component/net structures
-      // that get stored as JSON in the database
+      // Transform parsed metadata to match database schema types
+      const dbSheets: import('../types/index.js').SchematicSheet[] = generatedSchematic.sheets.map((s) => ({
+        id: s.uuid,
+        name: s.name,
+        pageNumber: s.page,
+        components: generatedSchematic.components.map((c) => c.uuid),
+        nets: generatedSchematic.nets.map((n) => n.uuid),
+      }));
+
+      const dbComponents: import('../types/index.js').Component[] = generatedSchematic.components.map((c) => ({
+        id: c.uuid,
+        reference: c.reference,
+        value: c.value,
+        footprint: '',
+        position: { x: 0, y: 0 },
+        rotation: 0,
+        properties: { library: (c as any).library || '', symbol: (c as any).symbol || '' },
+        pins: [],
+      }));
+
+      const dbNets: import('../types/index.js').Net[] = generatedSchematic.nets.map((n) => ({
+        id: n.uuid,
+        name: n.name,
+        connections: [],
+        properties: {},
+      }));
+
       const schematicInput: CreateSchematicInput = {
         projectId,
         name: req.body.name || `${project.name} Schematic`,
         format: 'kicad_sch',
         kicadSch: generatedSchematic.content,
+        sheets: dbSheets,
+        components: dbComponents,
+        nets: dbNets,
       };
 
       const schematic = await createSchematic(schematicInput);
