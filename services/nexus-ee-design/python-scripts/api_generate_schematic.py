@@ -202,6 +202,7 @@ async def run_generation(
         logger.info(f"Output directory: {output_path}")
 
         # Configure pipeline with auto-export to PDF/image and NFS
+        # nfs_base_path uses ARTIFACT_STORAGE_PATH env var (defaults to /data/artifacts in K8s)
         config = PipelineConfig(
             output_dir=output_path,
             validation_threshold=0.85,
@@ -211,7 +212,6 @@ async def run_generation(
             export_pdf=True,
             export_svg=True,
             export_png=True,
-            nfs_base_path="/Volumes/Nexus/plugins/ee-design-plugin/artifacts",
             project_id=project_id,
         )
 
