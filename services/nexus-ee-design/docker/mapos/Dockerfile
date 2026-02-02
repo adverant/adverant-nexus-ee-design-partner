@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     x11vnc \
     python3 \
     python3-pip \
+    imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
 # Add KiCad PPA and install KiCad

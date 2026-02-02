@@ -45,9 +45,13 @@ DATA_DIR = Path(os.environ.get('PCB_DATA_DIR', os.environ.get('MAPOS_DATA_DIR', 
 OUTPUT_DIR = Path(os.environ.get('OUTPUT_DIR', os.environ.get('MAPOS_OUTPUT_DIR', '/output')))
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 
+# Schematic export directory (for PDF/SVG/PNG export via kicad-cli)
+SCHEMATIC_DATA_DIR = Path(os.environ.get('SCHEMATIC_DATA_DIR', '/schematic-data'))
+
 # Ensure directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+SCHEMATIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
 # API Models
@@ -135,6 +139,41 @@ class UnifiedOptimizerRequest(BaseModel):
     mode: str = Field(default="hybrid", description="Mode: base, llm, gaming_ai, or hybrid")
     target_violations: int = Field(default=100, description="Target DRC violations")
     api_key: Optional[str] = Field(default=None, description="OpenRouter API key")
+
+
+# ============================================================================
+# Schematic Export Models (for PDF/SVG/PNG export via kicad-cli)
+# ============================================================================
+
+class SchematicExportFormat(str, Enum):
+    """Supported schematic export formats."""
+    PDF = "pdf"
+    SVG = "svg"
+    PNG = "png"
+
+
+class SchematicExportRequest(BaseModel):
+    """Request to export a schematic to PDF/SVG/PNG."""
+    schematic_content: str = Field(..., description="Full .kicad_sch file content")
+    export_format: SchematicExportFormat = Field(..., description="Export format: pdf, svg, or png")
+    design_name: str = Field(default="schematic", description="Base name for output file")
+    # PNG-specific options
+    dpi: int = Field(default=300, description="DPI for PNG export (default: 300)")
+    # PDF/SVG options
+    black_and_white: bool = Field(default=False, description="Export in black and white")
+    no_background: bool = Field(default=False, description="Export with transparent background (SVG only)")
+
+
+class SchematicExportResponse(BaseModel):
+    """Response from schematic export."""
+    success: bool
+    export_id: str = Field(..., description="Unique export ID for download")
+    format: str
+    filename: str
+    size_bytes: int
+    download_url: str
+    errors: List[str] = Field(default_factory=list)
+    duration_seconds: float
 
 
 # ============================================================================
@@ -345,6 +384,188 @@ async def get_symbol(library_name: str, symbol_name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error extracting symbol: {str(e)}")
+
+
+# ============================================================================
+# Schematic Export Endpoints (PDF/SVG/PNG via kicad-cli)
+# ============================================================================
+
+@app.post("/v1/schematic/export", response_model=SchematicExportResponse)
+async def export_schematic(request: SchematicExportRequest):
+    """
+    Export a KiCad schematic to PDF, SVG, or PNG format.
+
+    This endpoint:
+    1. Receives schematic content as a string
+    2. Saves it to a temporary .kicad_sch file
+    3. Runs kicad-cli sch export {format}
+    4. Returns download URL for the exported file
+
+    For PNG export, uses ImageMagick to convert from SVG if direct PNG export fails.
+    """
+    import uuid
+    start_time = datetime.utcnow()
+    export_id = str(uuid.uuid4())[:8]
+    errors = []
+
+    # Create export directory
+    export_dir = SCHEMATIC_DATA_DIR / export_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save schematic content to file
+    sch_filename = f"{request.design_name}.kicad_sch"
+    sch_path = export_dir / sch_filename
+
+    try:
+        sch_path.write_text(request.schematic_content, encoding='utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save schematic: {str(e)}")
+
+    # Determine output filename
+    format_ext = request.export_format.value
+    output_filename = f"{request.design_name}.{format_ext}"
+    output_path = export_dir / output_filename
+
+    # Build kicad-cli command
+    if request.export_format == SchematicExportFormat.PDF:
+        cmd = ['sch', 'export', 'pdf', '-o', str(output_path)]
+        if request.black_and_white:
+            cmd.append('--black-and-white')
+        cmd.append(str(sch_path))
+
+    elif request.export_format == SchematicExportFormat.SVG:
+        cmd = ['sch', 'export', 'svg', '-o', str(export_dir)]  # SVG outputs to directory
+        if request.black_and_white:
+            cmd.append('--black-and-white')
+        if request.no_background:
+            cmd.append('--no-background-color')
+        cmd.append(str(sch_path))
+        # SVG export creates file with sheet name, we'll rename it
+
+    elif request.export_format == SchematicExportFormat.PNG:
+        # KiCad doesn't have direct PNG export for schematics
+        # We'll export SVG first, then convert with ImageMagick
+        svg_path = export_dir / f"{request.design_name}.svg"
+        cmd = ['sch', 'export', 'svg', '-o', str(export_dir)]
+        if request.black_and_white:
+            cmd.append('--black-and-white')
+        cmd.append(str(sch_path))
+
+    # Run kicad-cli export
+    cli_result = run_kicad_cli(cmd, timeout=60)
+
+    if not cli_result.get('success'):
+        error_msg = cli_result.get('error', 'Unknown export error')
+        errors.append(f"kicad-cli error: {error_msg}")
+        # Don't fail yet for PNG - we might still convert
+        if request.export_format != SchematicExportFormat.PNG:
+            raise HTTPException(status_code=500, detail=f"Export failed: {error_msg}")
+
+    # Handle SVG renaming (kicad-cli uses sheet name)
+    if request.export_format == SchematicExportFormat.SVG:
+        svg_files = list(export_dir.glob("*.svg"))
+        if svg_files:
+            # Rename first SVG to our desired name
+            svg_files[0].rename(output_path)
+
+    # Handle PNG conversion from SVG
+    if request.export_format == SchematicExportFormat.PNG:
+        svg_files = list(export_dir.glob("*.svg"))
+        if svg_files:
+            svg_source = svg_files[0]
+            # Convert SVG to PNG using ImageMagick
+            try:
+                convert_result = subprocess.run(
+                    ['convert', '-density', str(request.dpi), str(svg_source), str(output_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if convert_result.returncode != 0:
+                    errors.append(f"ImageMagick conversion error: {convert_result.stderr}")
+                # Clean up SVG
+                svg_source.unlink()
+            except FileNotFoundError:
+                errors.append("ImageMagick not installed - PNG conversion unavailable")
+            except Exception as e:
+                errors.append(f"PNG conversion failed: {str(e)}")
+
+    # Check if output file exists
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed - output file not created. Errors: {'; '.join(errors)}"
+        )
+
+    duration = (datetime.utcnow() - start_time).total_seconds()
+
+    return SchematicExportResponse(
+        success=len(errors) == 0,
+        export_id=export_id,
+        format=request.export_format.value,
+        filename=output_filename,
+        size_bytes=output_path.stat().st_size,
+        download_url=f"/v1/schematic/download/{export_id}/{output_filename}",
+        errors=errors,
+        duration_seconds=duration
+    )
+
+
+@app.get("/v1/schematic/download/{export_id}/{filename}")
+async def download_schematic_export(export_id: str, filename: str):
+    """
+    Download an exported schematic file.
+
+    Args:
+        export_id: The export ID returned from /v1/schematic/export
+        filename: The filename to download (e.g., "schematic.pdf")
+
+    Returns:
+        The exported file as a download
+    """
+    export_dir = SCHEMATIC_DATA_DIR / export_id
+    file_path = export_dir / filename
+
+    if not export_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Export not found: {export_id}")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    # Determine media type
+    media_types = {
+        '.pdf': 'application/pdf',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+    }
+    suffix = Path(filename).suffix.lower()
+    media_type = media_types.get(suffix, 'application/octet-stream')
+
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type=media_type
+    )
+
+
+@app.delete("/v1/schematic/export/{export_id}")
+async def cleanup_schematic_export(export_id: str):
+    """
+    Clean up an export directory to free disk space.
+
+    Args:
+        export_id: The export ID to clean up
+    """
+    export_dir = SCHEMATIC_DATA_DIR / export_id
+
+    if not export_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Export not found: {export_id}")
+
+    try:
+        shutil.rmtree(export_dir)
+        return {"success": True, "message": f"Cleaned up export {export_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
 
 @app.get("/v1/operations")

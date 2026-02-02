@@ -89,6 +89,11 @@ spec:
               value: "/data/projects"
             - name: OUTPUT_DIR
               value: "/data/output"
+            # NFS-backed artifact storage (accessible from terminal-computer)
+            - name: ARTIFACT_STORAGE_PATH
+              value: "/data/artifacts"
+            - name: KICAD_WORKER_URL
+              value: "http://mapos-kicad-worker.nexus.svc.cluster.local:8080"
 
             # Service URLs
             - name: NEXUS_GRAPHRAG_URL
@@ -182,6 +187,10 @@ spec:
               mountPath: /tmp
             - name: ee-design-data
               mountPath: /data
+            # NFS-backed artifacts (appears at /workspaces/ee-design/artifacts/ on terminal-computer)
+            - name: ee-design-artifacts
+              mountPath: /data/artifacts
+              subPath: ee-design/artifacts
 
       volumes:
         - name: tmp
@@ -190,6 +199,10 @@ spec:
         - name: ee-design-data
           emptyDir:
             sizeLimit: "10Gi"
+        # NFS-backed artifacts storage (shared with terminal-computer)
+        - name: ee-design-artifacts
+          persistentVolumeClaim:
+            claimName: nexus-user-workspaces
 
       terminationGracePeriodSeconds: 60
 

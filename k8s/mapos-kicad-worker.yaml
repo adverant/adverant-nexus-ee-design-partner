@@ -100,6 +100,8 @@ spec:
               value: "/pcb-data"
             - name: OUTPUT_DIR
               value: "/pcb-data/output"
+            - name: SCHEMATIC_DATA_DIR
+              value: "/schematic-data"
 
             # MAPOS optimization settings
             - name: MAPOS_TARGET_VIOLATIONS
@@ -170,6 +172,8 @@ spec:
           volumeMounts:
             - name: pcb-data
               mountPath: /pcb-data
+            - name: schematic-data
+              mountPath: /schematic-data
             - name: xvfb-socket
               mountPath: /tmp/.X11-unix
 
@@ -207,6 +211,9 @@ spec:
         - name: pcb-data
           persistentVolumeClaim:
             claimName: mapos-pcb-data
+        - name: schematic-data
+          emptyDir:
+            sizeLimit: "2Gi"
         - name: xvfb-socket
           emptyDir: {}
 
