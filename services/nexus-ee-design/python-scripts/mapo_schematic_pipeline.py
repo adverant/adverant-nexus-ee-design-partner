@@ -119,7 +119,7 @@ class PipelineConfig:
     export_pdf: bool = True
     export_svg: bool = True
     export_png: bool = True
-    nfs_base_path: str = "/Volumes/Nexus/plugins/ee-design-plugin/artifacts"
+    nfs_base_path: str = field(default_factory=lambda: os.environ.get('ARTIFACT_STORAGE_PATH', '/data/artifacts'))
     project_id: Optional[str] = None
 
     def __post_init__(self):
