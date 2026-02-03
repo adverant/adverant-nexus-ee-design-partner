@@ -285,7 +285,7 @@ class SymbolFetcherAgent:
         allow_placeholder: bool = True
     ) -> FetchedSymbol:
         """
-        Fetch symbol using priority fallback chain.
+        Fetch symbol using priority fallback chain with nexus-memory learning.
 
         Args:
             part_number: Component part number (e.g., "STM32G431CBT6")
@@ -300,6 +300,19 @@ class SymbolFetcherAgent:
             SymbolResolutionError: If all sources fail and allow_placeholder is False
         """
         logger.info(f"Fetching symbol: {part_number} (manufacturer: {manufacturer}, category: {category})")
+
+        # STEP 0: Check nexus-memory for previously learned resolution
+        memory_result = await self._recall_from_nexus_memory(part_number, manufacturer)
+        if memory_result:
+            logger.info(f"Found {part_number} in nexus-memory (source: {memory_result.get('source', 'learned')})")
+            # Try to use the learned resolution
+            learned_symbol = await self._fetch_from_learned_resolution(memory_result, part_number, manufacturer, category)
+            if learned_symbol:
+                # Update success count in memory
+                await self._update_memory_success_count(part_number, manufacturer, memory_result)
+                return learned_symbol
+            else:
+                logger.warning(f"Learned resolution for {part_number} failed, falling back to standard chain")
 
         # Track sources tried and errors for verbose error reporting
         sources_tried: List[str] = []
@@ -327,6 +340,11 @@ class SymbolFetcherAgent:
                     # Index in GraphRAG if available
                     if self.graphrag:
                         await self._index_in_graphrag(result, category)
+
+                    # Store successful resolution in nexus-memory for future learning
+                    await self._store_in_nexus_memory(
+                        part_number, manufacturer, category, source_name, result
+                    )
 
                     return result
                 else:
@@ -1547,6 +1565,275 @@ No explanation or markdown formatting."""
             logger.info(f"Indexed symbol in GraphRAG: {symbol.part_number}")
         except Exception as e:
             logger.warning(f"Failed to index symbol in GraphRAG: {e}")
+
+    # =========================================================================
+    # NEXUS-MEMORY INTEGRATION: Self-Improving Part Discovery
+    # =========================================================================
+
+    async def _recall_from_nexus_memory(
+        self,
+        part_number: str,
+        manufacturer: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Query nexus-memory for previously learned symbol resolution.
+
+        Returns:
+            Dict with resolution info if found, None otherwise
+        """
+        try:
+            query = f"component resolution {part_number}"
+            if manufacturer:
+                query += f" {manufacturer}"
+            query += " KiCad symbol"
+
+            result = await self._call_nexus_memory_api(
+                operation="recall",
+                query=query,
+                limit=5
+            )
+
+            if result and result.get("memories"):
+                # Find best match for this exact part number
+                for memory in result["memories"]:
+                    content = memory.get("content", "")
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except json.JSONDecodeError:
+                            continue
+
+                    if isinstance(content, dict):
+                        # Check if this is a component_resolution for our part
+                        if content.get("type") == "component_resolution":
+                            mem_pn = content.get("part_number", "").upper()
+                            if mem_pn == part_number.upper():
+                                resolution = content.get("resolution", {})
+                                if resolution.get("verified"):
+                                    logger.info(
+                                        f"Nexus-memory hit: {part_number} → "
+                                        f"{resolution.get('source')} (success_count: {resolution.get('success_count', 0)})"
+                                    )
+                                    return content
+
+            logger.debug(f"No nexus-memory hit for {part_number}")
+            return None
+
+        except Exception as e:
+            logger.warning(f"Nexus-memory recall failed: {e}")
+            return None
+
+    async def _fetch_from_learned_resolution(
+        self,
+        memory_result: Dict[str, Any],
+        part_number: str,
+        manufacturer: Optional[str],
+        category: str
+    ) -> Optional[FetchedSymbol]:
+        """
+        Use a learned resolution from nexus-memory to fetch a symbol.
+
+        Args:
+            memory_result: The stored resolution from nexus-memory
+            part_number: Component part number
+            manufacturer: Manufacturer name
+            category: Component category
+
+        Returns:
+            FetchedSymbol if successful, None otherwise
+        """
+        try:
+            resolution = memory_result.get("resolution", {})
+            source = resolution.get("source", "")
+
+            # Map source string to SymbolSource enum
+            source_mapping = {
+                "local_cache": SymbolSource.LOCAL_CACHE,
+                "kicad_worker_internal": SymbolSource.KICAD_WORKER_INTERNAL,
+                "kicad_local_install": SymbolSource.KICAD_LOCAL_INSTALL,
+                "kicad_official": SymbolSource.KICAD_OFFICIAL,
+                "snapeda": SymbolSource.SNAPEDA,
+                "ultralibrarian": SymbolSource.ULTRA_LIBRARIAN,
+                "learned_online": SymbolSource.SNAPEDA,  # Treat as SnapEDA
+            }
+
+            symbol_source = source_mapping.get(source.lower())
+            if not symbol_source:
+                logger.warning(f"Unknown learned source: {source}")
+                return None
+
+            # Find matching source config
+            for source_config in self.sources:
+                if source_config.source == symbol_source:
+                    result = await self._fetch_from_source(
+                        source_config, part_number, manufacturer, category
+                    )
+                    if result:
+                        # Mark as from memory
+                        result.metadata["from_nexus_memory"] = True
+                        result.metadata["learned_source"] = source
+                        return result
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to use learned resolution: {e}")
+            return None
+
+    async def _store_in_nexus_memory(
+        self,
+        part_number: str,
+        manufacturer: Optional[str],
+        category: str,
+        source: str,
+        result: FetchedSymbol
+    ):
+        """
+        Store successful symbol resolution in nexus-memory for future learning.
+
+        This creates a self-improving feedback loop where successful resolutions
+        are remembered and used to speed up future symbol fetching.
+        """
+        try:
+            memory_content = {
+                "type": "component_resolution",
+                "part_number": part_number,
+                "manufacturer": manufacturer or "Unknown",
+                "category": category,
+                "package": result.metadata.get("package", "unknown"),
+                "resolution": {
+                    "source": source,
+                    "url": result.metadata.get("source_url", ""),
+                    "format": "kicad_sym",
+                    "verified": True,
+                    "pin_count": result.metadata.get("pin_count", 0),
+                    "last_verified": datetime.utcnow().isoformat(),
+                    "success_count": 1,
+                    "failure_count": 0
+                },
+                "tags": ["component", category, source, part_number]
+            }
+
+            if manufacturer:
+                memory_content["tags"].append(manufacturer)
+
+            await self._call_nexus_memory_api(
+                operation="store",
+                content=json.dumps(memory_content),
+                event_type="component_resolution"
+            )
+
+            logger.info(f"Stored {part_number} resolution in nexus-memory (source: {source})")
+
+        except Exception as e:
+            # Non-fatal - don't block symbol fetching if memory storage fails
+            logger.warning(f"Failed to store in nexus-memory: {e}")
+
+    async def _update_memory_success_count(
+        self,
+        part_number: str,
+        manufacturer: Optional[str],
+        memory_result: Dict[str, Any]
+    ):
+        """
+        Update success count for a resolution that worked again.
+
+        This reinforces successful resolutions in the learning system.
+        """
+        try:
+            # Get current success count
+            resolution = memory_result.get("resolution", {})
+            current_count = resolution.get("success_count", 0)
+
+            # Update the memory with incremented count
+            memory_content = {
+                **memory_result,
+                "resolution": {
+                    **resolution,
+                    "success_count": current_count + 1,
+                    "last_verified": datetime.utcnow().isoformat()
+                }
+            }
+
+            await self._call_nexus_memory_api(
+                operation="store",
+                content=json.dumps(memory_content),
+                event_type="component_resolution"
+            )
+
+            logger.debug(f"Updated success count for {part_number}: {current_count + 1}")
+
+        except Exception as e:
+            logger.debug(f"Failed to update success count: {e}")
+
+    async def _call_nexus_memory_api(
+        self,
+        operation: str,
+        query: Optional[str] = None,
+        content: Optional[str] = None,
+        event_type: Optional[str] = None,
+        limit: int = 10
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call the Nexus Memory API for recall or store operations.
+
+        Args:
+            operation: "recall" or "store"
+            query: Search query for recall
+            content: Content to store
+            event_type: Type of event for storage
+            limit: Max results for recall
+
+        Returns:
+            API response dict or None on failure
+        """
+        api_url = os.environ.get("NEXUS_API_URL", "https://api.adverant.ai")
+        api_key = os.environ.get("NEXUS_API_KEY")
+
+        if not api_key:
+            logger.debug("NEXUS_API_KEY not set, skipping nexus-memory operation")
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "X-Company-ID": os.environ.get("NEXUS_COMPANY_ID", "adverant"),
+                "X-App-ID": os.environ.get("NEXUS_APP_ID", "nexus-ee-design")
+            }
+
+            if operation == "recall":
+                payload = {"query": query, "limit": limit}
+            elif operation == "store":
+                payload = {
+                    "content": content,
+                    "event_type": event_type or "context",
+                    "tags": ["component", "symbol", "ee-design"]
+                }
+            else:
+                logger.warning(f"Unknown memory operation: {operation}")
+                return None
+
+            response = await self.http_client.post(
+                f"{api_url}/api/memory",
+                json=payload,
+                headers=headers,
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"Nexus memory API error: {response.status_code} - {response.text[:200]}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Nexus memory API call failed: {e}")
+            return None
+
+    # =========================================================================
+    # END NEXUS-MEMORY INTEGRATION
+    # =========================================================================
 
     def _normalize_part_number(self, part_number: str) -> str:
         """Normalize part number for fuzzy matching."""
