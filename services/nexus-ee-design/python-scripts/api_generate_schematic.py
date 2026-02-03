@@ -356,3 +356,210 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# MAPO v2.1 Schematic Integration
+# =============================================================================
+
+async def run_generation_v2_1(
+    bom: Optional[List[Dict[str, Any]]] = None,
+    subsystems: Optional[List[Dict[str, Any]]] = None,
+    design_intent: Optional[str] = None,
+    design_name: str = "schematic",
+    project_name: str = "FOC ESC",
+    design_type: str = "foc_esc",
+    max_iterations: int = 100,
+    output_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run MAPO v2.1 schematic generation with:
+    - LLM-orchestrated Gaming AI optimization
+    - Nexus-memory learning for symbols and wiring
+    - Smoke test validation
+    - Quality-diversity optimization via MAP-Elites + Red Queen
+    
+    Args:
+        bom: Explicit BOM list
+        subsystems: List of subsystem definitions (will be converted to BOM)
+        design_intent: Natural language design description
+        design_name: Name for output file
+        project_name: Project name for title block
+        design_type: Type of design for pattern matching
+        max_iterations: Max Gaming AI iterations
+        output_dir: Custom output directory
+        project_id: Project ID for organization
+    
+    Returns:
+        Dictionary with generation results
+    """
+    try:
+        from mapos_v2_1_schematic import (
+            SchematicMAPOOptimizer,
+            SchematicMAPOConfig,
+        )
+        
+        # Generate BOM from subsystems if not provided
+        if bom is None and subsystems:
+            bom = create_foc_esc_bom(subsystems)
+            logger.info(f"Generated BOM with {len(bom)} components from {len(subsystems)} subsystems")
+        elif bom is None:
+            bom = []
+            logger.warning("No BOM or subsystems provided")
+        
+        # Generate design intent if not provided
+        if design_intent is None:
+            design_intent = create_design_intent(subsystems or [], project_name)
+        
+        # Configure output directory
+        if output_dir:
+            output_path = Path(output_dir)
+        else:
+            output_path = Path(tempfile.mkdtemp(prefix="mapo_v2_1_schematic_"))
+        
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"Starting MAPO v2.1 schematic generation: {len(bom)} components")
+        logger.info(f"Output directory: {output_path}")
+        
+        # Create configuration
+        config = SchematicMAPOConfig.from_env()
+        config.output_dir = output_path
+        config.project_id = project_id
+        
+        # Create optimizer and run
+        optimizer = SchematicMAPOOptimizer(config)
+        try:
+            result = await optimizer.optimize(
+                bom=bom,
+                design_intent=design_intent,
+                design_name=design_name,
+                design_type=design_type,
+                max_iterations=max_iterations,
+            )
+        finally:
+            await optimizer.close()
+        
+        # Build response
+        response = {
+            "success": result.success,
+            "version": "2.1",
+            "schematic_path": str(result.schematic_path) if result.schematic_path else None,
+            "schematic_content": result.schematic_content,
+            "component_count": result.symbols_resolved,
+            "symbols_from_memory": result.symbols_from_memory,
+            "placeholders": result.placeholders,
+            "connections_generated": result.connections_generated,
+            "wires_routed": result.wires_routed,
+            "total_iterations": result.total_iterations,
+            "total_time_seconds": result.total_time_seconds,
+            "final_fitness": result.final_fitness,
+            "smoke_test_passed": result.smoke_test_passed,
+            "errors": result.errors,
+        }
+        
+        # Include state information if available
+        if result.final_state:
+            response["state"] = result.final_state.to_dict()
+        
+        return response
+        
+    except ImportError as e:
+        logger.error(f"MAPO v2.1 not available: {e}")
+        return {
+            "success": False,
+            "error": f"MAPO v2.1 not available: {e}",
+            "version": "2.1",
+        }
+    except Exception as e:
+        logger.error(f"MAPO v2.1 generation failed: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "version": "2.1",
+            "errors": [str(e)],
+        }
+
+
+# Modified main to support v2.1
+def main_v2():
+    """CLI entry point with v2.1 support."""
+    parser = argparse.ArgumentParser(
+        description="API Wrapper for MAPO Schematic Generation (v2.1 support)"
+    )
+    parser.add_argument(
+        "--json",
+        type=str,
+        help="JSON input string"
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read JSON input from stdin"
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty print JSON output"
+    )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Use MAPO v2.1 pipeline"
+    )
+    
+    args = parser.parse_args()
+    
+    # Get input JSON
+    if args.stdin:
+        input_json = sys.stdin.read()
+    elif args.json:
+        input_json = args.json
+    else:
+        input_json = json.dumps({
+            "subsystems": [
+                {"id": "1", "name": "MCU Core", "category": "Control"},
+            ],
+            "project_name": "Test",
+            "design_name": "test_schematic",
+        })
+    
+    try:
+        params = json.loads(input_json)
+    except json.JSONDecodeError as e:
+        result = {"success": False, "error": f"Invalid JSON input: {e}"}
+        print(json.dumps(result))
+        sys.exit(1)
+    
+    # Check for v2.1 mode
+    use_v2 = args.v2 or params.get("use_mapo_v2_1", False)
+    
+    if use_v2:
+        result = asyncio.run(run_generation_v2_1(
+            bom=params.get("bom"),
+            subsystems=params.get("subsystems"),
+            design_intent=params.get("design_intent"),
+            design_name=params.get("design_name", "schematic"),
+            project_name=params.get("project_name", "FOC ESC"),
+            design_type=params.get("design_type", "foc_esc"),
+            max_iterations=params.get("max_iterations", 100),
+            output_dir=params.get("output_dir"),
+            project_id=params.get("project_id"),
+        ))
+    else:
+        result = asyncio.run(run_generation(
+            bom=params.get("bom"),
+            subsystems=params.get("subsystems"),
+            design_intent=params.get("design_intent"),
+            design_name=params.get("design_name", "schematic"),
+            project_name=params.get("project_name", "FOC ESC"),
+            skip_validation=params.get("skip_validation", True),
+            output_dir=params.get("output_dir"),
+            project_id=params.get("project_id"),
+            auto_export=params.get("auto_export", True),
+        ))
+    
+    indent = 2 if args.pretty else None
+    print(json.dumps(result, indent=indent))
+    sys.exit(0 if result.get("success", False) else 1)
