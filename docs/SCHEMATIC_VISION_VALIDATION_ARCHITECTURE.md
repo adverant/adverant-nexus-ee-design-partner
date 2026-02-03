@@ -26,7 +26,7 @@ This document defines the architecture for an LLM vision-based schematic validat
 │         ▼                   ▼                   ▼                   ▼       │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                     Shared Symbol Repository                          │  │
-│  │  /opt/kicad-symbols/  on Terminal Server (157.173.102.118)           │  │
+│  │  /opt/kicad-symbols/  on Terminal Server (YOUR_SERVER_IP)           │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
