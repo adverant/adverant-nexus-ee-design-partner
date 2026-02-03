@@ -1155,7 +1155,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           const result = await pythonExecutor.execute(
             'api_generate_schematic.py',
             ['--json', JSON.stringify(mapoInput)],
-            { timeout: 300000 } // 5 minute timeout for complex schematics
+            { timeout: 600000 } // 10 minute timeout - schematic gen is LLM-heavy
           );
 
           if (!result.success) {
