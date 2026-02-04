@@ -635,14 +635,43 @@ Generate the connections:"""
             response_text = response_data["choices"][0]["message"]["content"].strip()
             logger.info(f"Received {len(response_text)} chars from OpenRouter")
 
+            # Strip markdown code fences if present (LLM often wraps JSON in ```json ... ```)
+            clean_text = response_text
+            if clean_text.startswith("```"):
+                # Remove opening fence (```json or ```)
+                first_newline = clean_text.find('\n')
+                if first_newline > 0:
+                    clean_text = clean_text[first_newline + 1:]
+                else:
+                    # No newline after opening fence, remove just the fence
+                    clean_text = re.sub(r'^```\w*\s*', '', clean_text)
+            if clean_text.rstrip().endswith("```"):
+                # Remove closing fence
+                clean_text = clean_text.rstrip()[:-3].rstrip()
+
+            logger.debug(f"Cleaned response text (first 200 chars): {clean_text[:200]}")
+
             # Extract JSON from response
-            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            json_match = re.search(r'\[[\s\S]*\]', clean_text)
             if not json_match:
-                error_msg = f"LLM did not return valid JSON array. Response: {response_text[:500]}..."
+                error_msg = (
+                    f"LLM did not return valid JSON array.\n"
+                    f"  Original response (first 300 chars): {response_text[:300]}...\n"
+                    f"  Cleaned response (first 300 chars): {clean_text[:300]}...\n"
+                    f"  Expected format: [{'{'}\"from_ref\": \"U1\", \"from_pin\": \"PA0\", ...{'}'}]"
+                )
                 logger.error(error_msg)
                 raise ValueError(error_msg)
 
-            connections_data = json.loads(json_match.group())
+            try:
+                connections_data = json.loads(json_match.group())
+            except json.JSONDecodeError as e:
+                error_msg = (
+                    f"JSON parsing failed: {e}\n"
+                    f"  Matched text (first 500 chars): {json_match.group()[:500]}..."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
             logger.info(f"Parsed {len(connections_data)} connections from LLM response")
 
             connections = []
