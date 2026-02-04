@@ -1135,10 +1135,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           subsystemCount: subsystems.length,
         });
 
-        const pythonExecutor = new PythonExecutor();
-        await pythonExecutor.initialize();
-
-        // Create operation ID for WebSocket streaming
+        // Create operation ID for WebSocket streaming BEFORE starting generation
         const schematicWsManager = getSchematicWsManager();
         operationId = schematicWsManager.createOperation(projectId);
         log.info('Created schematic operation for streaming', { operationId, projectId });
@@ -1153,17 +1150,46 @@ export function createApiRoutes(io: SocketIOServer): Router {
           project_id: projectId,
         };
 
-        // Emit progress event (legacy)
-        io.to(`project:${projectId}`).emit('schematic:progress', {
-          projectId,
-          status: 'fetching_symbols',
-          message: 'Fetching real KiCad symbols from libraries...',
-          operationId, // Include operation ID so frontend can subscribe
+        // IMMEDIATELY return operationId to frontend so it can subscribe to WebSocket
+        // The actual generation runs asynchronously below
+        res.status(202).json({
+          success: true,
+          data: {
+            status: 'generating',
+            operationId,
+            projectId,
+            message: 'Schematic generation started. Subscribe to WebSocket for progress.',
+          },
         });
 
-        try {
-          // Use executeWithProgress to relay PROGRESS: events via WebSocket
-          const result = await pythonExecutor.executeWithProgress(
+        // ================================================================================
+        // ASYNC GENERATION - Runs after response is sent
+        // ================================================================================
+        // Use setImmediate to ensure response is sent before starting heavy processing
+        setImmediate(async () => {
+          const pythonExecutor = new PythonExecutor();
+          await pythonExecutor.initialize();
+
+          // Emit initial progress event
+          schematicWsManager.emitSimpleProgress(
+            operationId!,
+            'phase_start' as any,
+            0,
+            'Starting schematic generation...',
+            'symbols' as any
+          );
+
+          // Emit progress event (legacy)
+          io.to(`project:${projectId}`).emit('schematic:progress', {
+            projectId,
+            status: 'fetching_symbols',
+            message: 'Fetching real KiCad symbols from libraries...',
+            operationId, // Include operation ID so frontend can subscribe
+          });
+
+          try {
+            // Use executeWithProgress to relay PROGRESS: events via WebSocket
+            const result = await pythonExecutor.executeWithProgress(
             'api_generate_schematic.py',
             ['--json', JSON.stringify(mapoInput)],
             {
@@ -1184,14 +1210,21 @@ export function createApiRoutes(io: SocketIOServer): Router {
           );
 
           if (!result.success) {
-            // NO FALLBACK - Return verbose error message
+            // NO FALLBACK - Emit error via WebSocket (response already sent)
             log.error(
               'MAPO pipeline failed - NO FALLBACK (placeholder generator removed)',
               new Error(result.stderr || 'Unknown pipeline error'),
               { projectId, stdout: result.stdout }
             );
 
-            // Emit detailed error to client
+            // Emit error via WebSocket to subscribers
+            schematicWsManager.failOperation(
+              operationId!,
+              `MAPO pipeline failed: ${result.stderr || 'Unknown error'}`,
+              { lastSuccessfulPhase: 'symbols' as any }
+            );
+
+            // Emit detailed error to legacy client
             io.to(`project:${projectId}`).emit('schematic:error', {
               projectId,
               status: 'failed',
@@ -1202,17 +1235,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
               },
             });
 
-            // Return detailed error response
-            return res.status(500).json({
-              error: 'Schematic generation failed',
-              message: 'MAPO pipeline failed. Placeholder generation has been removed.',
-              details: {
-                stderr: result.stderr,
-                stdout: result.stdout,
-                action: 'Check that OPENROUTER_API_KEY is configured correctly in k8s/secrets.yaml',
-                documentation: 'https://openrouter.ai/keys',
-              },
-            });
+            return; // Response already sent, just exit
           }
 
           // MAPO succeeded - process the result
@@ -1264,7 +1287,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
             }
           }
         } catch (mapoError) {
-          // NO FALLBACK - Return verbose error to client
+          // NO FALLBACK - Emit error via WebSocket (response already sent)
           const errorMessage = mapoError instanceof Error ? mapoError.message : 'Unknown error';
 
           log.error(
@@ -1273,7 +1296,14 @@ export function createApiRoutes(io: SocketIOServer): Router {
             { projectId }
           );
 
-          // Emit detailed error to client
+          // Emit error via WebSocket to subscribers
+          schematicWsManager.failOperation(
+            operationId!,
+            errorMessage,
+            { lastSuccessfulPhase: 'symbols' as any }
+          );
+
+          // Emit detailed error to legacy client
           io.to(`project:${projectId}`).emit('schematic:error', {
             projectId,
             status: 'failed',
@@ -1284,17 +1314,91 @@ export function createApiRoutes(io: SocketIOServer): Router {
             },
           });
 
-          // Return detailed error response
-          return res.status(500).json({
-            error: 'Schematic generation failed',
-            message: `MAPO pipeline error: ${errorMessage}`,
-            details: {
-              error: errorMessage,
-              action: 'Check that OPENROUTER_API_KEY is configured correctly in k8s/secrets.yaml',
-              documentation: 'https://openrouter.ai/keys',
-            },
-          });
+          return; // Response already sent, just exit
         }
+
+        // ================================================================================
+        // SUCCESS PATH - Process MAPO result and complete operation
+        // ================================================================================
+        // Note: generatedSchematic was set in the try block above
+
+        log.info('KiCad schematic content generated (async)', {
+          projectId,
+          contentLength: generatedSchematic!.content.length,
+          componentCount: generatedSchematic!.components?.length || 0,
+          netCount: generatedSchematic!.nets?.length || 0,
+        });
+
+        // Create schematic record with generated content
+        const dbSheets: import('../types/index.js').SchematicSheet[] = generatedSchematic!.sheets.map((s) => ({
+          id: s.uuid,
+          name: s.name,
+          pageNumber: s.page,
+          components: generatedSchematic!.components.map((c) => c.uuid),
+          nets: generatedSchematic!.nets.map((n) => n.uuid),
+        }));
+
+        const dbComponents: import('../types/index.js').Component[] = generatedSchematic!.components.map((c) => ({
+          id: c.uuid,
+          reference: c.reference,
+          value: c.value,
+          footprint: '',
+          position: { x: 0, y: 0 },
+          rotation: 0,
+          properties: { library: (c as any).library || '', symbol: (c as any).symbol || '' },
+          pins: [],
+        }));
+
+        const dbNets: import('../types/index.js').Net[] = generatedSchematic!.nets.map((n) => ({
+          id: n.uuid,
+          name: n.name,
+          connections: [],
+          properties: {},
+        }));
+
+        const schematicInputAsync: CreateSchematicInput = {
+          projectId,
+          name: req.body.name || project.name + ' Schematic',
+          format: 'kicad_sch',
+          kicadSch: generatedSchematic!.content,
+          sheets: dbSheets,
+          components: dbComponents,
+          nets: dbNets,
+        };
+
+        try {
+          const schematic = await createSchematic(schematicInputAsync);
+
+          // Emit completion via WebSocket
+          schematicWsManager.completeOperation(operationId!, {
+            schematicId: schematic.id,
+            componentCount: generatedSchematic!.components.length,
+            connectionCount: generatedSchematic!.nets.length,
+            wireCount: 0,
+          });
+
+          // Emit generation completed event (legacy)
+          io.to(`project:${projectId}`).emit('schematic:generation-completed', {
+            schematicId: schematic.id,
+            projectId,
+            operationId,
+            componentCount: generatedSchematic!.components.length,
+            netCount: generatedSchematic!.nets.length,
+          });
+
+          log.info('Schematic created successfully (async)', {
+            schematicId: schematic.id,
+            projectId,
+            operationId,
+          });
+        } catch (dbError) {
+          log.error('Failed to save schematic to database', dbError as Error, { projectId, operationId });
+          schematicWsManager.failOperation(operationId!, 'Failed to save schematic to database');
+        }
+
+        }); // End of setImmediate async block
+
+        return; // Important: exit early, response already sent
       } else {
         // Generate minimal schematic if no subsystems specified
         generatedSchematic = generateMinimalSchematic(req.body.name || project.name);

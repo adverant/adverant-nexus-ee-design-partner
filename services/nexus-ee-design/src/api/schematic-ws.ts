@@ -193,7 +193,15 @@ export class SchematicWebSocketManager extends EventEmitter {
       progress_percentage: 100,
       current_step: 'Schematic generation complete!',
       phase: 'export',
-      data: { result },
+      // Flatten the result so frontend can access schematicId directly
+      data: {
+        schematicId: result.schematicId,
+        componentCount: result.componentCount,
+        connectionCount: result.connectionCount,
+        wireCount: result.wireCount,
+        validationScore: result.validationScore,
+        smokeTestPassed: result.smokeTestPassed,
+      },
     };
 
     this.emitProgress(operationId, event);
