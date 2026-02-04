@@ -129,7 +129,7 @@ spec:
         host: nexus-ee-design.nexus.svc.cluster.local
         port:
           number: 8080
-    timeout: 300s  # 5 minutes for heavy operations (PCB layout, simulation)
+    timeout: 660s  # 11 minutes for LLM-heavy operations (schematic gen needs 10min)
     retries:
       attempts: 3
       perTryTimeout: 100s
