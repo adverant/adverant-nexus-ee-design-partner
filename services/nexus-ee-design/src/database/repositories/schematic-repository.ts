@@ -89,6 +89,13 @@ const repoLogger: Logger = log.child({ service: 'schematic-repository' });
  * Map a database row to a Schematic object.
  */
 function mapRowToSchematic(row: SchematicRow): Schematic {
+  // Calculate wire count from KiCad content (dynamic, not stored in DB)
+  let wireCount = 0;
+  if (row.kicad_sch) {
+    const wireMatches = row.kicad_sch.match(/\(wire\s+\(pts/g);
+    wireCount = wireMatches ? wireMatches.length : 0;
+  }
+
   return {
     id: row.id,
     projectId: row.project_id,
@@ -103,6 +110,7 @@ function mapRowToSchematic(row: SchematicRow): Schematic {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     kicadSch: row.kicad_sch || undefined,
+    wireCount: wireCount,
   };
 }
 

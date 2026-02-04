@@ -1370,12 +1370,25 @@ export function createApiRoutes(io: SocketIOServer): Router {
         try {
           const schematic = await createSchematic(schematicInputAsync);
 
+          // Calculate wire count from KiCad content
+          const wireMatches = generatedSchematic!.content.match(/\(wire\s+\(pts/g) || [];
+          const wireCount = wireMatches.length;
+
+          // Log warning if 0 wires generated (indicates LLM connection generation may have failed)
+          if (wireCount === 0 && generatedSchematic!.components.length > 0) {
+            log.warn('Schematic generated with 0 wires - LLM connection generation may have failed', {
+              projectId,
+              operationId,
+              componentCount: generatedSchematic!.components.length,
+            });
+          }
+
           // Emit completion via WebSocket
           schematicWsManager.completeOperation(operationId!, {
             schematicId: schematic.id,
             componentCount: generatedSchematic!.components.length,
             connectionCount: generatedSchematic!.nets.length,
-            wireCount: 0,
+            wireCount: wireCount,
           });
 
           // Emit generation completed event (legacy)

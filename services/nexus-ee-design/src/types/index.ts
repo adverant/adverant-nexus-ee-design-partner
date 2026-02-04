@@ -110,6 +110,8 @@ export interface Schematic {
   updatedAt: string;
   /** Raw KiCad schematic file content (optional, only included when needed) */
   kicadSch?: string;
+  /** Number of wires in the schematic (calculated from kicadSch content) */
+  wireCount?: number;
 }
 
 export interface SchematicSheet {
