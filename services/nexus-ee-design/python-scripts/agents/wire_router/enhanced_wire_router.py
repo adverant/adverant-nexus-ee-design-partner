@@ -419,9 +419,24 @@ class EnhancedWireRouter:
         from_pos = self._get_pin_position(from_ref, from_pin, component_positions, pin_positions)
         to_pos = self._get_pin_position(to_ref, to_pin, component_positions, pin_positions)
 
+        # FAIL FAST - No silent failures per user directive
+        # Missing pin positions = FATAL error with verbose message
         if not from_pos or not to_pos:
-            self._warnings.append(f"Cannot route {net_name}: missing pin positions")
-            return
+            missing_from = "from_pos" if not from_pos else None
+            missing_to = "to_pos" if not to_pos else None
+            error_msg = (
+                f"CRITICAL ERROR: Cannot route net '{net_name}' - missing pin positions. "
+                f"From: {from_ref}.{from_pin} -> position={'MISSING' if missing_from else from_pos}, "
+                f"To: {to_ref}.{to_pin} -> position={'MISSING' if missing_to else to_pos}. "
+                f"Possible causes: "
+                f"1) Symbol has no pin definitions (placeholder symbol used), "
+                f"2) Pin name mismatch between connection and symbol, "
+                f"3) Component not found in layout (reference mismatch). "
+                f"Available components: {list(component_positions.keys())[:10]}... "
+                f"ACTION REQUIRED: Verify symbol has proper pin definitions, check component references match."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         route_type = RouteType.SIGNAL
         if constraint:

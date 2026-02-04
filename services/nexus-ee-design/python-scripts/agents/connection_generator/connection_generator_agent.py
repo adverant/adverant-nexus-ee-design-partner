@@ -176,16 +176,24 @@ class ConnectionGeneratorAgent:
         logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
 
         # VALIDATION: Check that signal connections were actually generated
+        # NO FALLBACK - LLM failure is FATAL per user directive
         if not signal_connections:
-            # This is a CRITICAL warning - schematic will have 0 signal wires!
-            warning_msg = (
-                f"WARNING: LLM generated 0 signal connections for {len(components)} components. "
-                f"This will result in a schematic with only power connections (0 signal wires). "
-                f"Possible causes: LLM failure, invalid API key, design intent too vague, "
-                f"rate limiting, or network issues. "
-                f"Design intent was: '{design_intent[:100]}...'"
+            # CRITICAL ERROR - fail fast with verbose error message
+            error_msg = (
+                f"CRITICAL ERROR: LLM failed to generate signal connections for {len(components)} components. "
+                f"This is a FATAL error - no fallback allowed per user directive. "
+                f"Possible causes: "
+                f"1) OpenRouter API key missing or invalid (check OPENROUTER_API_KEY env var), "
+                f"2) OpenRouter API rate limiting or quota exceeded, "
+                f"3) Network connectivity issues to OpenRouter API, "
+                f"4) LLM returned empty response or error, "
+                f"5) Design intent was too vague for LLM to infer connections. "
+                f"Design intent provided: '{design_intent[:200]}...' "
+                f"Components: {[c.reference for c in components][:10]}... "
+                f"ACTION REQUIRED: Check backend logs for detailed LLM error, verify API key, retry with clearer design intent."
             )
-            logger.warning(warning_msg)
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
         elif len(signal_connections) < len(components):
             # Warn if fewer connections than components (may indicate incomplete inference)
             logger.warning(

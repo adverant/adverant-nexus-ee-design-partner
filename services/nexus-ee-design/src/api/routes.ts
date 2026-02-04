@@ -15,6 +15,7 @@ import path from 'path';
 import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
+import { NFSStorage } from '../utils/nfs-storage.js';
 import { generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-generator.js';
 import { PythonExecutor, ProgressEvent } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
@@ -1405,6 +1406,44 @@ export function createApiRoutes(io: SocketIOServer): Router {
             projectId,
             operationId,
           });
+
+          // Store schematic to NFS for artifact access
+          try {
+            const organizationId = project.organizationId || 'default';
+            const nfsResult = await NFSStorage.storeArtifact(
+              organizationId,
+              projectId,
+              'schematics',
+              schematic.id,
+              generatedSchematic!.content,
+              `${schematic.id}.kicad_sch`
+            );
+
+            if (nfsResult.success) {
+              log.info('Schematic stored to NFS', {
+                schematicId: schematic.id,
+                nfsPath: nfsResult.localPath,
+                size: nfsResult.size,
+              });
+
+              // Update schematic record with file path
+              await updateSchematic(schematic.id, {
+                filePath: nfsResult.localPath,
+              });
+            } else {
+              log.warn('Failed to store schematic to NFS - artifact browser may not show file', {
+                schematicId: schematic.id,
+                projectId,
+              });
+            }
+          } catch (nfsError) {
+            // NFS storage failure is non-fatal - schematic is still in database
+            log.warn('NFS storage failed for schematic', {
+              error: nfsError instanceof Error ? nfsError.message : String(nfsError),
+              schematicId: schematic.id,
+              projectId,
+            });
+          }
         } catch (dbError) {
           log.error('Failed to save schematic to database', dbError as Error, { projectId, operationId });
           schematicWsManager.failOperation(operationId!, 'Failed to save schematic to database');
@@ -1478,6 +1517,39 @@ export function createApiRoutes(io: SocketIOServer): Router {
         projectId,
       });
 
+      // Store schematic to NFS for artifact access
+      let nfsPath: string | undefined;
+      try {
+        const organizationId = project.organizationId || 'default';
+        const nfsResult = await NFSStorage.storeArtifact(
+          organizationId,
+          projectId,
+          'schematics',
+          schematic.id,
+          generatedSchematic.content,
+          `${schematic.id}.kicad_sch`
+        );
+
+        if (nfsResult.success) {
+          log.info('Schematic stored to NFS', {
+            schematicId: schematic.id,
+            nfsPath: nfsResult.localPath,
+            size: nfsResult.size,
+          });
+          nfsPath = nfsResult.localPath;
+
+          // Update schematic record with file path
+          await updateSchematic(schematic.id, {
+            filePath: nfsResult.localPath,
+          });
+        }
+      } catch (nfsError) {
+        log.warn('NFS storage failed for schematic', {
+          error: nfsError instanceof Error ? nfsError.message : String(nfsError),
+          schematicId: schematic.id,
+        });
+      }
+
       res.status(201).json({
         success: true,
         data: {
@@ -1488,6 +1560,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           componentCount: generatedSchematic.components.length,
           netCount: generatedSchematic.nets.length,
           sheetCount: generatedSchematic.sheets.length,
+          filePath: nfsPath,
         },
       });
     } catch (error) {
