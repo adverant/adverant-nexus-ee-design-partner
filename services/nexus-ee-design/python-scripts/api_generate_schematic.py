@@ -34,6 +34,7 @@ from mapo_schematic_pipeline import (
     PipelineConfig,
     PipelineResult,
 )
+from progress_emitter import ProgressEmitter, init_progress
 
 logging.basicConfig(
     level=logging.INFO,
@@ -161,6 +162,7 @@ async def run_generation(
     output_dir: Optional[str] = None,
     project_id: Optional[str] = None,  # Project ID for NFS export organization
     auto_export: bool = True,  # Enable auto-export to PDF/image and NFS
+    operation_id: Optional[str] = None,  # Operation ID for WebSocket streaming
 ) -> Dict[str, Any]:
     """
     Run the MAPO schematic generation pipeline.
@@ -178,6 +180,12 @@ async def run_generation(
         Dictionary with generation results
     """
     try:
+        # Create progress emitter for WebSocket streaming (if operation_id provided)
+        progress_emitter = None
+        if operation_id:
+            progress_emitter = init_progress(operation_id)
+            logger.info(f"Progress streaming enabled for operation: {operation_id}")
+
         # Generate BOM from subsystems if not provided
         if bom is None and subsystems:
             bom = create_foc_esc_bom(subsystems)
@@ -217,7 +225,8 @@ async def run_generation(
 
         # Run generation using pipeline with config (not convenience function)
         # The config includes auto_export settings for PDF/image and NFS sync
-        pipeline = MAPOSchematicPipeline(config)
+        # Pass progress emitter for WebSocket streaming
+        pipeline = MAPOSchematicPipeline(config, progress_emitter=progress_emitter)
         try:
             result = await pipeline.generate(
                 bom=bom,
@@ -344,6 +353,7 @@ def main():
         output_dir=params.get("output_dir"),
         project_id=params.get("project_id"),
         auto_export=params.get("auto_export", True),
+        operation_id=params.get("operation_id"),  # For WebSocket streaming
     ))
 
     # Output JSON result to stdout

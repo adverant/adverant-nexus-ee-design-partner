@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -48,6 +48,12 @@ from validation.schematic_vision_validator import (
     SchematicValidationReport,
 )
 from graphrag.symbol_indexer import SymbolGraphRAGIndexer, create_indexer
+from progress_emitter import (
+    ProgressEmitter,
+    SchematicPhase,
+    SchematicEventType,
+    calculate_overall_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,9 +201,20 @@ class MAPOSchematicPipeline:
         )
     """
 
-    def __init__(self, config: Optional[PipelineConfig] = None):
-        """Initialize the pipeline."""
+    def __init__(
+        self,
+        config: Optional[PipelineConfig] = None,
+        progress_emitter: Optional[ProgressEmitter] = None,
+    ):
+        """
+        Initialize the pipeline.
+
+        Args:
+            config: Pipeline configuration
+            progress_emitter: Optional progress emitter for WebSocket streaming
+        """
         self.config = config or PipelineConfig()
+        self._progress = progress_emitter
 
         # Components will be initialized lazily
         self._symbol_fetcher: Optional[SymbolFetcherAgent] = None
@@ -212,6 +229,43 @@ class MAPOSchematicPipeline:
         self._renderer: Optional[Any] = None  # KiCanvas renderer
         self._artifact_exporter: Optional[ArtifactExporterAgent] = None  # PDF/image export + NFS sync
         self._smoke_test: Optional[SmokeTestAgent] = None  # SPICE-based circuit validation
+
+    def _emit_progress(
+        self,
+        phase: SchematicPhase,
+        phase_progress: int,
+        message: str,
+        event_type: Optional[str] = None,
+        **extra_data
+    ) -> None:
+        """
+        Emit progress event if emitter is configured.
+
+        Args:
+            phase: Current phase
+            phase_progress: Progress within phase (0-100)
+            message: Human-readable message
+            event_type: Optional specific event type
+            **extra_data: Additional data to include
+        """
+        if self._progress:
+            self._progress.emit_phase(
+                phase=phase,
+                phase_progress=phase_progress,
+                message=message,
+                event_type=event_type,
+                **extra_data
+            )
+
+    def _start_phase(self, phase: SchematicPhase, message: Optional[str] = None) -> None:
+        """Mark start of a phase."""
+        if self._progress:
+            self._progress.start_phase(phase, message)
+
+    def _complete_phase(self, phase: SchematicPhase, message: Optional[str] = None) -> None:
+        """Mark completion of a phase."""
+        if self._progress:
+            self._progress.complete_phase(phase, message)
 
     async def initialize(self):
         """Initialize all pipeline components."""
@@ -324,6 +378,9 @@ class MAPOSchematicPipeline:
             if not self._symbol_fetcher:
                 await self.initialize()
 
+            # Emit initial progress
+            self._start_phase(SchematicPhase.SYMBOLS, f"Starting schematic generation: {len(bom)} components")
+
             # Convert BOM dictionaries to BOMItem objects
             bom_items = [
                 BOMItem(
@@ -353,9 +410,21 @@ class MAPOSchematicPipeline:
                     for conn in connections
                 ]
                 logger.info(f"Using {len(connection_objs)} explicit connections")
+                self._emit_progress(
+                    SchematicPhase.CONNECTIONS, 100,
+                    f"Using {len(connection_objs)} explicit connections"
+                )
             else:
                 # Auto-generate connections from BOM and design intent
+                self._start_phase(SchematicPhase.CONNECTIONS, "Generating connections via LLM...")
                 logger.info("Auto-generating connections from BOM and design intent...")
+
+                self._emit_progress(
+                    SchematicPhase.CONNECTIONS, 20,
+                    "Calling Claude Opus 4.5 for signal inference...",
+                    event_type=SchematicEventType.CONNECTIONS_LLM_CALL.value
+                )
+
                 try:
                     generated_connections = await self._connection_generator.generate_connections(
                         bom=bom,
@@ -372,9 +441,17 @@ class MAPOSchematicPipeline:
                         for gc in generated_connections
                     ]
                     logger.info(f"Auto-generated {len(connection_objs)} connections")
+                    self._complete_phase(
+                        SchematicPhase.CONNECTIONS,
+                        f"Generated {len(connection_objs)} connections"
+                    )
                 except Exception as e:
                     logger.warning(f"Connection generation failed: {e}")
                     connection_objs = []
+                    self._emit_progress(
+                        SchematicPhase.CONNECTIONS, 100,
+                        f"Connection generation warning: {e}"
+                    )
 
             # Convert block diagram if provided
             block_diagram_obj = None
@@ -387,6 +464,7 @@ class MAPOSchematicPipeline:
             logger.info(f"Starting schematic generation: {len(bom_items)} components")
 
             # Phase 1: Assemble schematic (uses Enhanced Wire Router internally)
+            self._start_phase(SchematicPhase.ASSEMBLY, "Assembling schematic structure...")
             sheets = await self._assembler.assemble_schematic(
                 bom=bom_items,
                 block_diagram=block_diagram_obj,
@@ -395,6 +473,10 @@ class MAPOSchematicPipeline:
             )
 
             result.sheets = sheets
+            self._complete_phase(
+                SchematicPhase.ASSEMBLY,
+                f"Assembled {len(sheets)} sheet(s) with {len(sheets[0].symbols) if sheets else 0} components"
+            )
 
             # ========================================
             # VALIDATION GATE: Symbol Quality Check
@@ -476,8 +558,15 @@ class MAPOSchematicPipeline:
 
             # Phase 2: Layout Optimization (IPC-2221/IEEE 315 signal flow)
             if self._layout_optimizer:
+                self._start_phase(SchematicPhase.LAYOUT, "Running layout optimization...")
                 logger.info("Running layout optimization...")
-                for sheet in sheets:
+                for i, sheet in enumerate(sheets):
+                    self._emit_progress(
+                        SchematicPhase.LAYOUT,
+                        int((i / len(sheets)) * 80),
+                        f"Optimizing layout for sheet {i + 1}/{len(sheets)}...",
+                        event_type=SchematicEventType.LAYOUT_OPTIMIZING.value
+                    )
                     optimization_result = self._layout_optimizer.optimize_layout(
                         symbols=sheet.symbols,
                         connections=connection_objs if connection_objs else [],
@@ -491,6 +580,10 @@ class MAPOSchematicPipeline:
                                 break
                     success_str = "PASSED" if optimization_result.success else "needs work"
                     logger.info(f"Layout optimization: {success_str}, {len(optimization_result.improvements)} improvements")
+                self._complete_phase(
+                    SchematicPhase.LAYOUT,
+                    f"Layout optimized: {len(optimization_result.improvements) if optimization_result else 0} improvements"
+                )
 
             # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
             if self._standards_compliance:
@@ -519,7 +612,15 @@ class MAPOSchematicPipeline:
             # Phase 3.5: Smoke Test (LLM-based circuit validation)
             # Ensures circuit won't "smoke" when power is applied
             if self._smoke_test:
+                self._start_phase(SchematicPhase.SMOKE_TEST, "Running circuit validation (smoke test)...")
                 logger.info("Running LLM-based smoke test (circuit validation)...")
+
+                self._emit_progress(
+                    SchematicPhase.SMOKE_TEST, 30,
+                    "Analyzing circuit topology...",
+                    event_type=SchematicEventType.SMOKE_TEST_RUNNING.value
+                )
+
                 smoke_result = await self._smoke_test.run_smoke_test(
                     kicad_sch_content=schematic_content,
                     bom_items=bom,
@@ -530,6 +631,8 @@ class MAPOSchematicPipeline:
 
                 if smoke_result.passed:
                     logger.info("Smoke test: PASSED - circuit appears safe to power")
+                    if self._progress:
+                        self._progress.emit_smoke_test(passed=True)
                 else:
                     fatal_count = sum(1 for i in smoke_result.issues
                                      if i.severity.value == "fatal")
@@ -540,6 +643,12 @@ class MAPOSchematicPipeline:
                     )
                     for issue in smoke_result.issues[:5]:
                         logger.warning(f"  [{issue.severity.value.upper()}] {issue.message}")
+
+                    if self._progress:
+                        self._progress.emit_smoke_test(
+                            passed=False,
+                            issues_count=fatal_count + error_count
+                        )
 
                     # Add smoke test issues to result errors
                     for issue in smoke_result.issues:
@@ -645,7 +754,14 @@ class MAPOSchematicPipeline:
 
             # Phase 6: Auto-export to PDF/image and sync to NFS
             if self._artifact_exporter and result.schematic_path:
+                self._start_phase(SchematicPhase.EXPORT, "Exporting schematic artifacts...")
                 logger.info("Starting auto-export to PDF/image and NFS sync...")
+
+                self._emit_progress(
+                    SchematicPhase.EXPORT, 20,
+                    "Generating PDF export...",
+                    event_type=SchematicEventType.EXPORT_PDF.value
+                )
 
                 export_result = await self._artifact_exporter.export_all(
                     schematic_path=result.schematic_path,
@@ -663,16 +779,36 @@ class MAPOSchematicPipeline:
                 if export_result.success:
                     logger.info(f"Auto-export complete:")
                     if export_result.pdf_path:
+                        self._emit_progress(
+                            SchematicPhase.EXPORT, 50,
+                            f"PDF exported: {export_result.pdf_path}",
+                            event_type=SchematicEventType.EXPORT_PDF.value
+                        )
                         logger.info(f"  PDF: {export_result.pdf_path}")
                     if export_result.svg_path:
+                        self._emit_progress(
+                            SchematicPhase.EXPORT, 70,
+                            f"SVG exported: {export_result.svg_path}",
+                            event_type=SchematicEventType.EXPORT_SVG.value
+                        )
                         logger.info(f"  SVG: {export_result.svg_path}")
                     if export_result.png_path:
                         logger.info(f"  PNG: {export_result.png_path}")
                     if export_result.nfs_synced:
+                        self._emit_progress(
+                            SchematicPhase.EXPORT, 90,
+                            f"Synced to NFS storage",
+                            event_type=SchematicEventType.EXPORT_NFS_SYNC.value
+                        )
                         logger.info(f"  NFS synced: {export_result.nfs_paths}")
+                    self._complete_phase(SchematicPhase.EXPORT, "Export complete")
                 else:
                     logger.warning(f"Auto-export had errors: {export_result.errors}")
                     result.errors.extend(export_result.errors)
+                    self._emit_progress(
+                        SchematicPhase.EXPORT, 100,
+                        f"Export completed with errors"
+                    )
 
         except SchematicGenerationError as e:
             # Handle our custom validation errors with full details
@@ -684,13 +820,31 @@ class MAPOSchematicPipeline:
             result.errors.append(str(e))
             result.success = False
 
+            # Emit error progress
+            if self._progress:
+                self._progress.error(e.message, "VALIDATION_ERROR")
+
         except Exception as e:
             logger.error(f"Pipeline error: {e}", exc_info=True)
             result.errors.append(str(e))
             result.success = False
 
+            # Emit error progress
+            if self._progress:
+                self._progress.error(str(e), "PIPELINE_ERROR")
+
         finally:
             result.total_time_seconds = (datetime.now() - start_time).total_seconds()
+
+            # Emit completion if successful
+            if result.success and self._progress:
+                self._progress.complete({
+                    "schematic_path": str(result.schematic_path) if result.schematic_path else None,
+                    "component_count": sum(len(s.symbols) for s in result.sheets),
+                    "total_time_seconds": result.total_time_seconds,
+                    "smoke_test_passed": result.smoke_test_passed,
+                    "nfs_synced": result.nfs_synced,
+                })
 
         return result
 

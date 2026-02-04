@@ -16,9 +16,10 @@ import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { log } from '../utils/logger.js';
 import { config } from '../config.js';
 import { generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-generator.js';
-import { PythonExecutor } from '../services/pcb/python-executor.js';
+import { PythonExecutor, ProgressEvent } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
+import { getSchematicWsManager } from './schematic-ws.js';
 
 // Repository imports
 import {
@@ -1125,6 +1126,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
         nets: Array<{ name: string; uuid: string; code: number }>;
       }
       let generatedSchematic: GeneratedSchematic;
+      let operationId: string | undefined;
 
       if (subsystems.length > 0) {
         // Use Python MAPO pipeline for real schematic generation
@@ -1136,26 +1138,49 @@ export function createApiRoutes(io: SocketIOServer): Router {
         const pythonExecutor = new PythonExecutor();
         await pythonExecutor.initialize();
 
-        // Prepare input for MAPO pipeline
+        // Create operation ID for WebSocket streaming
+        const schematicWsManager = getSchematicWsManager();
+        operationId = schematicWsManager.createOperation(projectId);
+        log.info('Created schematic operation for streaming', { operationId, projectId });
+
+        // Prepare input for MAPO pipeline with operation ID for progress streaming
         const mapoInput = {
           subsystems,
           project_name: req.body.name || project.name,
           design_name: `schematic_${Date.now()}`,
           skip_validation: true, // Skip validation for faster initial generation
+          operation_id: operationId, // For WebSocket progress streaming
+          project_id: projectId,
         };
 
-        // Emit progress event
+        // Emit progress event (legacy)
         io.to(`project:${projectId}`).emit('schematic:progress', {
           projectId,
           status: 'fetching_symbols',
           message: 'Fetching real KiCad symbols from libraries...',
+          operationId, // Include operation ID so frontend can subscribe
         });
 
         try {
-          const result = await pythonExecutor.execute(
+          // Use executeWithProgress to relay PROGRESS: events via WebSocket
+          const result = await pythonExecutor.executeWithProgress(
             'api_generate_schematic.py',
             ['--json', JSON.stringify(mapoInput)],
-            { timeout: 600000 } // 10 minute timeout - schematic gen is LLM-heavy
+            {
+              timeout: 600000, // 10 minute timeout - schematic gen is LLM-heavy
+              onProgress: (event: ProgressEvent) => {
+                // Relay progress event to WebSocket subscribers
+                // Cast to SchematicProgressEvent (types are compatible at runtime)
+                schematicWsManager.emitProgress(operationId, event as import('./websocket-schematic.js').SchematicProgressEvent);
+
+                // Also emit to legacy project room for backwards compatibility
+                io.to(`project:${projectId}`).emit('schematic:progress', {
+                  projectId,
+                  operationId,
+                  ...event,
+                });
+              },
+            }
           );
 
           if (!result.success) {
@@ -1341,6 +1366,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           schematicId: schematic.id,
           status: 'completed',
           projectId,
+          operationId, // WebSocket operation ID for streaming (undefined if no streaming)
           componentCount: generatedSchematic.components.length,
           netCount: generatedSchematic.nets.length,
           sheetCount: generatedSchematic.sheets.length,

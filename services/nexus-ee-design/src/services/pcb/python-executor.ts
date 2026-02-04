@@ -38,6 +38,28 @@ export interface ScriptResult {
   output?: any;
 }
 
+/**
+ * Progress event from Python PROGRESS: lines
+ */
+export interface ProgressEvent {
+  type: string;
+  operationId: string;
+  timestamp: string;
+  progress_percentage: number;
+  current_step: string;
+  phase?: string;
+  phase_progress?: number;
+  data?: Record<string, unknown>;
+  error_message?: string;
+  error_code?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Callback for progress events
+ */
+export type ProgressCallback = (event: ProgressEvent) => void;
+
 export interface ScriptJob {
   id: string;
   script: string;
@@ -223,6 +245,201 @@ if __name__ == "__main__":
         logger.warn(`Optional package '${pkg}' not installed. Some features may be limited.`);
       }
     }
+  }
+
+  /**
+   * Execute a Python script with progress streaming support.
+   * Parses PROGRESS:{json} lines from stdout and calls the progress callback.
+   */
+  async executeWithProgress(
+    script: string,
+    args: string[] = [],
+    options?: {
+      timeout?: number;
+      cwd?: string;
+      env?: Record<string, string>;
+      onProgress?: ProgressCallback;
+    }
+  ): Promise<ScriptResult> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    const jobId = uuidv4();
+    const job: ScriptJob = {
+      id: jobId,
+      script,
+      args,
+      status: 'pending'
+    };
+    this.jobs.set(jobId, job);
+
+    while (this.runningJobs >= this.config.maxConcurrent) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    this.runningJobs++;
+    job.status = 'running';
+    job.startTime = new Date();
+    this.emit('job-start', { jobId, script, args });
+
+    try {
+      const result = await this.runScriptWithProgress(script, args, {
+        timeout: options?.timeout || this.config.timeout,
+        cwd: options?.cwd || this.config.workDir,
+        env: options?.env,
+        onProgress: options?.onProgress
+      });
+
+      job.status = result.success ? 'completed' : 'failed';
+      job.result = result;
+      job.endTime = new Date();
+
+      this.emit('job-complete', { jobId, result });
+      return result;
+    } catch (error) {
+      job.status = 'failed';
+      job.endTime = new Date();
+
+      const result: ScriptResult = {
+        success: false,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : 'Unknown error',
+        exitCode: -1,
+        duration: job.startTime ? Date.now() - job.startTime.getTime() : 0
+      };
+      job.result = result;
+
+      this.emit('job-error', { jobId, error });
+      return result;
+    } finally {
+      this.runningJobs--;
+    }
+  }
+
+  /**
+   * Run a Python script with progress streaming
+   */
+  private runScriptWithProgress(
+    script: string,
+    args: string[],
+    options: {
+      timeout: number;
+      cwd: string;
+      env?: Record<string, string>;
+      onProgress?: ProgressCallback;
+    }
+  ): Promise<ScriptResult> {
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      const scriptPath = path.isAbsolute(script)
+        ? script
+        : path.join(this.config.scriptsDir, script);
+
+      const pythonArgs = [scriptPath, ...args];
+      let stdout = '';
+      let stderr = '';
+      let lineBuffer = '';
+
+      logger.info(`Executing Python script with progress: ${this.config.pythonPath} ${scriptPath}`);
+
+      const env = {
+        ...process.env,
+        ...options.env,
+        PYTHONUNBUFFERED: '1'
+      };
+
+      const proc: ChildProcess = spawn(this.config.pythonPath!, pythonArgs, {
+        cwd: options.cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      const timeoutHandle = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new Error(`Script execution timed out after ${options.timeout}ms`));
+      }, options.timeout);
+
+      proc.stdout?.on('data', (data: Buffer) => {
+        const chunk = data.toString();
+        stdout += chunk;
+
+        // Parse line by line for PROGRESS: events
+        lineBuffer += chunk;
+        const lines = lineBuffer.split('\n');
+
+        // Keep the last incomplete line in buffer
+        lineBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('PROGRESS:')) {
+            try {
+              const jsonStr = line.slice(9).trim();
+              const event = JSON.parse(jsonStr) as ProgressEvent;
+              if (options.onProgress) {
+                options.onProgress(event);
+              }
+              this.emit('progress', { event });
+            } catch (parseError) {
+              logger.warn('Failed to parse progress line', { line: line.substring(0, 100) });
+            }
+          }
+        }
+
+        this.emit('stdout', { data: chunk });
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString();
+        this.emit('stderr', { data: data.toString() });
+      });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timeoutHandle);
+        const duration = Date.now() - startTime;
+
+        // Process any remaining buffered line
+        if (lineBuffer.startsWith('PROGRESS:')) {
+          try {
+            const jsonStr = lineBuffer.slice(9).trim();
+            const event = JSON.parse(jsonStr) as ProgressEvent;
+            if (options.onProgress) {
+              options.onProgress(event);
+            }
+          } catch {
+            // Ignore parse errors on final buffer
+          }
+        }
+
+        let output: any;
+        try {
+          // Filter out PROGRESS: lines for JSON parsing
+          const jsonLines = stdout.split('\n')
+            .filter(line => !line.startsWith('PROGRESS:'))
+            .join('\n')
+            .trim();
+          if (jsonLines) {
+            output = JSON.parse(jsonLines);
+          }
+        } catch {
+          output = stdout.trim();
+        }
+
+        resolve({
+          success: code === 0,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: code || 0,
+          duration,
+          output
+        });
+      });
+
+      proc.on('error', (error: Error) => {
+        clearTimeout(timeoutHandle);
+        reject(error);
+      });
+    });
   }
 
   /**

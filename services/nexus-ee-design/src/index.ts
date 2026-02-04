@@ -22,6 +22,10 @@ import { cliAccessMiddleware } from './api/cli-access.js';
 import { SkillsEngineClient } from './services/skills/skills-engine-client.js';
 import { getFileWatcherService, clearFileWatcherService } from './services/file-watcher/index.js';
 import { setSkillsEngineClient, getSkillsEngineClient, clearSkillsEngineClient } from './state.js';
+// WebSocket managers for real-time progress streaming
+import { initSchematicWebSocket } from './api/schematic-ws.js';
+import { initPCBWebSocket } from './api/websocket-pcb.js';
+import { initSimulationWebSocket } from './api/websocket-simulation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +43,19 @@ async function startServer(): Promise<void> {
       methods: ['GET', 'POST'],
     },
     path: '/ee-design/ws',
+  });
+
+  // Initialize WebSocket managers for real-time progress streaming
+  // Each manager creates a namespace (e.g., /schematic, /pcb-layout, /simulation)
+  const schematicWsManager = initSchematicWebSocket(io);
+  const pcbWsManager = initPCBWebSocket(io);
+  const simulationWsManager = initSimulationWebSocket(io);
+  log.info('WebSocket progress managers initialized', {
+    namespaces: [
+      schematicWsManager.getNamespacePath(),
+      pcbWsManager.getNamespacePath(),
+      simulationWsManager.getNamespacePath(),
+    ],
   });
 
   // Middleware
