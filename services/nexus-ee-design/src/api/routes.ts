@@ -811,6 +811,310 @@ export function createApiRoutes(io: SocketIOServer): Router {
    */
   router.get('/projects/:projectId/files/content', getFileContentHandler);
 
+  // ============================================================================
+  // NFS FILE BROWSER - Terminal Computer Integration
+  // ============================================================================
+
+  /**
+   * GET /projects/:projectId/files/nfs
+   * List files/folders in NFS directory (Terminal Computer)
+   */
+  router.get('/projects/:projectId/files/nfs', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const requestedPath = req.query.path as string || '';
+
+      log.info('Listing NFS directory', { projectId, path: requestedPath });
+
+      // Build the base path for project artifacts on NFS
+      const organizationId = (req.headers['x-organization-id'] as string) || 'default';
+      const basePath = `/workspace/projects/${projectId}`;
+      const fullPath = requestedPath ? `${basePath}/${requestedPath}` : basePath;
+
+      // Validate path doesn't escape project directory
+      const normalizedPath = path.normalize(fullPath);
+      if (!normalizedPath.startsWith(basePath) && !normalizedPath.startsWith('/workspace/projects')) {
+        throw new ValidationError('Path traversal not allowed');
+      }
+
+      const files = await NFSStorage.listDirectory(normalizedPath);
+
+      res.json({
+        success: true,
+        data: files,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * GET /projects/:projectId/files/nfs/content
+   * Get file content from NFS
+   */
+  router.get('/projects/:projectId/files/nfs/content', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const filePath = req.query.path as string;
+
+      if (!filePath) {
+        throw new ValidationError('Path is required');
+      }
+
+      log.info('Getting NFS file content', { projectId, path: filePath });
+
+      const basePath = `/workspace/projects/${projectId}`;
+      const fullPath = filePath.startsWith('/workspace') ? filePath : `${basePath}/${filePath}`;
+
+      // Validate path
+      if (!fullPath.startsWith(basePath) && !fullPath.startsWith('/workspace/projects')) {
+        throw new ValidationError('Path traversal not allowed');
+      }
+
+      const content = await NFSStorage.getArtifact(fullPath);
+      const ext = path.extname(fullPath).slice(1).toLowerCase();
+
+      // Determine content type
+      const mimeTypes: Record<string, string> = {
+        'kicad_sch': 'application/x-kicad-schematic',
+        'kicad_pcb': 'application/x-kicad-pcb',
+        'pdf': 'application/pdf',
+        'svg': 'image/svg+xml',
+        'json': 'application/json',
+        'txt': 'text/plain',
+        'c': 'text/x-c',
+        'h': 'text/x-c',
+        'py': 'text/x-python',
+      };
+
+      res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+      res.send(content);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * POST /projects/:projectId/files/nfs
+   * Create a file or folder on NFS
+   */
+  router.post('/projects/:projectId/files/nfs', validate(z.object({
+    path: z.string(),
+    content: z.string().optional(),
+    type: z.enum(['file', 'directory']).default('file'),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const { path: filePath, content, type } = req.body;
+
+      log.info('Creating on NFS', { projectId, path: filePath, type });
+
+      const basePath = `/workspace/projects/${projectId}`;
+      const fullPath = `${basePath}/${filePath}`;
+
+      // Validate path
+      if (!path.normalize(fullPath).startsWith(basePath)) {
+        throw new ValidationError('Path traversal not allowed');
+      }
+
+      if (type === 'directory') {
+        await NFSStorage.createDirectory(fullPath);
+      } else {
+        await NFSStorage.writeFile(fullPath, content || '');
+      }
+
+      res.json({
+        success: true,
+        data: { path: fullPath, type },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * POST /projects/:projectId/files/bulk-move
+   * Move artifacts from database to NFS (Terminal Computer)
+   */
+  router.post('/projects/:projectId/files/bulk-move', validate(z.object({
+    artifactIds: z.array(z.string()).min(1),
+    targetPath: z.string().optional(),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const { artifactIds, targetPath } = req.body;
+      const organizationId = (req.headers['x-organization-id'] as string) || 'default';
+
+      log.info('Bulk moving artifacts to NFS', { projectId, count: artifactIds.length, targetPath });
+
+      const results: Array<{ id: string; nfsPath: string; success: boolean; error?: string }> = [];
+
+      for (const artifactId of artifactIds) {
+        try {
+          // Try to find as schematic first
+          const schematic = await findSchematicById(artifactId);
+
+          if (schematic && schematic.kicadSch) {
+            const nfsPath = targetPath
+              ? `${targetPath}/${schematic.name || schematic.id}.kicad_sch`
+              : `/workspace/projects/${projectId}/schematics/${schematic.name || schematic.id}.kicad_sch`;
+
+            // Write to NFS
+            await NFSStorage.writeFile(nfsPath, schematic.kicadSch);
+
+            // Update database with NFS path
+            await updateSchematic(schematic.id, { filePath: nfsPath });
+
+            results.push({ id: artifactId, nfsPath, success: true });
+            continue;
+          }
+
+          // Try PCB layout
+          const pcbLayout = await findPCBLayoutById(artifactId);
+          if (pcbLayout) {
+            const kicadContent = await getKicadContent(artifactId);
+            if (kicadContent) {
+              const nfsPath = targetPath
+                ? `${targetPath}/layout-v${pcbLayout.version}.kicad_pcb`
+                : `/workspace/projects/${projectId}/pcb-layouts/layout-v${pcbLayout.version}.kicad_pcb`;
+
+              await NFSStorage.writeFile(nfsPath, kicadContent);
+              await updatePCBLayout(pcbLayout.id, { filePath: nfsPath });
+
+              results.push({ id: artifactId, nfsPath, success: true });
+              continue;
+            }
+          }
+
+          results.push({ id: artifactId, nfsPath: '', success: false, error: 'Artifact not found' });
+        } catch (error) {
+          results.push({
+            id: artifactId,
+            nfsPath: '',
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      }
+
+      const successCount = results.filter((r) => r.success).length;
+      log.info('Bulk move completed', { projectId, total: artifactIds.length, success: successCount });
+
+      res.json({
+        success: true,
+        data: {
+          moved: successCount,
+          total: artifactIds.length,
+          results,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * POST /projects/:projectId/files/sync-graphrag
+   * Sync files to GraphRAG knowledge graph
+   */
+  router.post('/projects/:projectId/files/sync-graphrag', validate(z.object({
+    paths: z.array(z.string()).min(1),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const { paths } = req.body;
+      const tenantId = (req.headers['x-tenant-id'] as string) || 'default';
+
+      log.info('Syncing files to GraphRAG', { projectId, pathCount: paths.length });
+
+      const syncResults: Array<{ path: string; nodeId?: string; success: boolean; error?: string }> = [];
+
+      for (const filePath of paths) {
+        try {
+          // Read file content from NFS
+          const content = await NFSStorage.getArtifact(filePath);
+          const contentStr = content.toString();
+
+          // Extract metadata
+          const fileName = path.basename(filePath);
+          const extension = path.extname(fileName).slice(1);
+          const category = getFileCategory(extension);
+
+          // Create content hash
+          const crypto = await import('crypto');
+          const contentHash = crypto.createHash('sha256').update(contentStr).digest('hex');
+
+          // Create GraphRAG node via API (if GraphRAG service is available)
+          const graphragUrl = process.env.GRAPHRAG_API_URL || 'https://api.adverant.ai/graphrag';
+
+          const graphragResponse = await fetch(`${graphragUrl}/api/v1/files`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-tenant-id': tenantId,
+            },
+            body: JSON.stringify({
+              filePath,
+              fileName,
+              fileExtension: extension,
+              fileCategory: category,
+              contentHash,
+              contentPreview: contentStr.slice(0, 500),
+              projectId,
+            }),
+          });
+
+          if (!graphragResponse.ok) {
+            throw new Error(`GraphRAG sync failed: ${graphragResponse.statusText}`);
+          }
+
+          const result = await graphragResponse.json();
+          syncResults.push({ path: filePath, nodeId: result.data?.nodeId, success: true });
+        } catch (error) {
+          log.warn('Failed to sync file to GraphRAG', { path: filePath, error });
+          syncResults.push({
+            path: filePath,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      }
+
+      const successCount = syncResults.filter((r) => r.success).length;
+      log.info('GraphRAG sync completed', { projectId, total: paths.length, success: successCount });
+
+      res.json({
+        success: true,
+        data: {
+          synced: successCount,
+          total: paths.length,
+          results: syncResults,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Helper function for file categories
+  function getFileCategory(extension: string): string {
+    const categories: Record<string, string> = {
+      'kicad_sch': 'schematic',
+      'kicad_pcb': 'pcb_layout',
+      'json': 'data',
+      'csv': 'data',
+      'pdf': 'document',
+      'svg': 'image',
+      'png': 'image',
+      'c': 'source_code',
+      'h': 'source_code',
+      'cpp': 'source_code',
+      'py': 'source_code',
+      'txt': 'text',
+    };
+    return categories[extension] || 'unknown';
+  }
+
   router.patch('/projects/:projectId/status', validate(z.object({
     status: z.enum(['draft', 'in_progress', 'review', 'approved', 'completed', 'on_hold', 'cancelled']),
   })), async (req: Request, res: Response, next: NextFunction) => {

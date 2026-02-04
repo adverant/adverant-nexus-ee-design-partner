@@ -276,6 +276,126 @@ export class NFSStorage {
   }
 
   /**
+   * List directory contents (for file browser)
+   * Returns FileNode structure for the given path
+   */
+  static async listDirectory(
+    fullPath: string
+  ): Promise<{
+    name: string;
+    path: string;
+    isDirectory: boolean;
+    size: number;
+    modifiedAt: string;
+    extension?: string;
+    children?: {
+      name: string;
+      path: string;
+      isDirectory: boolean;
+      size: number;
+      modifiedAt: string;
+      extension?: string;
+    }[];
+  }> {
+    try {
+      // Validate the path is within allowed directories
+      const normalizedPath = path.normalize(fullPath);
+
+      // Security: Ensure path doesn't escape NFS_BASE or /workspace
+      if (!normalizedPath.startsWith(NFS_BASE) && !normalizedPath.startsWith('/workspace')) {
+        throw new Error('Path traversal not allowed');
+      }
+
+      const stats = await fs.stat(normalizedPath);
+      const name = path.basename(normalizedPath);
+
+      const result = {
+        name,
+        path: normalizedPath,
+        isDirectory: stats.isDirectory(),
+        size: stats.size,
+        modifiedAt: stats.mtime.toISOString(),
+        extension: !stats.isDirectory() ? path.extname(name).slice(1) : undefined,
+        children: undefined as {
+          name: string;
+          path: string;
+          isDirectory: boolean;
+          size: number;
+          modifiedAt: string;
+          extension?: string;
+        }[] | undefined,
+      };
+
+      // If it's a directory, list its contents
+      if (stats.isDirectory()) {
+        const entries = await fs.readdir(normalizedPath, { withFileTypes: true });
+        result.children = await Promise.all(
+          entries.map(async (entry) => {
+            const entryPath = path.join(normalizedPath, entry.name);
+            try {
+              const entryStats = await fs.stat(entryPath);
+              return {
+                name: entry.name,
+                path: entryPath,
+                isDirectory: entry.isDirectory(),
+                size: entryStats.size,
+                modifiedAt: entryStats.mtime.toISOString(),
+                extension: !entry.isDirectory() ? path.extname(entry.name).slice(1) : undefined,
+              };
+            } catch {
+              return {
+                name: entry.name,
+                path: entryPath,
+                isDirectory: entry.isDirectory(),
+                size: 0,
+                modifiedAt: new Date().toISOString(),
+                extension: !entry.isDirectory() ? path.extname(entry.name).slice(1) : undefined,
+              };
+            }
+          })
+        );
+      }
+
+      return result;
+    } catch (error) {
+      log.error('Failed to list directory', error as Error, { path: fullPath });
+      throw error;
+    }
+  }
+
+  /**
+   * Create a directory
+   */
+  static async createDirectory(fullPath: string): Promise<void> {
+    // Security: Ensure path doesn't escape allowed directories
+    const normalizedPath = path.normalize(fullPath);
+    if (!normalizedPath.startsWith(NFS_BASE) && !normalizedPath.startsWith('/workspace')) {
+      throw new Error('Path traversal not allowed');
+    }
+
+    await fs.mkdir(normalizedPath, { recursive: true });
+    log.info('Directory created on NFS', { path: normalizedPath });
+  }
+
+  /**
+   * Write file content
+   */
+  static async writeFile(fullPath: string, content: Buffer | string): Promise<void> {
+    // Security: Ensure path doesn't escape allowed directories
+    const normalizedPath = path.normalize(fullPath);
+    if (!normalizedPath.startsWith(NFS_BASE) && !normalizedPath.startsWith('/workspace')) {
+      throw new Error('Path traversal not allowed');
+    }
+
+    // Ensure parent directory exists
+    const dir = path.dirname(normalizedPath);
+    await fs.mkdir(dir, { recursive: true });
+
+    await fs.writeFile(normalizedPath, content);
+    log.info('File written to NFS', { path: normalizedPath, size: Buffer.isBuffer(content) ? content.length : content.length });
+  }
+
+  /**
    * List all artifacts for a project
    */
   static async listProjectArtifacts(
