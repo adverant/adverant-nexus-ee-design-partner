@@ -1122,8 +1122,17 @@ JSON array of pins:"""
                 logger.error(error_msg)
                 raise ValueError(error_msg)
         else:
-            # Only power labels, no wires needed
-            logger.info(f"No non-power connections to route - only power labels added")
+            # Only power labels, no wires needed - this is a WARNING condition
+            # because it usually indicates the LLM connection generator failed
+            warning_msg = (
+                f"SKIPPING wire routing: No non-power connections to route. "
+                f"Total connections provided: {len(connections)}, "
+                f"Non-power connections after filtering: 0. "
+                f"Power labels added: {len(power_labels_added)}. "
+                f"Schematic will have 0 signal wires (only power labels). "
+                f"This often indicates LLM connection generation failed upstream."
+            )
+            logger.warning(warning_msg)
             result = type('RouterResult', (), {'wires': [], 'junctions': [], 'four_way_junctions_avoided': 0})()
 
         # VALIDATION: Check wire-to-connection ratio (only if we have connections to route)

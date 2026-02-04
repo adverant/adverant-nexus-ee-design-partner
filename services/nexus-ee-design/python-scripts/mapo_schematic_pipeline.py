@@ -446,12 +446,31 @@ class MAPOSchematicPipeline:
                         f"Generated {len(connection_objs)} connections"
                     )
                 except Exception as e:
-                    logger.warning(f"Connection generation failed: {e}")
-                    connection_objs = []
+                    # CRITICAL: LLM connection generation failed
+                    # This means NO signal connections were generated - schematic will have 0 wires!
+                    error_msg = (
+                        f"CRITICAL: LLM connection generation FAILED: {e}\n"
+                        f"  This means NO signal connections were generated.\n"
+                        f"  Only power connections (VCC/GND) will be available.\n"
+                        f"  Schematic will have 0 signal wires!\n"
+                        f"  Check: OPENROUTER_API_KEY, network connectivity, rate limits."
+                    )
+                    logger.error(error_msg)
+
+                    # Emit error event so frontend shows clear failure message
                     self._emit_progress(
                         SchematicPhase.CONNECTIONS, 100,
-                        f"Connection generation warning: {e}"
+                        f"ERROR: Connection generation failed - {str(e)}",
+                        event_type=SchematicEventType.ERROR.value
                     )
+
+                    # Track error for result summary
+                    if not hasattr(self, '_pipeline_errors'):
+                        self._pipeline_errors = []
+                    self._pipeline_errors.append(f"LLM Connection Generation Failed: {str(e)}")
+
+                    # Fallback to empty (but now with explicit error logging)
+                    connection_objs = []
 
             # Convert block diagram if provided
             block_diagram_obj = None

@@ -175,6 +175,24 @@ class ConnectionGeneratorAgent:
         connections.extend(signal_connections)
         logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
 
+        # VALIDATION: Check that signal connections were actually generated
+        if not signal_connections:
+            # This is a CRITICAL warning - schematic will have 0 signal wires!
+            warning_msg = (
+                f"WARNING: LLM generated 0 signal connections for {len(components)} components. "
+                f"This will result in a schematic with only power connections (0 signal wires). "
+                f"Possible causes: LLM failure, invalid API key, design intent too vague, "
+                f"rate limiting, or network issues. "
+                f"Design intent was: '{design_intent[:100]}...'"
+            )
+            logger.warning(warning_msg)
+        elif len(signal_connections) < len(components):
+            # Warn if fewer connections than components (may indicate incomplete inference)
+            logger.warning(
+                f"Signal connections ({len(signal_connections)}) fewer than components ({len(components)}). "
+                f"Some components may not be connected. This might be expected for power-only designs."
+            )
+
         # Step 5: Deduplicate and prioritize
         connections = self._deduplicate_connections(connections)
 
