@@ -650,26 +650,93 @@ Generate the connections:"""
                 clean_text = clean_text.rstrip()[:-3].rstrip()
 
             logger.debug(f"Cleaned response text (first 200 chars): {clean_text[:200]}")
+            logger.debug(f"Cleaned response text (last 100 chars): ...{clean_text[-100:] if len(clean_text) > 100 else clean_text}")
 
-            # Extract JSON from response
-            json_match = re.search(r'\[[\s\S]*\]', clean_text)
-            if not json_match:
+            # Multi-strategy JSON parsing (handles truncated responses)
+            connections_data = None
+            parse_error = None
+
+            # Strategy 1: Direct parse (if response is already valid JSON)
+            clean_text = clean_text.strip()
+            try:
+                connections_data = json.loads(clean_text)
+                logger.info("JSON parsed via Strategy 1 (direct parse)")
+            except json.JSONDecodeError as e:
+                parse_error = f"Direct parse failed: {e}"
+                logger.debug(parse_error)
+
+            # Strategy 2: Regex to extract [...]
+            if connections_data is None:
+                json_match = re.search(r'\[[\s\S]*\]', clean_text)
+                if json_match:
+                    try:
+                        connections_data = json.loads(json_match.group())
+                        logger.info("JSON parsed via Strategy 2 (regex extraction)")
+                    except json.JSONDecodeError as e:
+                        parse_error = f"Regex extraction failed: {e}"
+                        logger.debug(parse_error)
+
+            # Strategy 3: If starts with '[', try to repair truncated JSON
+            if connections_data is None and clean_text.startswith('['):
+                # Count bracket balance to find where to repair
+                bracket_count = 0
+                last_complete_obj = -1
+                in_string = False
+                escape_next = False
+
+                for i, char in enumerate(clean_text):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if char == '{':
+                        bracket_count += 1
+                    elif char == '}':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            last_complete_obj = i
+
+                # Try to salvage up to the last complete object
+                if last_complete_obj > 0:
+                    salvaged = clean_text[:last_complete_obj + 1]
+                    # Close any open brackets
+                    if not salvaged.rstrip().endswith(']'):
+                        salvaged = salvaged.rstrip()
+                        if salvaged.endswith(','):
+                            salvaged = salvaged[:-1]
+                        salvaged += ']'
+                    try:
+                        connections_data = json.loads(salvaged)
+                        logger.warning(f"JSON repaired via Strategy 3 (truncation repair). Original: {len(clean_text)} chars, salvaged: {len(salvaged)} chars")
+                    except json.JSONDecodeError as e:
+                        parse_error = f"Truncation repair failed: {e}"
+                        logger.debug(parse_error)
+
+            # Final failure - raise with detailed diagnostics
+            if connections_data is None:
+                # Log full response for debugging (not truncated)
+                logger.error(f"FULL cleaned response ({len(clean_text)} chars): {clean_text}")
                 error_msg = (
-                    f"LLM did not return valid JSON array.\n"
+                    f"LLM did not return valid JSON array after all parse strategies.\n"
                     f"  Original response (first 300 chars): {response_text[:300]}...\n"
                     f"  Cleaned response (first 300 chars): {clean_text[:300]}...\n"
+                    f"  Cleaned response (last 200 chars): ...{clean_text[-200:] if len(clean_text) > 200 else clean_text}\n"
+                    f"  Last parse error: {parse_error}\n"
                     f"  Expected format: [{'{'}\"from_ref\": \"U1\", \"from_pin\": \"PA0\", ...{'}'}]"
                 )
                 logger.error(error_msg)
                 raise ValueError(error_msg)
 
-            try:
-                connections_data = json.loads(json_match.group())
-            except json.JSONDecodeError as e:
-                error_msg = (
-                    f"JSON parsing failed: {e}\n"
-                    f"  Matched text (first 500 chars): {json_match.group()[:500]}..."
-                )
+            # Validate we got a list
+            if not isinstance(connections_data, list):
+                error_msg = f"Expected JSON array but got {type(connections_data).__name__}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
             logger.info(f"Parsed {len(connections_data)} connections from LLM response")
