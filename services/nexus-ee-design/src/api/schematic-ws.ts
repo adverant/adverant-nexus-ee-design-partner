@@ -260,6 +260,13 @@ export class SchematicWebSocketManager extends EventEmitter {
       connectedClients: this.namespace.sockets.size,
     };
   }
+
+  /**
+   * Get namespace path (for logging and debugging)
+   */
+  getNamespacePath(): string {
+    return '/schematic';
+  }
 }
 
 // Singleton instance
