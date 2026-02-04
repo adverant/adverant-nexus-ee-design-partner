@@ -19,6 +19,7 @@ import { generateMinimalSchematic, parseKicadSchematic } from '../utils/kicad-ge
 import { PythonExecutor, ProgressEvent } from '../services/pcb/python-executor.js';
 import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
+import { createHILRoutes } from './hil-routes.js';
 import { getSchematicWsManager } from './schematic-ws.js';
 
 // Repository imports
@@ -2941,6 +2942,13 @@ export function createApiRoutes(io: SocketIOServer): Router {
       next(error);
     }
   });
+
+  // ============================================================================
+  // HIL Testing Routes (mounted from hil-routes.ts)
+  // ============================================================================
+
+  router.use('/hil', createHILRoutes());
+  log.info('HIL testing routes mounted');
 
   // ============================================================================
   // Skills Routes (mounted from skills-routes.ts)

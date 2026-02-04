@@ -14,7 +14,7 @@ import { log, Logger } from '../utils/logger.js';
 // Types
 // ============================================================================
 
-export type QueueName = 'simulation' | 'layout' | 'firmware' | 'validation';
+export type QueueName = 'simulation' | 'layout' | 'firmware' | 'validation' | 'hil';
 
 export interface SimulationJobData {
   simulationId: string;
@@ -85,7 +85,34 @@ export interface ValidationJobData {
   config?: Record<string, unknown>;
 }
 
-export type JobData = SimulationJobData | LayoutJobData | FirmwareJobData | ValidationJobData;
+export interface HILJobData {
+  type: 'discover' | 'connect' | 'test_run';
+  projectId: string;
+  // For discovery
+  config?: {
+    connectionTypes?: string[];
+    instrumentTypes?: string[];
+    scanTimeout?: number;
+  };
+  // For connection test
+  instrumentId?: string;
+  connectionParams?: Record<string, unknown>;
+  // For test run
+  testRunId?: string;
+  sequenceId?: string;
+  sequenceConfig?: Record<string, unknown>;
+  passCriteria?: Record<string, unknown>;
+  connectedInstruments?: Array<{
+    id: string;
+    type: string;
+    manufacturer: string;
+    model: string;
+    connectionParams: Record<string, unknown>;
+  }>;
+  timeoutMs?: number;
+}
+
+export type JobData = SimulationJobData | LayoutJobData | FirmwareJobData | ValidationJobData | HILJobData;
 
 export interface QueueProgress {
   jobId: string;
@@ -163,6 +190,13 @@ const queueSpecificOptions: Record<QueueName, Partial<JobsOptions>> = {
       delay: 1000,
     },
   },
+  hil: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 5000,
+    },
+  },
 };
 
 // ============================================================================
@@ -197,7 +231,7 @@ class QueueManagerImpl extends EventEmitter {
     });
 
     const connection = getRedisConnection();
-    const queueNames: QueueName[] = ['simulation', 'layout', 'firmware', 'validation'];
+    const queueNames: QueueName[] = ['simulation', 'layout', 'firmware', 'validation', 'hil'];
 
     for (const name of queueNames) {
       // Create queue
@@ -560,6 +594,7 @@ export const getSimulationQueue = (): Queue => queueManager.getQueue('simulation
 export const getLayoutQueue = (): Queue => queueManager.getQueue('layout');
 export const getFirmwareQueue = (): Queue => queueManager.getQueue('firmware');
 export const getValidationQueue = (): Queue => queueManager.getQueue('validation');
+export const getHILQueue = (): Queue => queueManager.getQueue('hil');
 
 // ============================================================================
 // Helper Functions for Adding Jobs
@@ -591,6 +626,13 @@ export async function addValidationJob(
   options?: Partial<JobsOptions>
 ): Promise<string> {
   return queueManager.addJob('validation', data, options);
+}
+
+export async function addHILJob(
+  data: HILJobData,
+  options?: Partial<JobsOptions>
+): Promise<string> {
+  return queueManager.addJob('hil', data, options);
 }
 
 export default queueManager;

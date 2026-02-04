@@ -127,6 +127,67 @@ const ConfigSchema = z.object({
     multiLlmEnabled: z.boolean().default(true),
   }),
 
+  // HIL (Hardware-in-the-Loop) Testing Configuration
+  hil: z.object({
+    enabled: z.boolean().default(true),
+    pythonScriptsDir: z.string().default('/app/python-scripts/hil'),
+
+    // Discovery Configuration
+    discovery: z.object({
+      autoDiscover: z.boolean().default(true),
+      scanIntervalSeconds: z.number().default(30),
+      scanTimeout: z.number().default(10000),
+      enabledTypes: z.array(z.string()).default([
+        'logic_analyzer',
+        'oscilloscope',
+        'power_supply',
+        'motor_emulator',
+        'daq',
+        'can_analyzer',
+      ]),
+    }),
+
+    // Saleae Logic Analyzer Configuration
+    saleae: z.object({
+      host: z.string().default('localhost'),
+      port: z.number().default(10430),
+      automationApiEnabled: z.boolean().default(true),
+    }),
+
+    // VISA/PyVISA Configuration
+    visa: z.object({
+      resourceManager: z.string().optional(),
+      scanTimeout: z.number().default(5000),
+      defaultTimeout: z.number().default(10000),
+    }),
+
+    // Capture Storage Configuration
+    storage: z.object({
+      capturesDir: z.string().default('/plugins/ee-design-plugin/artifacts/hil-captures'),
+      maxCaptureSizeMb: z.number().default(500),
+      retentionDays: z.number().default(30),
+      compressionEnabled: z.boolean().default(true),
+    }),
+
+    // Execution Configuration
+    execution: z.object({
+      maxConcurrentTests: z.number().default(1),
+      defaultTimeoutMs: z.number().default(600000),
+      retryOnHardwareError: z.boolean().default(true),
+      maxRetries: z.number().default(3),
+      retryDelayMs: z.number().default(5000),
+    }),
+
+    // Safety Configuration
+    safety: z.object({
+      emergencyStopEnabled: z.boolean().default(true),
+      maxVoltage: z.number().default(60),
+      maxCurrent: z.number().default(30),
+      thermalShutdownTemp: z.number().default(85),
+      requireCalibration: z.boolean().default(false),
+    }),
+  }),
+
   // CLI/Terminal Access Configuration
   cliAccess: z.object({
     enabled: z.boolean().default(true),
@@ -290,6 +351,60 @@ function loadConfig(): Config {
       },
       retentionDays: parseInt(process.env.ARTIFACTS_RETENTION_DAYS || '90', 10),
       syncEnabled: process.env.ARTIFACTS_SYNC_ENABLED !== 'false',
+    },
+
+    hil: {
+      enabled: process.env.HIL_ENABLED !== 'false',
+      pythonScriptsDir: process.env.HIL_PYTHON_SCRIPTS_DIR || '/app/python-scripts/hil',
+
+      discovery: {
+        autoDiscover: process.env.HIL_AUTO_DISCOVER !== 'false',
+        scanIntervalSeconds: parseInt(process.env.HIL_SCAN_INTERVAL || '30', 10),
+        scanTimeout: parseInt(process.env.HIL_SCAN_TIMEOUT || '10000', 10),
+        enabledTypes: process.env.HIL_ENABLED_TYPES?.split(',') || [
+          'logic_analyzer',
+          'oscilloscope',
+          'power_supply',
+          'motor_emulator',
+          'daq',
+          'can_analyzer',
+        ],
+      },
+
+      saleae: {
+        host: process.env.HIL_SALEAE_HOST || 'localhost',
+        port: parseInt(process.env.HIL_SALEAE_PORT || '10430', 10),
+        automationApiEnabled: process.env.HIL_SALEAE_API_ENABLED !== 'false',
+      },
+
+      visa: {
+        resourceManager: process.env.HIL_VISA_RESOURCE_MANAGER,
+        scanTimeout: parseInt(process.env.HIL_VISA_SCAN_TIMEOUT || '5000', 10),
+        defaultTimeout: parseInt(process.env.HIL_VISA_DEFAULT_TIMEOUT || '10000', 10),
+      },
+
+      storage: {
+        capturesDir: process.env.HIL_CAPTURES_DIR || '/plugins/ee-design-plugin/artifacts/hil-captures',
+        maxCaptureSizeMb: parseInt(process.env.HIL_MAX_CAPTURE_SIZE_MB || '500', 10),
+        retentionDays: parseInt(process.env.HIL_RETENTION_DAYS || '30', 10),
+        compressionEnabled: process.env.HIL_COMPRESSION_ENABLED !== 'false',
+      },
+
+      execution: {
+        maxConcurrentTests: parseInt(process.env.HIL_MAX_CONCURRENT_TESTS || '1', 10),
+        defaultTimeoutMs: parseInt(process.env.HIL_DEFAULT_TIMEOUT_MS || '600000', 10),
+        retryOnHardwareError: process.env.HIL_RETRY_ON_ERROR !== 'false',
+        maxRetries: parseInt(process.env.HIL_MAX_RETRIES || '3', 10),
+        retryDelayMs: parseInt(process.env.HIL_RETRY_DELAY_MS || '5000', 10),
+      },
+
+      safety: {
+        emergencyStopEnabled: process.env.HIL_EMERGENCY_STOP !== 'false',
+        maxVoltage: parseFloat(process.env.HIL_MAX_VOLTAGE || '60'),
+        maxCurrent: parseFloat(process.env.HIL_MAX_CURRENT || '30'),
+        thermalShutdownTemp: parseFloat(process.env.HIL_THERMAL_SHUTDOWN_TEMP || '85'),
+        requireCalibration: process.env.HIL_REQUIRE_CALIBRATION === 'true',
+      },
     },
   };
 
