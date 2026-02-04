@@ -151,7 +151,7 @@ export class MAPOSchematicClient {
       blockDiagram,
       designName = "schematic",
       skipValidation = false,
-      timeout = 600000, // 10 minutes default - schematic gen is LLM-heavy
+      timeout = 900000, // 15 minutes default - schematic gen includes LLM + SPICE smoke test
     } = options;
 
     // Create temporary BOM file

@@ -1194,7 +1194,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
             'api_generate_schematic.py',
             ['--json', JSON.stringify(mapoInput)],
             {
-              timeout: 600000, // 10 minute timeout - schematic gen is LLM-heavy
+              timeout: 900000, // 15 minute timeout - schematic gen includes LLM + SPICE smoke test
               onProgress: (event: ProgressEvent) => {
                 // Relay progress event to WebSocket subscribers
                 // Cast to SchematicProgressEvent (types are compatible at runtime)

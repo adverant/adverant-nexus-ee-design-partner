@@ -129,7 +129,7 @@ spec:
         host: nexus-ee-design.nexus.svc.cluster.local
         port:
           number: 8080
-    timeout: 660s  # 11 minutes for LLM-heavy operations (schematic gen needs 10min)
+    timeout: 960s  # 16 minutes for LLM-heavy operations (schematic gen + SPICE smoke test needs 15min)
     retries:
       attempts: 3
       perTryTimeout: 100s
