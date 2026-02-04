@@ -1800,6 +1800,59 @@ export function createApiRoutes(io: SocketIOServer): Router {
   // KiCanvas uses the URL basename to detect file type, so including .kicad_sch in the URL is essential
   router.get('/projects/:projectId/schematic/:schematicId/schematic.kicad_sch', schematicFileHandler);
 
+  // =============================================================================
+  // PATCH /projects/:projectId/schematic/:schematicId - Update schematic (rename, etc.)
+  // =============================================================================
+  router.patch('/projects/:projectId/schematic/:schematicId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, schematicId } = req.params;
+      const { name, status } = req.body;
+
+      log.info('Updating schematic', { projectId, schematicId, name, status });
+
+      // Validate at least one field is provided
+      if (!name && !status) {
+        throw new ValidationError('At least one field (name or status) is required for update', {
+          operation: 'updateSchematic',
+          schematicId,
+          projectId,
+        });
+      }
+
+      // Get existing schematic
+      const schematic = await findSchematicById(schematicId);
+
+      if (!schematic) {
+        throw new NotFoundError('Schematic', schematicId, { operation: 'updateSchematic' });
+      }
+
+      if (schematic.projectId !== projectId) {
+        throw new ValidationError('Schematic does not belong to this project', {
+          operation: 'updateSchematic',
+          schematicId,
+          projectId,
+        });
+      }
+
+      // Build update data
+      const updateData: { name?: string; status?: string } = {};
+      if (name) updateData.name = name;
+      if (status) updateData.status = status;
+
+      // Update the schematic
+      const updated = await updateSchematic(schematicId, updateData);
+
+      log.info('Schematic updated successfully', { schematicId, name: updated.name });
+
+      res.json({
+        success: true,
+        data: updated,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/projects/:projectId/schematic/:schematicId/validate', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { projectId, schematicId } = req.params;
