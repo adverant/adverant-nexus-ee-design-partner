@@ -1431,51 +1431,55 @@ Return ONLY the JSON, no explanations."""
         When a symbol definition is missing, KiCanvas crashes. This generates
         a minimal valid symbol definition to prevent crashes while making it
         obvious the symbol needs to be replaced.
+
+        Uses KiCad 8.x tab indentation format.
         """
         # Escape quotes in symbol_id
         safe_id = symbol_id.replace('"', '\\"')
 
+        # NOTE: This placeholder is inserted into lib_symbols with additional \t\t prefix
+        # So the base indentation here should be minimal (relative to lib_symbols context)
         return f'''(symbol "{safe_id}" (in_bom yes) (on_board yes)
-    (property "Reference" "?" (at 0 1.27 0)
-      (effects (font (size 1.27 1.27)))
-    )
-    (property "Value" "{safe_id} [MISSING]" (at 0 -1.27 0)
-      (effects (font (size 1.27 1.27)))
-    )
-    (property "Footprint" "" (at 0 0 0)
-      (effects (font (size 1.27 1.27)) hide)
-    )
-    (property "Datasheet" "~" (at 0 0 0)
-      (effects (font (size 1.27 1.27)) hide)
-    )
-    (symbol "{safe_id}_0_1"
-      (rectangle (start -5.08 5.08) (end 5.08 -5.08)
-        (stroke (width 0.254) (type default))
-        (fill (type background))
-      )
-      (text "?" (at 0 0 0)
-        (effects (font (size 3.81 3.81)))
-      )
-    )
-    (symbol "{safe_id}_1_1"
-      (pin passive line (at -7.62 2.54 0) (length 2.54)
-        (name "1" (effects (font (size 1.27 1.27))))
-        (number "1" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at -7.62 0 0) (length 2.54)
-        (name "2" (effects (font (size 1.27 1.27))))
-        (number "2" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at 7.62 2.54 180) (length 2.54)
-        (name "3" (effects (font (size 1.27 1.27))))
-        (number "3" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at 7.62 0 180) (length 2.54)
-        (name "4" (effects (font (size 1.27 1.27))))
-        (number "4" (effects (font (size 1.27 1.27))))
-      )
-    )
-  )'''
+\t(property "Reference" "?" (at 0 1.27 0)
+\t\t(effects (font (size 1.27 1.27)))
+\t)
+\t(property "Value" "{safe_id} [MISSING]" (at 0 -1.27 0)
+\t\t(effects (font (size 1.27 1.27)))
+\t)
+\t(property "Footprint" "" (at 0 0 0)
+\t\t(effects (font (size 1.27 1.27)) hide)
+\t)
+\t(property "Datasheet" "~" (at 0 0 0)
+\t\t(effects (font (size 1.27 1.27)) hide)
+\t)
+\t(symbol "{safe_id}_0_1"
+\t\t(rectangle (start -5.08 5.08) (end 5.08 -5.08)
+\t\t\t(stroke (width 0.254) (type default))
+\t\t\t(fill (type background))
+\t\t)
+\t\t(text "?" (at 0 0 0)
+\t\t\t(effects (font (size 3.81 3.81)))
+\t\t)
+\t)
+\t(symbol "{safe_id}_1_1"
+\t\t(pin passive line (at -7.62 2.54 0) (length 2.54)
+\t\t\t(name "1" (effects (font (size 1.27 1.27))))
+\t\t\t(number "1" (effects (font (size 1.27 1.27))))
+\t\t)
+\t\t(pin passive line (at -7.62 0 0) (length 2.54)
+\t\t\t(name "2" (effects (font (size 1.27 1.27))))
+\t\t\t(number "2" (effects (font (size 1.27 1.27))))
+\t\t)
+\t\t(pin passive line (at 7.62 2.54 180) (length 2.54)
+\t\t\t(name "3" (effects (font (size 1.27 1.27))))
+\t\t\t(number "3" (effects (font (size 1.27 1.27))))
+\t\t)
+\t\t(pin passive line (at 7.62 0 180) (length 2.54)
+\t\t\t(name "4" (effects (font (size 1.27 1.27))))
+\t\t\t(number "4" (effects (font (size 1.27 1.27))))
+\t\t)
+\t)
+)'''
 
     async def _extract_inner_symbol(self, sexp: str, symbol_id: str) -> Optional[str]:
         """
@@ -1650,34 +1654,34 @@ Return ONLY the extracted (symbol ...) block:"""
         return True, f"Opens={open_count}, Closes={close_count}, max_depth={max_depth}"
 
     async def generate_kicad_sch(self, sheet: SchematicSheet) -> str:
-        """Generate KiCad S-expression schematic file."""
-        # Build the schematic file
+        """Generate KiCad S-expression schematic file in KiCad 8.x format."""
+        # Build the schematic file with proper KiCad 8.x format
+        # NOTE: KiCad 8.x requires tab indentation and generator_version
         lines = [
-            "(kicad_sch (version 20231120) (generator \"nexus_ee_design\")",
-            "",
-            f"  (uuid \"{sheet.uuid}\")",
-            "",
-            "  (paper \"A4\")",
-            "",
+            "(kicad_sch",
+            "\t(version 20231120)",
+            "\t(generator \"nexus_ee_design\")",
+            "\t(generator_version \"8.0\")",
+            f"\t(uuid \"{sheet.uuid}\")",
+            "\t(paper \"A4\")",
         ]
 
-        # Add lib_symbols section
-        lines.append("  (lib_symbols")
+        # Add lib_symbols section with tab indentation for KiCad 8.x compatibility
+        lines.append("\t(lib_symbols")
         for symbol_id, sexp in sheet.lib_symbols.items():
             # Extract just the symbol definition from the library wrapper (LLM-based)
             symbol_content = await self._extract_inner_symbol(sexp, symbol_id)
             if symbol_content:
-                # Indent the symbol content
-                indented = "\n".join("    " + line for line in symbol_content.split("\n"))
+                # Indent the symbol content with tabs for KiCad 8.x
+                indented = "\n".join("\t\t" + line for line in symbol_content.split("\n"))
                 lines.append(indented)
             else:
                 # Generate a placeholder lib_symbol to prevent KiCanvas crashes
                 logger.warning(f"Missing lib_symbol for {symbol_id}, generating placeholder")
                 placeholder = self._generate_placeholder_lib_symbol(symbol_id)
-                indented = "\n".join("    " + line for line in placeholder.split("\n"))
+                indented = "\n".join("\t\t" + line for line in placeholder.split("\n"))
                 lines.append(indented)
-        lines.append("  )")
-        lines.append("")
+        lines.append("\t)")
 
         # Add symbol instances
         for symbol in sheet.symbols:
@@ -1688,28 +1692,26 @@ Return ONLY the extracted (symbol ...) block:"""
         for wire in sheet.wires:
             lines.append(self._wire_to_sexp(wire))
 
-        # Add junctions
+        # Add junctions with tab indentation
         for junction in sheet.junctions:
-            lines.append(f'  (junction (at {junction.position[0]} {junction.position[1]}) (diameter 0) (color 0 0 0 0) (uuid "{junction.uuid}"))')
+            lines.append(f'\t(junction (at {junction.position[0]} {junction.position[1]}) (diameter 0) (color 0 0 0 0)\n\t\t(uuid "{junction.uuid}")\n\t)')
 
         # Add labels
         for label in sheet.labels:
             lines.append(self._label_to_sexp(label))
 
         # Add sheet_instances section (required for KiCad 8)
-        lines.append("")
-        lines.append("  (sheet_instances")
-        lines.append(f'    (path "/" (page "1"))')
-        lines.append("  )")
+        lines.append("\t(sheet_instances")
+        lines.append('\t\t(path "/" (page "1"))')
+        lines.append("\t)")
 
         # Add symbol_instances section (required for KiCad 8 to count components)
-        lines.append("")
-        lines.append("  (symbol_instances")
+        lines.append("\t(symbol_instances")
         for symbol in sheet.symbols:
-            lines.append(f'    (path "/{symbol.uuid}"')
-            lines.append(f'      (reference "{symbol.reference}") (unit {symbol.unit})')
-            lines.append(f'    )')
-        lines.append("  )")
+            lines.append(f'\t\t(path "/{symbol.uuid}"')
+            lines.append(f'\t\t\t(reference "{symbol.reference}") (unit {symbol.unit})')
+            lines.append('\t\t)')
+        lines.append("\t)")
 
         lines.append(")")
 
@@ -1729,55 +1731,58 @@ Return ONLY the extracted (symbol ...) block:"""
         return kicad_content
 
     def _symbol_to_sexp(self, symbol: SymbolInstance) -> str:
-        """Convert symbol instance to S-expression with KiCad 8 instances block."""
+        """Convert symbol instance to S-expression with KiCad 8 format using tabs."""
         x, y = symbol.position
 
-        # KiCad 8 requires (instances ...) block inside each symbol for proper tracking
-        return f'''  (symbol (lib_id "{symbol.symbol_id}") (at {x} {y} {symbol.rotation}) (unit {symbol.unit})
-    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
-    (uuid "{symbol.uuid}")
-    (property "Reference" "{symbol.reference}" (at {x} {y - 5} 0)
-      (effects (font (size 1.27 1.27)))
-    )
-    (property "Value" "{symbol.value}" (at {x} {y + 5} 0)
-      (effects (font (size 1.27 1.27)))
-    )
-    (property "Footprint" "{symbol.footprint}" (at {x} {y} 0)
-      (effects (font (size 1.27 1.27)) hide)
-    )
-    (property "Datasheet" "~" (at {x} {y} 0)
-      (effects (font (size 1.27 1.27)) hide)
-    )
-    (instances
-      (project ""
-        (path "/{symbol.uuid}"
-          (reference "{symbol.reference}")
-          (unit {symbol.unit})
-        )
-      )
-    )
-  )'''
+        # KiCad 8.x requires tab indentation and (instances ...) block inside each symbol
+        return f'''\t(symbol (lib_id "{symbol.symbol_id}") (at {x} {y} {symbol.rotation}) (unit {symbol.unit})
+\t\t(exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)
+\t\t(uuid "{symbol.uuid}")
+\t\t(property "Reference" "{symbol.reference}" (at {x} {y - 5} 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Value" "{symbol.value}" (at {x} {y + 5} 0)
+\t\t\t(effects (font (size 1.27 1.27)))
+\t\t)
+\t\t(property "Footprint" "{symbol.footprint}" (at {x} {y} 0)
+\t\t\t(effects (font (size 1.27 1.27)) hide)
+\t\t)
+\t\t(property "Datasheet" "~" (at {x} {y} 0)
+\t\t\t(effects (font (size 1.27 1.27)) hide)
+\t\t)
+\t\t(instances
+\t\t\t(project ""
+\t\t\t\t(path "/{symbol.uuid}"
+\t\t\t\t\t(reference "{symbol.reference}")
+\t\t\t\t\t(unit {symbol.unit})
+\t\t\t\t)
+\t\t\t)
+\t\t)
+\t)'''
 
     def _wire_to_sexp(self, wire: Wire) -> str:
-        """Convert wire to S-expression."""
+        """Convert wire to S-expression with KiCad 8.x tab format."""
         sx, sy = wire.start
         ex, ey = wire.end
-        return f'  (wire (pts (xy {sx} {sy}) (xy {ex} {ey})) (stroke (width 0) (type default)) (uuid "{wire.uuid}"))'
+        return f'''\t(wire (pts (xy {sx} {sy}) (xy {ex} {ey}))
+\t\t(stroke (width 0) (type default))
+\t\t(uuid "{wire.uuid}")
+\t)'''
 
     def _label_to_sexp(self, label: Label) -> str:
-        """Convert label to S-expression."""
+        """Convert label to S-expression with KiCad 8.x tab format."""
         x, y = label.position
 
         if label.label_type == "global_label":
-            return f'''  (global_label "{label.text}" (shape input) (at {x} {y} {label.rotation})
-    (effects (font (size 1.27 1.27)))
-    (uuid "{label.uuid}")
-  )'''
+            return f'''\t(global_label "{label.text}" (shape input) (at {x} {y} {label.rotation})
+\t\t(effects (font (size 1.27 1.27)))
+\t\t(uuid "{label.uuid}")
+\t)'''
         else:
-            return f'''  (label "{label.text}" (at {x} {y} {label.rotation})
-    (effects (font (size 1.27 1.27)))
-    (uuid "{label.uuid}")
-  )'''
+            return f'''\t(label "{label.text}" (at {x} {y} {label.rotation})
+\t\t(effects (font (size 1.27 1.27)))
+\t\t(uuid "{label.uuid}")
+\t)'''
 
 
 # CLI entry point
