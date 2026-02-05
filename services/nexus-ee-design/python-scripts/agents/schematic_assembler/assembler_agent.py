@@ -1572,6 +1572,55 @@ Return ONLY the extracted (symbol ...) block:"""
             logger.error(f"LLM symbol extraction failed: {e}")
             return None
 
+    def _normalize_to_tabs(self, content: str, base_indent: int = 2) -> str:
+        """
+        Normalize all indentation in S-expression content to use tabs only.
+
+        KiCad 8.x requires PURE TAB indentation - mixed tabs and spaces cause
+        "Failed to load schematic file" errors in kicad-cli.
+
+        This function:
+        1. Detects leading whitespace on each line
+        2. Counts indentation level (spaces converted: 2 or 4 spaces = 1 level)
+        3. Replaces all leading whitespace with tabs at detected level + base_indent
+
+        Args:
+            content: S-expression content with potentially mixed indentation
+            base_indent: Number of tabs to add as base indentation (default 2)
+
+        Returns:
+            Content with pure tab indentation
+        """
+        import re
+        lines = content.split("\n")
+        normalized = []
+
+        for line in lines:
+            if not line.strip():
+                # Empty line or whitespace-only - just add base indent
+                normalized.append("\t" * base_indent)
+                continue
+
+            # Count leading whitespace and convert to indent level
+            # Handle both tabs and spaces
+            match = re.match(r'^([\t ]*)', line)
+            if match:
+                leading = match.group(1)
+                # Convert to indent level: each tab = 1, each 2-4 spaces = 1
+                tab_count = leading.count('\t')
+                space_count = leading.count(' ')
+                # Assume 2-space or 4-space indentation
+                space_levels = space_count // 2 if space_count % 4 != 0 else space_count // 4
+                indent_level = tab_count + space_levels
+
+                # Apply base indent + detected level
+                total_tabs = base_indent + indent_level
+                normalized.append("\t" * total_tabs + line.lstrip())
+            else:
+                normalized.append("\t" * base_indent + line)
+
+        return "\n".join(normalized)
+
     def _validate_sexpression(self, content: str) -> tuple[bool, str]:
         """
         Validate S-expression parentheses balance.
@@ -1667,20 +1716,22 @@ Return ONLY the extracted (symbol ...) block:"""
         ]
 
         # Add lib_symbols section with tab indentation for KiCad 8.x compatibility
+        # CRITICAL: KiCad 8.x requires PURE TAB indentation - mixed tabs/spaces fail
         lines.append("\t(lib_symbols")
         for symbol_id, sexp in sheet.lib_symbols.items():
             # Extract just the symbol definition from the library wrapper (LLM-based)
             symbol_content = await self._extract_inner_symbol(sexp, symbol_id)
             if symbol_content:
-                # Indent the symbol content with tabs for KiCad 8.x
-                indented = "\n".join("\t\t" + line for line in symbol_content.split("\n"))
-                lines.append(indented)
+                # Normalize to pure tab indentation (base_indent=2 for inside lib_symbols)
+                normalized = self._normalize_to_tabs(symbol_content, base_indent=2)
+                lines.append(normalized)
             else:
                 # Generate a placeholder lib_symbol to prevent KiCanvas crashes
                 logger.warning(f"Missing lib_symbol for {symbol_id}, generating placeholder")
                 placeholder = self._generate_placeholder_lib_symbol(symbol_id)
-                indented = "\n".join("\t\t" + line for line in placeholder.split("\n"))
-                lines.append(indented)
+                # Normalize placeholder as well
+                normalized = self._normalize_to_tabs(placeholder, base_indent=2)
+                lines.append(normalized)
         lines.append("\t)")
 
         # Add symbol instances
