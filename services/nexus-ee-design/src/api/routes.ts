@@ -1627,7 +1627,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           subsystems,
           project_name: req.body.name || project.name,
           design_name: `schematic_${Date.now()}`,
-          skip_validation: true, // Skip validation for faster initial generation
+          skip_validation: false, // Enable visual validation with kicad-worker image extraction
           operation_id: operationId, // For WebSocket progress streaming
           project_id: projectId,
         };

@@ -10,7 +10,7 @@ Usage:
         "bom": [...],
         "design_intent": "...",
         "design_name": "...",
-        "skip_validation": true
+        "skip_validation": false
     }'
 
 Or via stdin:
@@ -158,7 +158,7 @@ async def run_generation(
     design_intent: Optional[str] = None,
     design_name: str = "schematic",
     project_name: str = "FOC ESC",
-    skip_validation: bool = True,  # Default skip for faster generation
+    skip_validation: bool = False,  # Enable visual validation by default
     output_dir: Optional[str] = None,
     project_id: Optional[str] = None,  # Project ID for NFS export organization
     auto_export: bool = True,  # Enable auto-export to PDF/image and NFS
@@ -332,7 +332,7 @@ def main():
             ],
             "project_name": "Test FOC ESC",
             "design_name": "test_schematic",
-            "skip_validation": True,
+            "skip_validation": False,
         })
 
     try:
@@ -349,7 +349,7 @@ def main():
         design_intent=params.get("design_intent"),
         design_name=params.get("design_name", "schematic"),
         project_name=params.get("project_name", "FOC ESC"),
-        skip_validation=params.get("skip_validation", True),
+        skip_validation=params.get("skip_validation", False),
         output_dir=params.get("output_dir"),
         project_id=params.get("project_id"),
         auto_export=params.get("auto_export", True),
@@ -564,7 +564,7 @@ def main_v2():
             design_intent=params.get("design_intent"),
             design_name=params.get("design_name", "schematic"),
             project_name=params.get("project_name", "FOC ESC"),
-            skip_validation=params.get("skip_validation", True),
+            skip_validation=params.get("skip_validation", False),
             output_dir=params.get("output_dir"),
             project_id=params.get("project_id"),
             auto_export=params.get("auto_export", True),
