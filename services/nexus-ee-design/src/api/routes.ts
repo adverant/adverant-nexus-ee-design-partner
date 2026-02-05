@@ -1179,8 +1179,110 @@ export function createApiRoutes(io: SocketIOServer): Router {
         await archive.finalize();
         log.info('ZIP export completed', { projectId, artifactCount: artifacts.length });
       } else if (format === 'pdf' || format === 'svg') {
-        // PDF/SVG export would require KiCad or headless rendering - not yet implemented
-        throw new ValidationError(`${format.toUpperCase()} export not yet implemented. Use ZIP for now.`);
+        // PDF/SVG export via mapos-kicad-worker service
+        const kicadWorkerUrl = process.env.KICAD_WORKER_URL || 'http://mapos-kicad-worker.nexus.svc.cluster.local:8080';
+
+        // For multiple artifacts, create a ZIP with all exports
+        if (artifacts.length > 1) {
+          const archiver = (await import('archiver')).default;
+          const archive = archiver('zip', { zlib: { level: 9 } });
+
+          res.setHeader('Content-Type', 'application/zip');
+          res.setHeader('Content-Disposition', `attachment; filename=export-${projectId}-${Date.now()}.zip`);
+
+          archive.pipe(res);
+
+          for (const artifact of artifacts) {
+            if (artifact.type !== 'schematic') {
+              log.warn(`${format.toUpperCase()} export not supported for type: ${artifact.type}`);
+              continue;
+            }
+
+            try {
+              // Call kicad-worker export API
+              const exportResponse = await fetch(`${kicadWorkerUrl}/v1/schematic/export`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  schematic_content: artifact.content,
+                  export_format: format,
+                  design_name: artifact.name.replace('.kicad_sch', ''),
+                }),
+              });
+
+              if (!exportResponse.ok) {
+                log.error(`KiCad worker export failed for ${artifact.name}`, { status: exportResponse.status });
+                continue;
+              }
+
+              const exportResult = await exportResponse.json() as { success: boolean; download_url?: string; error?: string };
+              if (!exportResult.success || !exportResult.download_url) {
+                log.error(`KiCad worker export failed for ${artifact.name}`, { error: exportResult.error });
+                continue;
+              }
+
+              // Download the exported file
+              const downloadResponse = await fetch(`${kicadWorkerUrl}${exportResult.download_url}`);
+              if (!downloadResponse.ok) {
+                log.error(`Failed to download exported file for ${artifact.name}`);
+                continue;
+              }
+
+              const fileBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+              const exportedName = artifact.name.replace('.kicad_sch', `.${format}`);
+              archive.append(fileBuffer, { name: exportedName });
+              log.info(`Added ${exportedName} to archive`);
+            } catch (err) {
+              log.error(`Error exporting ${artifact.name} to ${format}`, { error: err });
+            }
+          }
+
+          await archive.finalize();
+          log.info(`${format.toUpperCase()} export completed`, { projectId, artifactCount: artifacts.length });
+        } else {
+          // Single artifact - return file directly
+          const artifact = artifacts[0];
+          if (artifact.type !== 'schematic') {
+            throw new ValidationError(`${format.toUpperCase()} export only supported for schematics`);
+          }
+
+          // Call kicad-worker export API
+          const exportResponse = await fetch(`${kicadWorkerUrl}/v1/schematic/export`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              schematic_content: artifact.content,
+              export_format: format,
+              design_name: artifact.name.replace('.kicad_sch', ''),
+            }),
+          });
+
+          if (!exportResponse.ok) {
+            const errorText = await exportResponse.text();
+            throw new ValidationError(`KiCad worker export failed: ${errorText}`);
+          }
+
+          const exportResult = await exportResponse.json() as { success: boolean; download_url?: string; error?: string };
+          if (!exportResult.success || !exportResult.download_url) {
+            throw new ValidationError(`KiCad worker export failed: ${exportResult.error || 'Unknown error'}`);
+          }
+
+          // Download and stream the file
+          const downloadResponse = await fetch(`${kicadWorkerUrl}${exportResult.download_url}`);
+          if (!downloadResponse.ok) {
+            throw new ValidationError(`Failed to download exported file`);
+          }
+
+          const contentType = format === 'pdf' ? 'application/pdf' : 'image/svg+xml';
+          const fileName = artifact.name.replace('.kicad_sch', `.${format}`);
+
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+          const fileBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+          res.send(fileBuffer);
+          log.info(`${format.toUpperCase()} export completed`, { projectId, fileName });
+        }
       } else {
         throw new ValidationError(`Unknown export format: ${format}`);
       }
