@@ -136,6 +136,36 @@ export type {
 } from './firmware-repository.js';
 
 // ============================================================================
+// Ideation Artifact Repository
+// ============================================================================
+
+export {
+  create as createIdeationArtifact,
+  findById as findIdeationArtifactById,
+  findByProject as findIdeationArtifactsByProject,
+  findByCategory as findIdeationArtifactsByCategory,
+  findByType as findIdeationArtifactsByType,
+  findBySubsystem as findIdeationArtifactsBySubsystem,
+  update as updateIdeationArtifact,
+  updateContent as updateIdeationArtifactContent,
+  createNewVersion as createNewIdeationArtifactVersion,
+  deleteArtifact as deleteIdeationArtifact,
+  getCompleteness as getIdeationArtifactCompleteness,
+  search as searchIdeationArtifacts,
+  default as ideationArtifactRepository,
+} from './ideation-artifact-repository.js';
+
+export type {
+  IdeationArtifact,
+  ArtifactType,
+  ArtifactCategory,
+  ContentFormat,
+  CreateArtifactInput,
+  UpdateArtifactInput,
+  ArtifactFilters,
+} from './ideation-artifact-repository.js';
+
+// ============================================================================
 // Repository Collection
 // ============================================================================
 
@@ -226,6 +256,26 @@ export const repositories = {
       (await import('./firmware-repository.js')).updateBuildStatus(id, status as 'not_built' | 'building' | 'success' | 'failed' | 'warnings'),
     delete: async (id: string) =>
       (await import('./firmware-repository.js')).deleteFirmwareProject(id),
+  },
+  ideationArtifact: {
+    create: async (input: import('./ideation-artifact-repository.js').CreateArtifactInput) =>
+      (await import('./ideation-artifact-repository.js')).create(input),
+    findById: async (id: string) =>
+      (await import('./ideation-artifact-repository.js')).findById(id),
+    findByProject: async (projectId: string, filters?: import('./ideation-artifact-repository.js').ArtifactFilters) =>
+      (await import('./ideation-artifact-repository.js')).findByProject(projectId, filters),
+    findByCategory: async (projectId: string, category: import('./ideation-artifact-repository.js').ArtifactCategory) =>
+      (await import('./ideation-artifact-repository.js')).findByCategory(projectId, category),
+    update: async (id: string, data: import('./ideation-artifact-repository.js').UpdateArtifactInput) =>
+      (await import('./ideation-artifact-repository.js')).update(id, data),
+    updateContent: async (id: string, content: string, contentFormat?: import('./ideation-artifact-repository.js').ContentFormat) =>
+      (await import('./ideation-artifact-repository.js')).updateContent(id, content, contentFormat),
+    delete: async (id: string) =>
+      (await import('./ideation-artifact-repository.js')).deleteArtifact(id),
+    getCompleteness: async (projectId: string) =>
+      (await import('./ideation-artifact-repository.js')).getCompleteness(projectId),
+    search: async (projectId: string, searchTerm: string) =>
+      (await import('./ideation-artifact-repository.js')).search(projectId, searchTerm),
   },
 };
 

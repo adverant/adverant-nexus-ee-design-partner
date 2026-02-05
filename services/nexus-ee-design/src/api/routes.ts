@@ -84,6 +84,22 @@ import {
   type CreateFirmwareInput,
 } from '../database/repositories/firmware-repository.js';
 
+import {
+  create as createIdeationArtifact,
+  findById as findIdeationArtifactById,
+  findByProject as findIdeationArtifactsByProject,
+  update as updateIdeationArtifact,
+  updateContent as updateIdeationArtifactContent,
+  deleteArtifact as deleteIdeationArtifact,
+  getCompleteness as getIdeationArtifactCompleteness,
+  search as searchIdeationArtifacts,
+  type CreateArtifactInput,
+  type UpdateArtifactInput,
+  type ArtifactFilters,
+  type ArtifactType,
+  type ArtifactCategory,
+} from '../database/repositories/ideation-artifact-repository.js';
+
 // File browser imports
 import {
   getFileTreeHandler,
@@ -1622,6 +1638,21 @@ export function createApiRoutes(io: SocketIOServer): Router {
         operationId = schematicWsManager.createOperation(projectId);
         log.info('Created schematic operation for streaming', { operationId, projectId });
 
+        // Fetch ideation artifacts to provide context for schematic generation
+        const ideationArtifacts = await findIdeationArtifactsByProject(projectId);
+        const artifactsForContext = ideationArtifacts.map((artifact) => ({
+          type: artifact.artifact_type,
+          category: artifact.category,
+          name: artifact.name,
+          content: artifact.content,
+          subsystem_ids: artifact.subsystem_ids,
+        }));
+        log.info('Fetched ideation artifacts for schematic context', {
+          projectId,
+          artifactCount: artifactsForContext.length,
+          artifactTypes: artifactsForContext.map((a) => a.type),
+        });
+
         // Prepare input for MAPO pipeline with operation ID for progress streaming
         const mapoInput = {
           subsystems,
@@ -1630,6 +1661,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
           skip_validation: false, // Enable visual validation with kicad-worker image extraction
           operation_id: operationId, // For WebSocket progress streaming
           project_id: projectId,
+          ideation_artifacts: artifactsForContext, // Include ideation context for better schematic generation
         };
 
         // IMMEDIATELY return operationId to frontend so it can subscribe to WebSocket
@@ -3556,6 +3588,323 @@ export function createApiRoutes(io: SocketIOServer): Router {
       res.json({
         success: true,
         data: LAYOUT_AGENTS,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // ============================================================================
+  // Ideation Artifact Routes
+  // ============================================================================
+  // Pre-schematic design documentation, specifications, and decisions.
+
+  /**
+   * List all ideation artifacts for a project
+   * GET /projects/:projectId/ideation-artifacts
+   * Query params: category, artifactType, isGenerated, subsystemId
+   */
+  router.get('/projects/:projectId/ideation-artifacts', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      const { category, artifactType, isGenerated, subsystemId } = req.query;
+
+      log.debug('Getting ideation artifacts', { projectId, category, artifactType });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getIdeationArtifacts' });
+      }
+
+      const filters: ArtifactFilters = {};
+      if (category) filters.category = category as ArtifactCategory;
+      if (artifactType) filters.artifactType = artifactType as ArtifactType;
+      if (isGenerated !== undefined) filters.isGenerated = isGenerated === 'true';
+      if (subsystemId) filters.subsystemId = subsystemId as string;
+
+      const artifacts = await findIdeationArtifactsByProject(projectId, filters);
+
+      res.json({
+        success: true,
+        data: artifacts,
+        metadata: { count: artifacts.length, projectId },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Get artifact completeness summary for a project
+   * GET /projects/:projectId/ideation-artifacts/completeness
+   */
+  router.get('/projects/:projectId/ideation-artifacts/completeness', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      log.debug('Getting artifact completeness', { projectId });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'getArtifactCompleteness' });
+      }
+
+      const completeness = await getIdeationArtifactCompleteness(projectId);
+
+      res.json({
+        success: true,
+        data: completeness,
+        metadata: { projectId },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Search artifacts by content or name
+   * GET /projects/:projectId/ideation-artifacts/search?q=term
+   */
+  router.get('/projects/:projectId/ideation-artifacts/search', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      const searchTerm = req.query.q as string;
+
+      log.debug('Searching artifacts', { projectId, searchTerm });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'searchArtifacts' });
+      }
+
+      const artifacts = await searchIdeationArtifacts(projectId, searchTerm || '');
+
+      res.json({
+        success: true,
+        data: artifacts,
+        metadata: { count: artifacts.length, projectId, searchTerm },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Get a single ideation artifact by ID
+   * GET /projects/:projectId/ideation-artifacts/:artifactId
+   */
+  router.get('/projects/:projectId/ideation-artifacts/:artifactId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, artifactId } = req.params;
+      log.debug('Getting ideation artifact', { projectId, artifactId });
+
+      const artifact = await findIdeationArtifactById(artifactId);
+
+      if (!artifact) {
+        throw new NotFoundError('IdeationArtifact', artifactId, { operation: 'getArtifact' });
+      }
+
+      if (artifact.projectId !== projectId) {
+        throw new ValidationError('Artifact does not belong to this project', {
+          operation: 'getArtifact',
+          artifactId,
+          projectId,
+        });
+      }
+
+      res.json({
+        success: true,
+        data: artifact,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Create a new ideation artifact
+   * POST /projects/:projectId/ideation-artifacts
+   */
+  router.post('/projects/:projectId/ideation-artifacts', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const projectId = req.params.projectId;
+      const {
+        artifactType,
+        category,
+        name,
+        description,
+        content,
+        contentFormat,
+        generationPrompt,
+        generationModel,
+        isGenerated,
+        subsystemIds,
+        componentRefs,
+        metadata,
+        tags,
+      } = req.body;
+
+      log.debug('Creating ideation artifact', { projectId, artifactType, category, name });
+
+      // Verify project exists
+      const project = await findProjectById(projectId);
+      if (!project) {
+        throw new NotFoundError('Project', projectId, { operation: 'createArtifact' });
+      }
+
+      // Validate required fields
+      if (!artifactType) {
+        throw new ValidationError('artifactType is required', { operation: 'createArtifact' });
+      }
+      if (!category) {
+        throw new ValidationError('category is required', { operation: 'createArtifact' });
+      }
+      if (!name) {
+        throw new ValidationError('name is required', { operation: 'createArtifact' });
+      }
+
+      const input: CreateArtifactInput = {
+        projectId,
+        artifactType,
+        category,
+        name,
+        description,
+        content,
+        contentFormat,
+        generationPrompt,
+        generationModel,
+        isGenerated: isGenerated || false,
+        subsystemIds: subsystemIds || [],
+        componentRefs: componentRefs || [],
+        metadata: metadata || {},
+        tags: tags || [],
+      };
+
+      const artifact = await createIdeationArtifact(input);
+
+      log.info('Ideation artifact created', { artifactId: artifact.id, name: artifact.name });
+
+      res.status(201).json({
+        success: true,
+        data: artifact,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Update an ideation artifact
+   * PATCH /projects/:projectId/ideation-artifacts/:artifactId
+   */
+  router.patch('/projects/:projectId/ideation-artifacts/:artifactId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, artifactId } = req.params;
+      const updateData: UpdateArtifactInput = req.body;
+
+      log.debug('Updating ideation artifact', { projectId, artifactId, fields: Object.keys(updateData) });
+
+      // Verify artifact exists and belongs to project
+      const existing = await findIdeationArtifactById(artifactId);
+      if (!existing) {
+        throw new NotFoundError('IdeationArtifact', artifactId, { operation: 'updateArtifact' });
+      }
+
+      if (existing.projectId !== projectId) {
+        throw new ValidationError('Artifact does not belong to this project', {
+          operation: 'updateArtifact',
+          artifactId,
+          projectId,
+        });
+      }
+
+      const artifact = await updateIdeationArtifact(artifactId, updateData);
+
+      log.info('Ideation artifact updated', { artifactId: artifact.id });
+
+      res.json({
+        success: true,
+        data: artifact,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Update artifact content only (convenience endpoint)
+   * PUT /projects/:projectId/ideation-artifacts/:artifactId/content
+   */
+  router.put('/projects/:projectId/ideation-artifacts/:artifactId/content', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, artifactId } = req.params;
+      const { content, contentFormat } = req.body;
+
+      log.debug('Updating artifact content', { projectId, artifactId, contentLength: content?.length });
+
+      // Verify artifact exists and belongs to project
+      const existing = await findIdeationArtifactById(artifactId);
+      if (!existing) {
+        throw new NotFoundError('IdeationArtifact', artifactId, { operation: 'updateArtifactContent' });
+      }
+
+      if (existing.projectId !== projectId) {
+        throw new ValidationError('Artifact does not belong to this project', {
+          operation: 'updateArtifactContent',
+          artifactId,
+          projectId,
+        });
+      }
+
+      if (!content) {
+        throw new ValidationError('content is required', { operation: 'updateArtifactContent' });
+      }
+
+      const artifact = await updateIdeationArtifactContent(artifactId, content, contentFormat);
+
+      log.info('Artifact content updated', { artifactId: artifact.id });
+
+      res.json({
+        success: true,
+        data: artifact,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Delete an ideation artifact
+   * DELETE /projects/:projectId/ideation-artifacts/:artifactId
+   */
+  router.delete('/projects/:projectId/ideation-artifacts/:artifactId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, artifactId } = req.params;
+      log.debug('Deleting ideation artifact', { projectId, artifactId });
+
+      // Verify artifact exists and belongs to project
+      const existing = await findIdeationArtifactById(artifactId);
+      if (!existing) {
+        throw new NotFoundError('IdeationArtifact', artifactId, { operation: 'deleteArtifact' });
+      }
+
+      if (existing.projectId !== projectId) {
+        throw new ValidationError('Artifact does not belong to this project', {
+          operation: 'deleteArtifact',
+          artifactId,
+          projectId,
+        });
+      }
+
+      await deleteIdeationArtifact(artifactId);
+
+      log.info('Ideation artifact deleted', { artifactId });
+
+      res.json({
+        success: true,
+        data: { deleted: true, artifactId },
       });
     } catch (error) {
       next(error);

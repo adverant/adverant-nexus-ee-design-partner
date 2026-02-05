@@ -115,41 +115,133 @@ def create_foc_esc_bom(subsystems: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return bom
 
 
-def create_design_intent(subsystems: List[Dict[str, Any]], project_name: str) -> str:
-    """Create a detailed design intent from subsystem selection."""
+def create_design_intent(
+    subsystems: List[Dict[str, Any]],
+    project_name: str,
+    ideation_artifacts: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """
+    Create a detailed design intent from subsystem selection and ideation artifacts.
+
+    If ideation artifacts are provided, they are used to enhance the design intent
+    with detailed specifications, component rationale, and design calculations.
+    """
     subsystem_names = [s.get("name", "Unknown") for s in subsystems]
 
-    intent = f"""
-{project_name} - FOC ESC Schematic
+    # Start with base intent
+    intent_parts = [
+        f"{project_name} - Schematic Design",
+        "",
+        "Selected Subsystems:",
+        *[f"- {name}" for name in subsystem_names],
+        "",
+    ]
 
-This is a Field Oriented Control (FOC) Electronic Speed Controller for brushless motors.
+    # If we have ideation artifacts, use them to build comprehensive context
+    if ideation_artifacts:
+        # Group artifacts by category
+        artifacts_by_category: Dict[str, List[Dict[str, Any]]] = {}
+        for artifact in ideation_artifacts:
+            category = artifact.get("category", "other")
+            if category not in artifacts_by_category:
+                artifacts_by_category[category] = []
+            artifacts_by_category[category].append(artifact)
 
-Selected Subsystems:
-{chr(10).join(f"- {name}" for name in subsystem_names)}
+        # Add system overview first (if available)
+        if "architecture" in artifacts_by_category:
+            intent_parts.append("=== SYSTEM ARCHITECTURE ===")
+            for artifact in artifacts_by_category["architecture"]:
+                artifact_type = artifact.get("artifact_type", "")
+                content = artifact.get("content", "")
+                if artifact_type == "system_overview" and content:
+                    intent_parts.append(f"\n{artifact.get('name', 'System Overview')}:")
+                    # Include first 2000 chars of system overview
+                    intent_parts.append(content[:2000])
+                    if len(content) > 2000:
+                        intent_parts.append("... [truncated]")
+                elif artifact_type == "architecture_diagram" and content:
+                    intent_parts.append(f"\nArchitecture Diagram ({artifact.get('name', '')}):")
+                    intent_parts.append(content[:1000])
+            intent_parts.append("")
 
-Design Requirements:
-1. Power Input: 48-60V battery input with reverse polarity protection
-2. Gate Drivers: Isolated half-bridge drivers with bootstrap supply
-3. Power Stage: SiC MOSFETs for high-efficiency switching
-4. MCU Core: STM32G4 microcontroller with FOC algorithm
-5. Current Sensing: Low-side shunt measurement with differential amplifiers
-6. Communication: CAN bus interface for control commands
+        # Add schematic specifications
+        if "schematic" in artifacts_by_category:
+            intent_parts.append("=== SCHEMATIC SPECIFICATIONS ===")
+            for artifact in artifacts_by_category["schematic"]:
+                artifact_type = artifact.get("artifact_type", "")
+                content = artifact.get("content", "")
+                name = artifact.get("name", artifact_type)
+                if content:
+                    intent_parts.append(f"\n{name}:")
+                    # Include schematic specs (important for connections)
+                    intent_parts.append(content[:3000])
+                    if len(content) > 3000:
+                        intent_parts.append("... [truncated]")
+            intent_parts.append("")
 
-Key Connections:
-- VCC power rail to all IC power pins
-- GND reference to all ground pins
-- Phase outputs from power stage to motor connector
-- Current sense outputs to MCU ADC inputs
-- PWM signals from MCU to gate drivers
-- CAN bus to external connector
+        # Add component selection / BOM context
+        if "component" in artifacts_by_category:
+            intent_parts.append("=== COMPONENT SELECTION ===")
+            for artifact in artifacts_by_category["component"]:
+                artifact_type = artifact.get("artifact_type", "")
+                content = artifact.get("content", "")
+                name = artifact.get("name", artifact_type)
+                if content:
+                    intent_parts.append(f"\n{name}:")
+                    intent_parts.append(content[:2000])
+                    if len(content) > 2000:
+                        intent_parts.append("... [truncated]")
+            intent_parts.append("")
 
-Layout Considerations:
-- Keep power stage and gate drivers close together
-- Minimize current sense loop area
-- Proper decoupling for MCU
-- EMI filtering on input power
-"""
-    return intent.strip()
+        # Add any calculations
+        has_calculations = any(
+            a.get("artifact_type") == "calculations"
+            for artifacts in artifacts_by_category.values()
+            for a in artifacts
+        )
+        if has_calculations:
+            intent_parts.append("=== DESIGN CALCULATIONS ===")
+            for category_artifacts in artifacts_by_category.values():
+                for artifact in category_artifacts:
+                    if artifact.get("artifact_type") == "calculations":
+                        content = artifact.get("content", "")
+                        if content:
+                            intent_parts.append(f"\n{artifact.get('name', 'Calculations')}:")
+                            intent_parts.append(content[:1500])
+                            if len(content) > 1500:
+                                intent_parts.append("... [truncated]")
+            intent_parts.append("")
+
+        logger.info(f"Enhanced design intent with {len(ideation_artifacts)} ideation artifacts")
+    else:
+        # Default FOC ESC design intent if no artifacts provided
+        intent_parts.extend([
+            "This is a Field Oriented Control (FOC) Electronic Speed Controller for brushless motors.",
+            "",
+            "Design Requirements:",
+            "1. Power Input: 48-60V battery input with reverse polarity protection",
+            "2. Gate Drivers: Isolated half-bridge drivers with bootstrap supply",
+            "3. Power Stage: SiC MOSFETs for high-efficiency switching",
+            "4. MCU Core: STM32G4 microcontroller with FOC algorithm",
+            "5. Current Sensing: Low-side shunt measurement with differential amplifiers",
+            "6. Communication: CAN bus interface for control commands",
+            "",
+            "Key Connections:",
+            "- VCC power rail to all IC power pins",
+            "- GND reference to all ground pins",
+            "- Phase outputs from power stage to motor connector",
+            "- Current sense outputs to MCU ADC inputs",
+            "- PWM signals from MCU to gate drivers",
+            "- CAN bus to external connector",
+            "",
+            "Layout Considerations:",
+            "- Keep power stage and gate drivers close together",
+            "- Minimize current sense loop area",
+            "- Proper decoupling for MCU",
+            "- EMI filtering on input power",
+        ])
+
+    return "\n".join(intent_parts)
 
 
 async def run_generation(
@@ -163,6 +255,7 @@ async def run_generation(
     project_id: Optional[str] = None,  # Project ID for NFS export organization
     auto_export: bool = True,  # Enable auto-export to PDF/image and NFS
     operation_id: Optional[str] = None,  # Operation ID for WebSocket streaming
+    ideation_artifacts: Optional[List[Dict[str, Any]]] = None,  # Ideation artifacts for context
 ) -> Dict[str, Any]:
     """
     Run the MAPO schematic generation pipeline.
@@ -175,6 +268,10 @@ async def run_generation(
         project_name: Project name for title block
         skip_validation: Skip MAPO validation loop
         output_dir: Custom output directory
+        project_id: Project ID for NFS export organization
+        auto_export: Enable auto-export to PDF/image and NFS
+        operation_id: Operation ID for WebSocket streaming
+        ideation_artifacts: List of ideation artifacts to provide context for schematic generation
 
     Returns:
         Dictionary with generation results
@@ -186,6 +283,12 @@ async def run_generation(
             progress_emitter = init_progress(operation_id)
             logger.info(f"Progress streaming enabled for operation: {operation_id}")
 
+        # Log ideation artifacts if provided
+        if ideation_artifacts:
+            logger.info(f"Using {len(ideation_artifacts)} ideation artifacts for context")
+            for artifact in ideation_artifacts:
+                logger.info(f"  - {artifact.get('name', 'unknown')} ({artifact.get('artifact_type', 'unknown')})")
+
         # Generate BOM from subsystems if not provided
         if bom is None and subsystems:
             bom = create_foc_esc_bom(subsystems)
@@ -194,9 +297,9 @@ async def run_generation(
             bom = []
             logger.warning("No BOM or subsystems provided, generating minimal schematic")
 
-        # Generate design intent if not provided
+        # Generate design intent if not provided, using ideation artifacts for context
         if design_intent is None:
-            design_intent = create_design_intent(subsystems or [], project_name)
+            design_intent = create_design_intent(subsystems or [], project_name, ideation_artifacts)
 
         # Configure output directory
         if output_dir:
@@ -354,6 +457,7 @@ def main():
         project_id=params.get("project_id"),
         auto_export=params.get("auto_export", True),
         operation_id=params.get("operation_id"),  # For WebSocket streaming
+        ideation_artifacts=params.get("ideation_artifacts"),  # Ideation artifacts for context
     ))
 
     # Output JSON result to stdout

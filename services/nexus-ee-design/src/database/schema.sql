@@ -63,6 +63,78 @@ CREATE INDEX IF NOT EXISTS idx_projects_created_at ON projects(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_projects_metadata ON projects USING GIN(metadata);
 
 -- ============================================================================
+-- IDEATION_ARTIFACTS TABLE
+-- ============================================================================
+-- Stores design documentation, specifications, and decisions made during the
+-- ideation phase BEFORE schematic generation. These artifacts provide context
+-- for the LLM to make better component selection and connection decisions.
+
+CREATE TABLE IF NOT EXISTS ideation_artifacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+
+    -- Artifact metadata
+    artifact_type VARCHAR(50) NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+
+    -- Content storage
+    content TEXT,                        -- Raw text content (markdown, txt, etc.)
+    content_format VARCHAR(20),          -- 'markdown', 'text', 'csv', 'json', 'mermaid'
+    file_path VARCHAR(500),              -- NFS path for binary files (PDF, images)
+
+    -- Generation metadata
+    generation_prompt TEXT,              -- Prompt used to generate this artifact (if AI-generated)
+    generation_model VARCHAR(100),       -- 'claude-opus-4.5', 'gpt-4', etc.
+    is_generated BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Versioning
+    version INTEGER NOT NULL DEFAULT 1,
+    parent_artifact_id UUID REFERENCES ideation_artifacts(id) ON DELETE SET NULL,
+
+    -- Relations
+    subsystem_ids TEXT[] DEFAULT '{}',   -- Array of subsystem IDs this artifact relates to
+    component_refs TEXT[] DEFAULT '{}',  -- Component references mentioned (U1, R1, etc.)
+
+    -- Metadata
+    metadata JSONB NOT NULL DEFAULT '{}',
+    tags TEXT[] DEFAULT '{}',
+
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Constraints
+    CONSTRAINT ideation_artifacts_type_check CHECK (artifact_type IN (
+        'system_overview', 'executive_summary', 'architecture_diagram',
+        'schematic_spec', 'power_spec', 'mcu_spec', 'sensing_spec',
+        'communication_spec', 'connector_spec', 'interface_spec',
+        'bom', 'component_selection', 'calculations',
+        'pcb_spec', 'stackup', 'manufacturing_guide',
+        'firmware_spec', 'ai_integration', 'test_plan',
+        'research_paper', 'patent', 'compliance_doc',
+        'custom'
+    )),
+    CONSTRAINT ideation_artifacts_category_check CHECK (category IN (
+        'architecture', 'schematic', 'component', 'pcb', 'firmware', 'validation', 'research'
+    )),
+    CONSTRAINT ideation_artifacts_format_check CHECK (content_format IS NULL OR content_format IN (
+        'markdown', 'text', 'csv', 'json', 'mermaid', 'pdf', 'image'
+    )),
+    CONSTRAINT ideation_artifacts_version_positive CHECK (version > 0)
+);
+
+-- Indexes for ideation_artifacts
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_project_id ON ideation_artifacts(project_id);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_type ON ideation_artifacts(artifact_type);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_category ON ideation_artifacts(category);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_created_at ON ideation_artifacts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_subsystems ON ideation_artifacts USING GIN(subsystem_ids);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_tags ON ideation_artifacts USING GIN(tags);
+CREATE INDEX IF NOT EXISTS idx_ideation_artifacts_metadata ON ideation_artifacts USING GIN(metadata);
+
+-- ============================================================================
 -- SCHEMATICS TABLE
 -- ============================================================================
 -- Stores schematic designs including KiCad source, netlists, and BOMs.
@@ -635,11 +707,17 @@ CREATE TRIGGER update_manufacturing_orders_updated_at
     BEFORE UPDATE ON manufacturing_orders
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_ideation_artifacts_updated_at ON ideation_artifacts;
+CREATE TRIGGER update_ideation_artifacts_updated_at
+    BEFORE UPDATE ON ideation_artifacts
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 -- ============================================================================
 -- COMMENTS FOR DOCUMENTATION
 -- ============================================================================
 
 COMMENT ON TABLE projects IS 'Core EE Design projects supporting all 10 development phases';
+COMMENT ON TABLE ideation_artifacts IS 'Design documentation and decisions made during ideation phase, provides context for schematic generation';
 COMMENT ON TABLE schematics IS 'Schematic designs with KiCad source, netlists, and BOMs';
 COMMENT ON TABLE pcb_layouts IS 'PCB layouts with KiCad PCB files and DRC/MAPOS results';
 COMMENT ON TABLE simulations IS 'Simulation jobs for SPICE, thermal, SI, RF, and EMC analysis';
