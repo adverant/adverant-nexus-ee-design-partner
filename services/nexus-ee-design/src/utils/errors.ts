@@ -23,7 +23,7 @@ export class EEDesignError extends Error {
     message: string,
     code: string,
     statusCode: number,
-    context: Partial<ErrorContext>,
+    context?: Partial<ErrorContext>,
     isOperational = true
   ) {
     super(message);
@@ -31,9 +31,9 @@ export class EEDesignError extends Error {
     this.code = code;
     this.statusCode = statusCode;
     this.context = {
-      operation: context.operation || 'unknown',
+      operation: context?.operation || 'unknown',
       timestamp: new Date(),
-      ...context,
+      ...(context || {}),
     };
     this.isOperational = isOperational;
     Error.captureStackTrace(this, this.constructor);
@@ -52,7 +52,7 @@ export class EEDesignError extends Error {
 
 // Validation Errors (400)
 export class ValidationError extends EEDesignError {
-  constructor(message: string, context: Partial<ErrorContext>) {
+  constructor(message: string, context?: Partial<ErrorContext>) {
     super(message, 'VALIDATION_ERROR', 400, context);
   }
 }
