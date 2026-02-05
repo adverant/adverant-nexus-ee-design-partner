@@ -51,7 +51,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+# New imports for enhanced visual feedback loop
+from .image_extractor import SchematicImageExtractor, ImageExtractionError
+from .progress_tracker import ProgressTracker, ProgressAnalysis, StagnationError
+from .issue_to_fix import IssueToFixTransformer, SchematicFix, TransformResult
+from .fix_applicator import SchematicFixApplicator, ApplyResult
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +310,78 @@ RESPOND IN THIS JSON FORMAT:
 }"""
 
     # Kimi K2.5 prompt (similar but independent)
+    # Enhanced prompt with progress context for iterative validation
+    OPUS_PROGRESS_PROMPT = """You are analyzing a rendered schematic image for MAPO iterative validation.
+
+ITERATION CONTEXT:
+- Current iteration: {iteration}
+- Previous score: {previous_score}
+- Target score: {target_score}
+- Previous issues remaining: {remaining_issues}
+
+CRITICAL: Your analysis determines whether the schematic is PROGRESSING.
+
+VISUAL ANALYSIS CHECKLIST:
+
+1. COMPONENT PLACEMENT (25%)
+   - Signal flow: inputs left → processing center → outputs right
+   - Power rails: VCC at top, GND at bottom
+   - Bypass capacitors: within 5mm of IC power pins
+   - Component spacing: minimum 2.54mm (100 mil) grid alignment
+
+2. WIRE ROUTING (25%)
+   - Orthogonal routing: 90° angles only, no diagonals
+   - No 4-way junctions: T-junctions only
+   - Wire crossings: minimized, visually distinct
+   - Power/ground routing: horizontal rails preferred
+
+3. LABELING & READABILITY (20%)
+   - All components labeled with reference designators
+   - Net labels on important signals
+   - No overlapping text
+   - Values visible (resistance, capacitance)
+
+4. POWER DISTRIBUTION (15%)
+   - VCC/GND connections to all ICs
+   - Bypass capacitors present
+   - Power flags on power nets
+
+5. STANDARDS COMPLIANCE (15%)
+   - IEEE 315 symbol conventions
+   - IEC 60750 documentation standards
+
+RESPOND IN THIS JSON FORMAT:
+{{
+    "score": 0.85,
+    "progress_assessment": {{
+        "is_progressing": true,
+        "improvement_from_previous": 0.05,
+        "areas_improved": ["wire_routing", "labels"],
+        "areas_regressed": [],
+        "stagnation_risk": "low"
+    }},
+    "issues": [
+        {{
+            "category": "wire_routing",
+            "severity": "warning",
+            "description": "4-way junction detected near U1",
+            "location": "coordinates (50, 100)",
+            "recommendation": "Convert to T-junction with 1.27mm offset",
+            "auto_fixable": true,
+            "fix_operation": "ADD_JUNCTION",
+            "fix_parameters": {{
+                "x": 50.0,
+                "y": 100.0
+            }}
+        }}
+    ],
+    "strengths": ["Good signal flow direction", "Power rails properly routed"],
+    "reasoning": "Extended reasoning for the assessment"
+}}
+
+IMPORTANT: Include fix_operation and fix_parameters for auto-fixable issues.
+Available fix_operations: MOVE_COMPONENT, ROTATE_COMPONENT, ADD_WIRE, ADD_JUNCTION, ADD_LABEL, ADD_NET_LABEL, ADD_POWER_FLAG, ADD_NO_CONNECT, ADD_COMPONENT"""
+
     KIMI_PROMPT = """Analyze this electronic schematic image and evaluate its professional quality.
 
 Examine these aspects:
@@ -521,12 +599,78 @@ RESPOND IN THIS JSON FORMAT:
                 )
 
             else:
-                logger.warning("No Opus client available, using fallback")
-                return self._create_fallback_analysis("Claude Opus 4.5")
+                raise RuntimeError(
+                    "No Opus client available. "
+                    "Set OPENROUTER_API_KEY or configure Anthropic client."
+                )
 
         except Exception as e:
             logger.error(f"Opus analysis error: {e}")
-            return self._create_fallback_analysis("Claude Opus 4.5")
+            raise  # NO FALLBACK - raise the error
+
+    async def _analyze_with_opus_enhanced(
+        self,
+        image_data: bytes,
+        prompt: str,
+        start_time: float
+    ) -> VisualAnalysis:
+        """
+        Analyze schematic image with Claude Opus 4.5 using enhanced prompt.
+
+        This version accepts a pre-formatted prompt with progress context.
+        NO FALLBACK - raises errors on failure.
+        """
+        import time
+
+        try:
+            if self.opus_client:
+                response = self.opus_client.messages.create(
+                    model="claude-opus-4-5-20251101",
+                    max_tokens=4096,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": base64.b64encode(image_data).decode('utf-8')
+                                    }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                }
+                            ]
+                        }
+                    ]
+                )
+
+                return self._parse_llm_response(
+                    response.content[0].text,
+                    "Claude Opus 4.5",
+                    (time.time() - start_time) * 1000
+                )
+
+            elif self.openrouter_api_key:
+                return await self._call_openrouter(
+                    "anthropic/claude-opus-4",
+                    image_data,
+                    prompt,
+                    start_time
+                )
+
+            else:
+                raise RuntimeError(
+                    "No Opus client available. "
+                    "Set OPENROUTER_API_KEY or configure Anthropic client."
+                )
+
+        except Exception as e:
+            logger.error(f"Opus enhanced analysis error: {e}")
+            raise  # NO FALLBACK - raise the error
 
     async def _analyze_with_kimi(
         self,
@@ -583,12 +727,14 @@ RESPOND IN THIS JSON FORMAT:
                 )
 
             else:
-                logger.warning("No Kimi client available, using fallback")
-                return self._create_fallback_analysis("Kimi K2.5")
+                raise RuntimeError(
+                    "No Kimi/alternative vision client available. "
+                    "Set OPENROUTER_API_KEY for alternative vision model access."
+                )
 
         except Exception as e:
             logger.error(f"Kimi analysis error: {e}")
-            return self._create_fallback_analysis("Kimi K2.5")
+            raise  # NO FALLBACK - raise the error
 
     async def _call_openrouter(
         self,
@@ -818,72 +964,159 @@ RESPOND IN THIS JSON FORMAT:
 
 class ValidationLoop:
     """
-    MAPO Gaming validation loop for iterative improvement.
+    Enhanced MAPO Gaming validation loop with visual feedback.
 
-    Runs visual validation in a loop, generating fixes and re-validating
-    until the compliance target is met or max iterations reached.
+    Uses kicad-worker for image extraction, Opus 4.5 for visual analysis,
+    progress tracking for stagnation detection, and automatic fix application.
+
+    NO FALLBACKS - Strict error handling with verbose reporting.
     """
 
     def __init__(
         self,
         validator: DualLLMVisualValidator,
-        fix_generator: Optional[Callable] = None,
-        target_score: float = 0.95,
-        max_iterations: int = 10
+        image_extractor: Optional[SchematicImageExtractor] = None,
+        progress_tracker: Optional[ProgressTracker] = None,
+        issue_transformer: Optional[IssueToFixTransformer] = None,
+        fix_applicator: Optional[SchematicFixApplicator] = None,
+        fix_generator: Optional[Callable] = None,  # Legacy support
+        target_score: float = 0.85,
+        max_iterations: int = 10,
+        max_stagnant_iterations: int = 3,
+        max_fixes_per_iteration: int = 5
     ):
         """
-        Initialize the validation loop.
+        Initialize the enhanced validation loop.
 
         Args:
             validator: DualLLMVisualValidator instance
-            fix_generator: Callable that generates fixes from issues
-            target_score: Target compliance score (default 95%)
+            image_extractor: SchematicImageExtractor for kicad-worker integration
+            progress_tracker: ProgressTracker for stagnation detection
+            issue_transformer: IssueToFixTransformer for generating fixes
+            fix_applicator: SchematicFixApplicator for applying fixes
+            fix_generator: Legacy fix generator callable (deprecated)
+            target_score: Target compliance score (default 85%)
             max_iterations: Maximum loop iterations
+            max_stagnant_iterations: Terminate after this many stagnant iterations
+            max_fixes_per_iteration: Maximum fixes to apply per iteration
         """
         self.validator = validator
-        self.fix_generator = fix_generator
+        self.image_extractor = image_extractor or SchematicImageExtractor()
+        self.progress_tracker = progress_tracker or ProgressTracker(
+            max_stagnant_iterations=max_stagnant_iterations
+        )
+        self.issue_transformer = issue_transformer or IssueToFixTransformer(
+            max_fixes=max_fixes_per_iteration
+        )
+        self.fix_applicator = fix_applicator or SchematicFixApplicator()
+        self.fix_generator = fix_generator  # Legacy
         self.target_score = target_score
         self.max_iterations = max_iterations
+        self.max_stagnant_iterations = max_stagnant_iterations
+        self.max_fixes_per_iteration = max_fixes_per_iteration
+
+        logger.info(
+            f"ValidationLoop initialized: target={target_score:.0%}, "
+            f"max_iter={max_iterations}, max_stagnant={max_stagnant_iterations}"
+        )
 
     async def run(
         self,
         schematic_path: str,
+        schematic_content: Optional[str] = None,
         specification: str = "",
         on_iteration: Optional[Callable] = None
     ) -> ValidationLoopResult:
         """
-        Run the validation loop until compliance or max iterations.
+        Run the enhanced validation loop with visual feedback.
+
+        NO FALLBACKS - Raises errors on failure.
 
         Args:
             schematic_path: Path to .kicad_sch file
+            schematic_content: Optional raw schematic content (for content-based fixes)
             specification: Design specification
             on_iteration: Callback after each iteration
 
         Returns:
             ValidationLoopResult with final status and history
-        """
-        logger.info(f"Starting MAPO validation loop (target: {self.target_score:.0%})")
 
-        history = []
-        fixes_applied = []
+        Raises:
+            ImageExtractionError: If kicad-worker fails to extract image
+            StagnationError: If validation stagnates
+        """
+        logger.info(
+            f"Starting enhanced MAPO validation loop "
+            f"(target: {self.target_score:.0%}, max_iter: {self.max_iterations})"
+        )
+
+        # Reset progress tracker for new run
+        self.progress_tracker.reset()
+
+        # Load schematic content if not provided
+        if schematic_content is None:
+            schematic_content = Path(schematic_path).read_text(encoding='utf-8')
+
+        history: List[ComparisonResult] = []
+        fixes_applied: List[str] = []
         initial_score = 0.0
-        current_path = schematic_path
+        current_content = schematic_content
+        previous_score = 0.0
+        previous_image_hash = ""
 
         for iteration in range(self.max_iterations):
+            logger.info(f"=" * 60)
             logger.info(f"Validation iteration {iteration + 1}/{self.max_iterations}")
+            logger.info(f"=" * 60)
 
-            # Run validation
-            result = await self.validator.validate(current_path, specification)
+            # Step 1: Extract image via kicad-worker (NO FALLBACK)
+            logger.info("Step 1: Extracting image via kicad-worker...")
+            image_result = await self.image_extractor.extract_png(
+                schematic_content=current_content,
+                design_name="validation",
+                iteration=iteration
+            )
+
+            if not image_result.success:
+                raise ImageExtractionError(
+                    message="Image extraction failed during validation loop",
+                    kicad_worker_url=self.image_extractor.kicad_worker_url,
+                    schematic_size_bytes=len(current_content),
+                    errors=image_result.errors
+                )
+
+            # Step 2: Run dual-LLM validation with image
+            logger.info("Step 2: Running dual-LLM visual validation...")
+            result = await self._validate_with_progress_context(
+                image_data=image_result.image_data,
+                specification=specification,
+                iteration=iteration,
+                previous_score=previous_score,
+                remaining_issues=len(history[-1].agreed_issues) if history else 0
+            )
             history.append(result)
 
             if iteration == 0:
                 initial_score = result.combined_score
 
-            logger.info(f"Iteration {iteration + 1} score: {result.combined_score:.2%}")
+            logger.info(
+                f"Iteration {iteration + 1} score: {result.combined_score:.2%} "
+                f"(delta: {result.combined_score - previous_score:+.2%})"
+            )
 
-            # Check if target met
+            # Step 3: Track progress and detect stagnation
+            logger.info("Step 3: Analyzing progress...")
+            progress = self.progress_tracker.record_and_analyze(
+                comparison_result=result,
+                image_hash=image_result.image_hash
+            )
+
+            # Step 4: Check convergence criteria
+            logger.info("Step 4: Checking convergence...")
+
+            # 4a: Target achieved
             if result.combined_score >= self.target_score:
-                logger.info(f"Target score achieved: {result.combined_score:.2%}")
+                logger.info(f"TARGET ACHIEVED: {result.combined_score:.2%} >= {self.target_score:.0%}")
                 return ValidationLoopResult(
                     final_passed=True,
                     iterations=iteration + 1,
@@ -893,29 +1126,63 @@ class ValidationLoop:
                     fixes_applied=fixes_applied
                 )
 
-            # Generate and apply fixes
-            if self.fix_generator and iteration < self.max_iterations - 1:
-                all_issues = result.agreed_issues + result.unique_opus_issues + result.unique_kimi_issues
+            # 4b: Stagnation detected
+            if progress.recommended_action == "terminate":
+                logger.error(
+                    f"STAGNATION DETECTED: {progress.consecutive_stagnant_iterations} "
+                    f"consecutive stagnant iterations"
+                )
+                self.progress_tracker.raise_if_stagnant()
 
-                if all_issues:
-                    try:
-                        fix_description = await self.fix_generator(current_path, all_issues)
-                        if fix_description:
-                            fixes_applied.append(fix_description)
-                            logger.info(f"Applied fix: {fix_description}")
-                    except Exception as e:
-                        logger.error(f"Fix generation failed: {e}")
+            # Step 5: Generate fixes from issues
+            logger.info("Step 5: Generating fixes from issues...")
+            all_issues = (
+                result.agreed_issues +
+                result.unique_opus_issues +
+                result.unique_kimi_issues
+            )
+
+            if all_issues and iteration < self.max_iterations - 1:
+                transform_result = await self.issue_transformer.transform(
+                    issues=all_issues,
+                    schematic_content=current_content,
+                    max_fixes=self.max_fixes_per_iteration
+                )
+
+                if transform_result.fixes:
+                    # Step 6: Apply fixes to schematic
+                    logger.info(f"Step 6: Applying {len(transform_result.fixes)} fixes...")
+                    apply_result = await self.fix_applicator.apply_fixes(
+                        schematic_content=current_content,
+                        fixes=transform_result.fixes
+                    )
+
+                    if apply_result.applied_fixes:
+                        current_content = apply_result.modified_content
+                        fixes_applied.extend(apply_result.applied_fixes)
+                        logger.info(f"Applied {len(apply_result.applied_fixes)} fixes")
+
+                        # Save updated content to path for validation
+                        Path(schematic_path).write_text(current_content, encoding='utf-8')
+                    else:
+                        logger.warning("No fixes were successfully applied")
+                else:
+                    logger.warning("No fixable issues identified")
+
+            # Update for next iteration
+            previous_score = result.combined_score
+            previous_image_hash = image_result.image_hash
 
             # Callback
             if on_iteration:
                 try:
-                    on_iteration(iteration + 1, result)
+                    on_iteration(iteration + 1, result, progress)
                 except Exception as e:
                     logger.warning(f"Iteration callback failed: {e}")
 
         # Max iterations reached
         final_score = history[-1].combined_score if history else 0.0
-        logger.warning(f"Max iterations reached. Final score: {final_score:.2%}")
+        logger.warning(f"MAX ITERATIONS REACHED. Final score: {final_score:.2%}")
 
         return ValidationLoopResult(
             final_passed=final_score >= self.target_score,
@@ -925,6 +1192,50 @@ class ValidationLoop:
             history=history,
             fixes_applied=fixes_applied
         )
+
+    async def _validate_with_progress_context(
+        self,
+        image_data: bytes,
+        specification: str,
+        iteration: int,
+        previous_score: float,
+        remaining_issues: int
+    ) -> ComparisonResult:
+        """
+        Run validation with progress context in the prompt.
+
+        Uses enhanced OPUS_PROGRESS_PROMPT for better fix suggestions.
+        """
+        # Format enhanced prompt with context
+        enhanced_prompt = self.validator.OPUS_PROGRESS_PROMPT.format(
+            iteration=iteration + 1,
+            previous_score=f"{previous_score:.2%}" if previous_score > 0 else "N/A (first iteration)",
+            target_score=f"{self.target_score:.0%}",
+            remaining_issues=remaining_issues
+        )
+
+        # Add specification
+        if specification:
+            enhanced_prompt += f"\n\nDesign Specification:\n{specification}"
+
+        # Run analysis with enhanced prompt
+        import time
+        start_time = time.time()
+
+        opus_result = await self.validator._analyze_with_opus_enhanced(
+            image_data=image_data,
+            prompt=enhanced_prompt,
+            start_time=start_time
+        )
+
+        # Run Kimi analysis in parallel (standard prompt)
+        kimi_result = await self.validator._analyze_with_kimi(
+            image_data=image_data,
+            specification=specification
+        )
+
+        # Compare and return
+        return self.validator._compare_analyses(opus_result, kimi_result)
 
 
 # CLI entry point for testing

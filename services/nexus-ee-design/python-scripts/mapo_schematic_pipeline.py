@@ -39,7 +39,16 @@ from agents.layout_optimizer import LayoutOptimizerAgent
 from agents.standards_compliance import StandardsComplianceAgent
 from agents.wire_router import EnhancedWireRouter
 from agents.functional_validator import MAPOFunctionalValidator
-from agents.visual_validator import DualLLMVisualValidator, ValidationLoop
+from agents.visual_validator import (
+    DualLLMVisualValidator,
+    ValidationLoop,
+    SchematicImageExtractor,
+    ProgressTracker,
+    IssueToFixTransformer,
+    SchematicFixApplicator,
+    ImageExtractionError,
+    StagnationError,
+)
 from agents.artifact_exporter import ArtifactExporterAgent, ArtifactConfig, ExportResult
 from agents.smoke_test import SmokeTestAgent, SmokeTestResult
 from validation.schematic_vision_validator import (
@@ -698,36 +707,88 @@ class MAPOSchematicPipeline:
                         f"Functional validation: PASSED (score: {functional_result.overall_score:.1%})"
                     )
 
-            # Phase 5: Dual-LLM Visual Validation Loop (Opus 4.5 + Kimi K2.5)
+            # Phase 5: Enhanced Visual Validation Loop with kicad-worker integration
             if not skip_validation and self._visual_validator:
-                logger.info("Starting dual-LLM visual validation loop...")
-                logger.info("CRITICAL: Exporting schematic to IMAGE for visual analysis")
+                logger.info("Starting ENHANCED dual-LLM visual validation loop...")
+                logger.info("CRITICAL: Using kicad-worker for image extraction (NO FALLBACKS)")
 
-                # Create validation loop for iterative improvement
+                # Initialize enhanced components
+                image_extractor = SchematicImageExtractor(
+                    kicad_worker_url=os.environ.get('KICAD_WORKER_URL', 'http://mapos-kicad-worker:8080'),
+                    dpi=300,
+                    save_to_disk=False,  # Only save during debugging
+                )
+
+                progress_tracker = ProgressTracker(
+                    stagnation_threshold=0.02,
+                    max_stagnant_iterations=3,
+                )
+
+                issue_transformer = IssueToFixTransformer(
+                    max_fixes=5,
+                    min_confidence=0.6,
+                    use_llm=True,
+                )
+
+                fix_applicator = SchematicFixApplicator(
+                    validate_syntax=True,
+                )
+
+                # Create enhanced validation loop
                 visual_loop = ValidationLoop(
                     validator=self._visual_validator,
+                    image_extractor=image_extractor,
+                    progress_tracker=progress_tracker,
+                    issue_transformer=issue_transformer,
+                    fix_applicator=fix_applicator,
                     target_score=self.config.validation_threshold,
-                    max_iterations=self.config.max_iterations
+                    max_iterations=self.config.max_iterations,
+                    max_stagnant_iterations=3,
+                    max_fixes_per_iteration=5,
                 )
 
-                # Run visual validation loop
-                loop_result = await visual_loop.run(
-                    schematic_path=str(output_path),
-                    specification=design_intent
-                )
-
-                result.iterations = loop_result.iterations
-
-                if loop_result.final_passed:
-                    logger.info(
-                        f"Visual validation: PASSED after {loop_result.iterations} iterations "
-                        f"(score: {loop_result.final_score:.1%})"
+                try:
+                    # Run enhanced visual validation loop
+                    loop_result = await visual_loop.run(
+                        schematic_path=str(output_path),
+                        schematic_content=schematic_content,
+                        specification=design_intent,
+                        on_iteration=lambda i, r, p: self._emit_progress(
+                            SchematicPhase.VISUAL_VALIDATION,
+                            int(50 + (i / self.config.max_iterations) * 50),
+                            f"Iteration {i}: score={r.combined_score:.1%}, "
+                            f"progress={p.progress_score:.1%}" if p else f"Iteration {i}"
+                        )
                     )
-                else:
-                    logger.warning(
-                        f"Visual validation: Did not reach target "
-                        f"(final: {loop_result.final_score:.1%}, target: {self.config.validation_threshold:.1%})"
-                    )
+
+                    result.iterations = loop_result.iterations
+
+                    # Update schematic content if fixes were applied
+                    if loop_result.fixes_applied:
+                        schematic_content = output_path.read_text(encoding='utf-8')
+                        logger.info(f"Applied {len(loop_result.fixes_applied)} fixes during validation")
+
+                    if loop_result.final_passed:
+                        logger.info(
+                            f"Visual validation: PASSED after {loop_result.iterations} iterations "
+                            f"(score: {loop_result.final_score:.1%})"
+                        )
+                    else:
+                        logger.warning(
+                            f"Visual validation: Did not reach target "
+                            f"(final: {loop_result.final_score:.1%}, target: {self.config.validation_threshold:.1%})"
+                        )
+
+                except ImageExtractionError as e:
+                    logger.error(f"IMAGE EXTRACTION FAILED - NO FALLBACK")
+                    logger.error(str(e))
+                    raise  # Re-raise to fail the pipeline
+
+                except StagnationError as e:
+                    logger.error(f"VALIDATION STAGNATION DETECTED")
+                    logger.error(str(e))
+                    # Continue with current schematic, but log the issue
+                    result.errors.append(f"Validation stagnated: {e.reason.value}")
 
             # Legacy validation (fallback if new validators unavailable)
             elif not skip_validation and self._validator:
