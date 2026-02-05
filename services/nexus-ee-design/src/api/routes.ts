@@ -1115,6 +1115,80 @@ export function createApiRoutes(io: SocketIOServer): Router {
     return categories[extension] || 'unknown';
   }
 
+  /**
+   * POST /projects/:projectId/artifacts/export
+   * Export artifacts as ZIP (PDF/SVG not yet implemented)
+   */
+  router.post('/projects/:projectId/artifacts/export', validate(z.object({
+    artifactIds: z.array(z.string()).min(1),
+    format: z.enum(['zip', 'pdf', 'svg']),
+  })), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+      const { artifactIds, format } = req.body;
+
+      log.info('Exporting artifacts', { projectId, artifactIds: artifactIds.length, format });
+
+      // Fetch all artifacts
+      const artifacts: Array<{ name: string; content: string; type: string }> = [];
+
+      for (const id of artifactIds) {
+        // Try schematic first
+        const schematic = await findSchematicById(id);
+        if (schematic && schematic.kicadSch) {
+          artifacts.push({
+            name: `${schematic.name || schematic.id}.kicad_sch`,
+            content: schematic.kicadSch,
+            type: 'schematic',
+          });
+          continue;
+        }
+
+        // Try PCB layout
+        const pcbLayout = await findPCBLayoutById(id);
+        if (pcbLayout && pcbLayout.kicadPcb) {
+          artifacts.push({
+            name: `pcb-layout-v${pcbLayout.version}.kicad_pcb`,
+            content: pcbLayout.kicadPcb,
+            type: 'pcb',
+          });
+          continue;
+        }
+
+        log.warn('Artifact not found for export', { artifactId: id });
+      }
+
+      if (artifacts.length === 0) {
+        throw new ValidationError('No valid artifacts found to export');
+      }
+
+      if (format === 'zip') {
+        // Dynamic import archiver
+        const archiver = (await import('archiver')).default;
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename=export-${projectId}-${Date.now()}.zip`);
+
+        archive.pipe(res);
+
+        for (const artifact of artifacts) {
+          archive.append(artifact.content, { name: artifact.name });
+        }
+
+        await archive.finalize();
+        log.info('ZIP export completed', { projectId, artifactCount: artifacts.length });
+      } else if (format === 'pdf' || format === 'svg') {
+        // PDF/SVG export would require KiCad or headless rendering - not yet implemented
+        throw new ValidationError(`${format.toUpperCase()} export not yet implemented. Use ZIP for now.`);
+      } else {
+        throw new ValidationError(`Unknown export format: ${format}`);
+      }
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.patch('/projects/:projectId/status', validate(z.object({
     status: z.enum(['draft', 'in_progress', 'review', 'approved', 'completed', 'on_hold', 'cancelled']),
   })), async (req: Request, res: Response, next: NextFunction) => {
