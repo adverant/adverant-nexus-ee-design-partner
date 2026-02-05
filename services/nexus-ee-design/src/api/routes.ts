@@ -568,8 +568,10 @@ export function createApiRoutes(io: SocketIOServer): Router {
   // Project Management
   // ============================================================================
 
-  // Apply UUID validation to all routes with :projectId parameter
-  router.param('projectId', (req: Request, _res: Response, next: NextFunction, value: string) => {
+  /// Apply UUID validation AND ownership check to all routes with :projectId parameter
+  // This is the SECURITY GATE that prevents unauthorized access to any project resource
+  router.param('projectId', async (req: Request, res: Response, next: NextFunction, value: string) => {
+    // Step 1: UUID validation
     if (!UUID_REGEX.test(value)) {
       return next(new ValidationError(`Invalid projectId: must be a valid UUID (received: ${value})`, {
         operation: 'uuid_validation',
@@ -577,7 +579,79 @@ export function createApiRoutes(io: SocketIOServer): Router {
         value: value,
       }));
     }
-    next();
+
+    // Step 2: Ownership validation - CRITICAL SECURITY CHECK
+    const userId = req.headers['x-user-id'] as string;
+
+    // Require authenticated user
+    if (!userId || userId === 'system' || userId === 'anonymous') {
+      log.warn('SECURITY: Unauthorized project access - no user ID', {
+        projectId: value,
+        path: req.path,
+        method: req.method,
+        ip: req.ip,
+      });
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required to access project resources',
+        },
+      });
+      return;
+    }
+
+    try {
+      // Fetch project to check ownership
+      const project = await findProjectById(value);
+
+      if (!project) {
+        res.status(404).json({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Project not found',
+          },
+        });
+        return;
+      }
+
+      // Check ownership: owner, organization member, or collaborator
+      const isOwner = project.owner === userId;
+      const isCollaborator = project.collaborators?.includes(userId) || false;
+
+      if (!isOwner && !isCollaborator) {
+        log.warn('SECURITY: Unauthorized project access attempt', {
+          projectId: value,
+          requestedBy: userId,
+          actualOwner: project.owner,
+          collaborators: project.collaborators,
+          path: req.path,
+          method: req.method,
+          ip: req.ip,
+          userAgent: req.headers['user-agent'],
+        });
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'FORBIDDEN',
+            message: 'You do not have access to this project',
+          },
+        });
+        return;
+      }
+
+      // Store project in request to avoid duplicate DB query in handlers
+      (req as Request & { project?: typeof project }).project = project;
+      next();
+    } catch (error) {
+      log.error('Error validating project ownership', {
+        projectId: value,
+        userId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      next(error);
+    }
   });
 
   // Apply UUID validation to schematicId parameter
@@ -630,14 +704,35 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.get('/projects', async (req: Request, res: Response, next: NextFunction) => {
     try {
+      // SECURITY: Require authenticated user
+      const userId = req.headers['x-user-id'] as string;
+      if (!userId || userId === 'system' || userId === 'anonymous') {
+        log.warn('Unauthorized project list attempt - no user ID', {
+          path: req.path,
+          ip: req.ip,
+        });
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'Authentication required to list projects',
+          },
+        });
+        return;
+      }
+
       const filters: ProjectFilters = {};
 
-      // Parse query parameters
+      // SECURITY: FORCE ownerId to authenticated user - never accept from query params
+      // This prevents users from listing other users' projects
+      filters.ownerId = userId;
+
+      // Parse safe query parameters (NOT ownerId - that's forced above)
       if (req.query.type) filters.type = req.query.type as string;
       if (req.query.status) filters.status = req.query.status as ProjectFilters['status'];
       if (req.query.phase) filters.phase = req.query.phase as ProjectPhase;
-      if (req.query.ownerId) filters.ownerId = req.query.ownerId as string;
       if (req.query.organizationId) filters.organizationId = req.query.organizationId as string;
+      // NOTE: ownerId from query params is INTENTIONALLY IGNORED for security
 
       // Pagination
       const page = parseInt(req.query.page as string, 10) || 1;
@@ -645,14 +740,15 @@ export function createApiRoutes(io: SocketIOServer): Router {
       filters.limit = pageSize;
       filters.offset = (page - 1) * pageSize;
 
-      log.debug('Listing projects', { filters, page, pageSize });
+      log.debug('Listing projects', { filters, page, pageSize, userId });
 
       // Create count filters without limit/offset
-      const countFilters: ProjectFilters = {};
+      const countFilters: ProjectFilters = {
+        ownerId: userId, // SECURITY: Always filter by authenticated user
+      };
       if (filters.type) countFilters.type = filters.type;
       if (filters.status) countFilters.status = filters.status;
       if (filters.phase) countFilters.phase = filters.phase;
-      if (filters.ownerId) countFilters.ownerId = filters.ownerId;
       if (filters.organizationId) countFilters.organizationId = filters.organizationId;
 
       const [projects, total] = await Promise.all([

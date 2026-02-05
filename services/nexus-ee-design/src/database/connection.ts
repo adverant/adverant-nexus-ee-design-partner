@@ -21,11 +21,19 @@ export interface QueryOptions {
   requestId?: string;
   /** Operation name for logging */
   operation?: string;
+  /** User ID for RLS tenant isolation */
+  userId?: string;
+  /** Organization ID for RLS tenant isolation */
+  organizationId?: string;
 }
 
 export interface TransactionOptions extends QueryOptions {
   /** Isolation level for the transaction */
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
+  /** User ID for RLS tenant isolation */
+  userId?: string;
+  /** Organization ID for RLS tenant isolation */
+  organizationId?: string;
 }
 
 export type TransactionCallback<T> = (client: PoolClient) => Promise<T>;
@@ -119,6 +127,74 @@ function mapPgErrorToHttpStatus(pgCode?: string): number {
 
 let pool: Pool | null = null;
 let dbLogger: Logger;
+
+// ============================================================================
+// RLS Tenant Context
+// ============================================================================
+
+/**
+ * Set RLS tenant context on a database client.
+ * MUST be called before any query that should be tenant-isolated.
+ *
+ * @param client - Pool client to set context on
+ * @param userId - User ID for tenant isolation
+ * @param organizationId - Organization ID for tenant isolation
+ */
+async function setRLSContext(
+  client: PoolClient,
+  userId?: string,
+  organizationId?: string
+): Promise<void> {
+  // Use SET LOCAL so settings only apply to current transaction
+  // If userId is provided, set it; otherwise clear it
+  if (userId) {
+    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`);
+  } else {
+    await client.query(`SET LOCAL app.current_user_id = ''`);
+  }
+
+  if (organizationId) {
+    await client.query(`SET LOCAL app.current_organization_id = '${organizationId.replace(/'/g, "''")}'`);
+  } else {
+    await client.query(`SET LOCAL app.current_organization_id = ''`);
+  }
+}
+
+/**
+ * Execute a query with RLS tenant context.
+ * Wraps the query in a transaction to ensure SET LOCAL takes effect.
+ */
+export async function queryWithContext<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  values: unknown[] | undefined,
+  userId: string | undefined,
+  organizationId: string | undefined,
+  _options: QueryOptions = {}
+): Promise<QueryResult<T>> {
+  const p = getPool();
+  const client = await p.connect();
+
+  try {
+    // Begin transaction for SET LOCAL to work
+    await client.query('BEGIN');
+
+    // Set RLS context
+    await setRLSContext(client, userId, organizationId);
+
+    // Execute the actual query
+    const result = await client.query<T>(text, values);
+
+    // Commit transaction
+    await client.query('COMMIT');
+
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 /**
  * Initialize the database connection pool
@@ -301,7 +377,7 @@ export async function withTransaction<T>(
 ): Promise<T> {
   const pool = getPool();
   const startTime = Date.now();
-  const { isolationLevel, requestId, operation = 'transaction' } = options;
+  const { isolationLevel, requestId, operation = 'transaction', userId, organizationId } = options;
 
   const txLogger = dbLogger.child({
     requestId,
@@ -317,6 +393,13 @@ export async function withTransaction<T>(
       : 'BEGIN';
 
     await client.query(beginStatement);
+
+    // Set RLS tenant context if provided
+    if (userId || organizationId) {
+      await setRLSContext(client, userId, organizationId);
+      txLogger.debug('RLS context set', { hasUserId: !!userId, hasOrgId: !!organizationId });
+    }
+
     txLogger.debug('Transaction started', { isolationLevel });
 
     // Execute the callback
@@ -564,6 +647,7 @@ export function buildSelect(
 export default {
   getPool,
   query,
+  queryWithContext,
   withTransaction,
   clientQuery,
   healthCheck,

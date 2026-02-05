@@ -59,9 +59,11 @@ function isCLIClient(req: Request): boolean {
     return true;
   }
 
-  // No user agent typically means CLI tool
+  // SECURITY FIX: Empty User-Agent is NOT automatically trusted
+  // Must have explicit CLI headers or trusted IP to be considered CLI client
+  // An empty User-Agent alone should not grant CLI access
   if (!userAgent || userAgent === '') {
-    return true;
+    return false;
   }
 
   return false;
