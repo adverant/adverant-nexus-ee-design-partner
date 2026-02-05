@@ -167,38 +167,62 @@ class ConnectionGeneratorAgent:
         connections.extend(bypass_connections)
         logger.info(f"Generated {len(bypass_connections)} bypass cap connections")
 
-        # Step 4: Use LLM to infer signal connections (NO FALLBACK - LLM required)
-        # Following user directive: "do not use any algorithmic approaches unless LLM can't be used"
-        signal_connections = await self._generate_signal_connections_llm(
-            components, design_intent
-        )
-        connections.extend(signal_connections)
-        logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
+        # Step 4: Use LLM to infer signal connections (NO FALLBACK - FAIL FAST)
+        # LLM is REQUIRED for intelligent connection generation. No silent degradation.
+        signal_connections: List[GeneratedConnection] = []
+        llm_error: Optional[str] = None
 
-        # VALIDATION: Check that signal connections were actually generated
-        # NO FALLBACK - LLM failure is FATAL per user directive
-        if not signal_connections:
-            # CRITICAL ERROR - fail fast with verbose error message
+        try:
+            signal_connections = await self._generate_signal_connections_llm(
+                components, design_intent
+            )
+            if signal_connections:
+                logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
+        except Exception as e:
+            llm_error = str(e)
+            # FAIL FAST - Do not attempt fallback, provide verbose diagnostic
             error_msg = (
-                f"CRITICAL ERROR: LLM failed to generate signal connections for {len(components)} components. "
-                f"This is a FATAL error - no fallback allowed per user directive. "
-                f"Possible causes: "
-                f"1) OpenRouter API key missing or invalid (check OPENROUTER_API_KEY env var), "
-                f"2) OpenRouter API rate limiting or quota exceeded, "
-                f"3) Network connectivity issues to OpenRouter API, "
-                f"4) LLM returned empty response or error, "
-                f"5) Design intent was too vague for LLM to infer connections. "
-                f"Design intent provided: '{design_intent[:200]}...' "
-                f"Components: {[c.reference for c in components][:10]}... "
-                f"ACTION REQUIRED: Check backend logs for detailed LLM error, verify API key, retry with clearer design intent."
+                f"CRITICAL: LLM connection generation FAILED with exception. "
+                f"Error: {llm_error}. "
+                f"Components attempted ({len(components)}): {[c.reference for c in components][:15]}... "
+                f"Component categories: {list(set(c.category for c in components))}. "
+                f"Design intent provided: '{design_intent[:300] if design_intent else 'NONE - this may be the cause'}...'. "
+                f"DIAGNOSTIC CHECKLIST: "
+                f"1) OPENROUTER_API_KEY env var: {'SET' if os.environ.get('OPENROUTER_API_KEY') else 'MISSING - THIS IS LIKELY THE CAUSE'}. "
+                f"2) Network connectivity: Check if pod can reach openrouter.ai. "
+                f"3) API quota: Check OpenRouter dashboard for rate limits. "
+                f"4) Model availability: anthropic/claude-opus-4.5 may be unavailable. "
+                f"NO FALLBACK - Schematic generation cannot proceed without LLM connections."
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
-        elif len(signal_connections) < len(components):
-            # Warn if fewer connections than components (may indicate incomplete inference)
+
+        # VALIDATION: Check that signal connections were actually generated
+        # NO FALLBACK - Empty result is FATAL
+        if not signal_connections:
+            error_msg = (
+                f"CRITICAL: LLM returned ZERO signal connections for {len(components)} components. "
+                f"This is a FATAL error - schematic would have no signal routing. "
+                f"Components: {[c.reference for c in components][:15]}... "
+                f"Component categories: {list(set(c.category for c in components))}. "
+                f"Design intent: '{design_intent[:300] if design_intent else 'NONE PROVIDED - THIS IS LIKELY THE CAUSE'}...'. "
+                f"DIAGNOSTIC CHECKLIST: "
+                f"1) Design intent quality: Is it specific enough for LLM to infer connections? "
+                f"2) Component categories: Are they recognized categories (MCU, sensor, driver, etc.)? "
+                f"3) BOM completeness: Are all required components included? "
+                f"4) LLM response: Check backend logs for raw LLM output - may contain parsing error. "
+                f"NO FALLBACK - User must provide clearer design intent or check component definitions."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        connections.extend(signal_connections)
+
+        # Warn if fewer connections than components (may indicate incomplete inference)
+        if len(signal_connections) < len(components):
             logger.warning(
                 f"Signal connections ({len(signal_connections)}) fewer than components ({len(components)}). "
-                f"Some components may not be connected. This might be expected for power-only designs."
+                f"Some components may not be connected. Review design intent for completeness."
             )
 
         # Step 5: Deduplicate and prioritize

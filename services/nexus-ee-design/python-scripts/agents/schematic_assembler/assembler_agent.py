@@ -33,6 +33,29 @@ from agents.layout_optimizer import LayoutOptimizerAgent
 
 logger = logging.getLogger(__name__)
 
+
+class SchematicAssemblyError(Exception):
+    """
+    Exception raised when schematic assembly fails.
+
+    This includes:
+    - Malformed S-expression output (unbalanced parentheses)
+    - Wire routing failures (< 50% connection coverage)
+    - Missing symbol definitions
+    - Invalid component placement
+    """
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
+    def __str__(self) -> str:
+        if self.details:
+            return f"{self.message} | Details: {json.dumps(self.details, indent=2)}"
+        return self.message
+
+
 # OpenRouter configuration for LLM-first approach
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -1136,12 +1159,43 @@ JSON array of pins:"""
             result = type('RouterResult', (), {'wires': [], 'junctions': [], 'four_way_junctions_avoided': 0})()
 
         # VALIDATION: Check wire-to-connection ratio (only if we have connections to route)
+        # This is a CRITICAL quality gate - a schematic with <50% wire coverage is non-functional
         if conn_dicts:
             wire_connection_ratio = len(result.wires) / len(conn_dicts)
             if wire_connection_ratio < 0.5:
+                # CRITICAL FAILURE: Reject schematics that would be non-functional
+                error_details = {
+                    "wires_generated": len(result.wires),
+                    "connections_required": len(conn_dicts),
+                    "coverage_ratio": f"{wire_connection_ratio:.1%}",
+                    "missing_connections": len(conn_dicts) - len(result.wires),
+                    "possible_causes": [
+                        "Missing pin positions in symbol definitions",
+                        "Component reference mismatches between BOM and connections",
+                        "Wire router algorithm limitations with complex layouts",
+                        "Overlapping component placements blocking wire paths"
+                    ]
+                }
+                error_msg = (
+                    f"CRITICAL: Wire routing failed - only {wire_connection_ratio:.1%} of connections routed. "
+                    f"Generated {len(result.wires)} wires for {len(conn_dicts)} required connections. "
+                    f"This schematic would be non-functional and cannot be exported. "
+                    f"Minimum required coverage: 50%. "
+                    f"Check component symbol pin definitions and connection specifications."
+                )
+                logger.error(error_msg)
+                raise SchematicAssemblyError(error_msg, error_details)
+            elif wire_connection_ratio < 0.8:
+                # Warning only for 50-80% coverage - schematic may work but has issues
                 logger.warning(
-                    f"Low wire generation ratio: {len(result.wires)} wires for {len(conn_dicts)} connections "
-                    f"(ratio: {wire_connection_ratio:.2f}). Some connections may be missing."
+                    f"Wire routing incomplete: {wire_connection_ratio:.1%} coverage. "
+                    f"Generated {len(result.wires)} wires for {len(conn_dicts)} connections. "
+                    f"Schematic may have missing connections - manual review recommended."
+                )
+            else:
+                logger.info(
+                    f"Wire routing successful: {wire_connection_ratio:.1%} coverage "
+                    f"({len(result.wires)} wires for {len(conn_dicts)} connections)"
                 )
 
         # Convert results to schematic format
@@ -1514,6 +1568,87 @@ Return ONLY the extracted (symbol ...) block:"""
             logger.error(f"LLM symbol extraction failed: {e}")
             return None
 
+    def _validate_sexpression(self, content: str) -> tuple[bool, str]:
+        """
+        Validate S-expression parentheses balance.
+
+        This is a CRITICAL validation step that catches malformed KiCad schematic
+        output BEFORE it reaches the export pipeline. Unbalanced parentheses
+        cause KiCad to fail silently or crash.
+
+        Args:
+            content: The S-expression string to validate
+
+        Returns:
+            Tuple of (is_valid, diagnostic_message)
+            - If valid: (True, "Opens=N, Closes=N, max_depth=M")
+            - If invalid: (False, detailed error with context)
+        """
+        open_count = 0
+        close_count = 0
+        max_depth = 0
+        current_depth = 0
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(content):
+            # Handle string literals - parentheses inside strings don't count
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == '(':
+                open_count += 1
+                current_depth += 1
+                max_depth = max(max_depth, current_depth)
+            elif char == ')':
+                close_count += 1
+                current_depth -= 1
+                if current_depth < 0:
+                    # Found unbalanced close parenthesis - provide context
+                    start = max(0, i - 100)
+                    end = min(len(content), i + 100)
+                    context = content[start:end]
+                    # Find the line number
+                    line_num = content[:i].count('\n') + 1
+                    return False, (
+                        f"CRITICAL: Unbalanced S-expression at position {i} (line {line_num}). "
+                        f"Extra closing parenthesis found. "
+                        f"Opens so far: {open_count}, Closes so far: {close_count}. "
+                        f"Context (200 chars around error): ...{context}..."
+                    )
+
+        if open_count != close_count:
+            difference = close_count - open_count
+            # Find potential problem areas - look for common patterns
+            problem_hints = []
+            if ')))' in content:
+                problem_hints.append("Multiple consecutive closing parens detected")
+            if content.count('(symbol') != content.count('  )') // 2:
+                problem_hints.append("Symbol block count mismatch suspected")
+
+            return False, (
+                f"CRITICAL: S-expression parentheses mismatch. "
+                f"Opens: {open_count}, Closes: {close_count}, "
+                f"Difference: {difference} {'extra closes' if difference > 0 else 'missing closes'}. "
+                f"Max nesting depth reached: {max_depth}. "
+                f"Content length: {len(content)} chars. "
+                f"Hints: {'; '.join(problem_hints) if problem_hints else 'None'}. "
+                f"This indicates a bug in S-expression generation - check _symbol_to_sexp, "
+                f"_generate_placeholder_lib_symbol, or generate_kicad_sch methods."
+            )
+
+        return True, f"Opens={open_count}, Closes={close_count}, max_depth={max_depth}"
+
     async def generate_kicad_sch(self, sheet: SchematicSheet) -> str:
         """Generate KiCad S-expression schematic file."""
         # Build the schematic file
@@ -1578,7 +1713,20 @@ Return ONLY the extracted (symbol ...) block:"""
 
         lines.append(")")
 
-        return "\n".join(lines)
+        # Assemble the final content
+        kicad_content = "\n".join(lines)
+
+        # CRITICAL VALIDATION: Ensure S-expression is well-formed before returning
+        # This catches malformed output that would cause KiCad to fail silently
+        is_valid, diagnostic_msg = self._validate_sexpression(kicad_content)
+        if not is_valid:
+            logger.error(f"Generated schematic has invalid S-expression: {diagnostic_msg}")
+            raise SchematicAssemblyError(
+                f"Schematic generation produced malformed KiCad file. {diagnostic_msg}"
+            )
+
+        logger.info(f"S-expression validation PASSED: {diagnostic_msg}")
+        return kicad_content
 
     def _symbol_to_sexp(self, symbol: SymbolInstance) -> str:
         """Convert symbol instance to S-expression with KiCad 8 instances block."""
