@@ -692,16 +692,6 @@ export async function callClaudeOpus(
 }
 
 /**
- * Quick call with Claude Opus 4.6 (balanced)
- */
-export async function callClaudeOpus(
-  messages: LLMMessage[],
-  options: Omit<LLMOptions, 'model'> = {}
-): Promise<LLMResponse> {
-  return callLLM(messages, { ...options, model: 'anthropic/claude-opus-4.6' });
-}
-
-/**
  * Quick call with Gemini 2.0 Flash (fast/cheap)
  */
 export async function callGeminiFlash(
