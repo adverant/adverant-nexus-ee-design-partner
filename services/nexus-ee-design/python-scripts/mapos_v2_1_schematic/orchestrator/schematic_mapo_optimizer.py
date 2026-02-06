@@ -26,6 +26,14 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add parent paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from ideation_context import (
+    IdeationContext,
+    SymbolResolutionContext,
+    ConnectionInferenceContext,
+    PlacementContext,
+    ValidationContext,
+)
+
 from agents.wire_router import EnhancedWireRouter
 from agents.layout_optimizer import LayoutOptimizerAgent
 
@@ -179,47 +187,73 @@ class SchematicMAPOOptimizer:
         design_name: str = "schematic",
         design_type: str = "foc_esc",
         max_iterations: int = 100,
+        ideation_context: Optional[IdeationContext] = None,
     ) -> OptimizationResult:
         """
         Run the full MAPO v2.1 schematic optimization pipeline.
-        
+
         Args:
             bom: Bill of materials
             design_intent: Natural language design description
             design_name: Name for output file
             design_type: Type of design for pattern matching
             max_iterations: Maximum Gaming AI iterations
-        
+            ideation_context: Optional structured ideation context extracted
+                from ideation artifacts.  When provided, each pipeline stage
+                receives domain-specific hints (preferred parts, explicit
+                connections, placement constraints, validation criteria) that
+                improve schematic quality.
+
         Returns:
             OptimizationResult with final schematic
         """
         start_time = time.time()
         result = OptimizationResult(success=False)
-        
+
         try:
             logger.info(f"Starting MAPO v2.1 schematic optimization: {design_name}")
             logger.info(f"BOM: {len(bom)} items, Design type: {design_type}")
+
+            if ideation_context is not None:
+                logger.info(
+                    "IdeationContext available: "
+                    f"bom_artifacts={ideation_context.has_bom_artifacts}, "
+                    f"connection_hints={ideation_context.has_connection_hints}, "
+                    f"placement_hints={ideation_context.has_placement_hints}, "
+                    f"validation_criteria={ideation_context.has_validation_criteria}, "
+                    f"artifact_count={ideation_context.artifact_count}"
+                )
+                if ideation_context.extraction_errors:
+                    for err in ideation_context.extraction_errors:
+                        logger.warning(f"IdeationContext extraction error: {err}")
+            else:
+                logger.info("No IdeationContext provided - running in legacy mode")
             
             # Phase 1: Symbol Resolution with Memory
             logger.info("Phase 1: Symbol Resolution")
-            resolved_symbols, lib_symbols = await self._resolve_symbols(bom)
+            resolution_hints = ideation_context.symbol_resolution if ideation_context else None
+            resolved_symbols, lib_symbols = await self._resolve_symbols(bom, resolution_hints)
             result.symbols_resolved = len(resolved_symbols)
             result.symbols_from_memory = sum(1 for s in resolved_symbols if s.from_memory)
             result.placeholders = sum(1 for s in resolved_symbols if s.quality == SymbolQuality.PLACEHOLDER)
-            
+
             # Check for critical placeholder count
             if result.placeholders > len(resolved_symbols) * 0.3:
                 logger.warning(f"High placeholder count: {result.placeholders}/{result.symbols_resolved}")
-            
+
             # Phase 2: Connection Generation with Memory Patterns
             logger.info("Phase 2: Connection Generation")
             components = [s.component for s in resolved_symbols]
-            connections = await self._generate_connections(components, design_intent, design_type)
+            connection_hints = ideation_context.connection_inference if ideation_context else None
+            connections = await self._generate_connections(
+                components, design_intent, design_type, connection_hints
+            )
             result.connections_generated = len(connections)
-            
+
             # Phase 3: Component Placement
             logger.info("Phase 3: Component Placement")
-            placed_components = await self._place_components(components, connections)
+            placement_hints = ideation_context.placement if ideation_context else None
+            placed_components = await self._place_components(components, connections, placement_hints)
             
             # Phase 4: Wire Routing
             logger.info("Phase 4: Wire Routing")
@@ -240,7 +274,10 @@ class SchematicMAPOOptimizer:
             # Phase 5: Smoke Test Validation
             logger.info("Phase 5: Smoke Test Validation")
             validator = self._ensure_smoke_test_validator()
-            validated_state, smoke_result = await validator.validate_and_score(initial_state)
+            validation_ctx = ideation_context.validation if ideation_context else None
+            validated_state, smoke_result = await validator.validate_and_score(
+                initial_state, validation_context=validation_ctx
+            )
             
             result.smoke_test_passed = smoke_result.passed
             result.final_fitness = validated_state.fitness.combined if validated_state.fitness else 0.0
@@ -262,6 +299,7 @@ class SchematicMAPOOptimizer:
                         max_iterations,
                         design_type,
                         design_intent,
+                        ideation_context=ideation_context,
                     )
                     result.final_state = optimized_state
                     result.final_fitness = optimized_state.fitness.combined if optimized_state.fitness else 0.0
@@ -300,33 +338,64 @@ class SchematicMAPOOptimizer:
     async def _resolve_symbols(
         self,
         bom: List[Dict[str, Any]],
+        resolution_hints: Optional[SymbolResolutionContext] = None,
     ) -> Tuple[List, Dict[str, str]]:
-        """Resolve symbols for all BOM items."""
+        """Resolve symbols for all BOM items.
+
+        Args:
+            bom: Bill of materials list.
+            resolution_hints: Optional symbol resolution hints from ideation
+                context.  When provided, preferred parts, manufacturer priority,
+                and package preferences are merged into the resolution process.
+        """
         resolver = self._ensure_symbol_resolver()
-        return await resolver.resolve_symbols(bom)
+        return await resolver.resolve_symbols(bom, resolution_hints=resolution_hints)
     
     async def _generate_connections(
         self,
         components: List[ComponentInstance],
         design_intent: str,
         design_type: str,
+        connection_hints: Optional[ConnectionInferenceContext] = None,
     ) -> List[Connection]:
-        """Generate connections with memory patterns."""
+        """Generate connections with memory patterns.
+
+        Args:
+            components: Resolved component instances.
+            design_intent: Natural language design description.
+            design_type: Type of design for pattern matching.
+            connection_hints: Optional connection inference hints from ideation
+                context.  When provided, explicit connections are used as seed
+                connections, interface definitions drive structured bus
+                generation, and power rail data informs power net wiring.
+        """
         generator = self._ensure_connection_generator()
         return await generator.generate_connections(
             components=components,
             design_intent=design_intent,
             design_type=design_type,
+            connection_hints=connection_hints,
         )
     
     async def _place_components(
         self,
         components: List[ComponentInstance],
         connections: List[Connection],
+        placement_hints: Optional[PlacementContext] = None,
     ) -> List[ComponentInstance]:
-        """Place components using layout optimizer."""
+        """Place components using layout optimizer.
+
+        Args:
+            components: Resolved component instances.
+            connections: Generated connections.
+            placement_hints: Optional placement context from ideation.
+                When provided, subsystem blocks supply position hints
+                and grouping constraints, signal flow direction guides
+                overall layout, and critical proximity / isolation zones
+                are applied.
+        """
         layout_optimizer = self._ensure_layout_optimizer()
-        
+
         # Convert to format expected by layout optimizer
         bom_items = [
             {
@@ -336,7 +405,7 @@ class SchematicMAPOOptimizer:
             }
             for c in components
         ]
-        
+
         connection_dicts = [
             {
                 "from_ref": c.from_ref,
@@ -344,13 +413,41 @@ class SchematicMAPOOptimizer:
             }
             for c in connections
         ]
-        
+
+        # Build subsystem grouping and position hints from ideation context
+        subsystem_groups: Dict[str, List[str]] = {}
+        position_hints: Dict[str, str] = {}
+        signal_flow: Optional[str] = None
+        proximity_pairs: List[Tuple[str, str]] = []
+        isolation_zones: List[Tuple[str, str]] = []
+
+        if placement_hints is not None:
+            logger.info(
+                f"Applying placement hints: {len(placement_hints.subsystem_blocks)} "
+                f"subsystem blocks, flow={placement_hints.signal_flow_direction}"
+            )
+            signal_flow = placement_hints.signal_flow_direction
+
+            for block in placement_hints.subsystem_blocks:
+                if block.components:
+                    subsystem_groups[block.name] = block.components
+                if block.position_hint:
+                    position_hints[block.name] = block.position_hint
+
+            proximity_pairs = list(placement_hints.critical_proximity)
+            isolation_zones = list(placement_hints.isolation_zones)
+
         # Get optimized positions
         positions = await layout_optimizer.optimize_layout(
             bom_items=bom_items,
             connections=connection_dicts,
+            subsystem_groups=subsystem_groups if subsystem_groups else None,
+            position_hints=position_hints if position_hints else None,
+            signal_flow=signal_flow,
+            proximity_pairs=proximity_pairs if proximity_pairs else None,
+            isolation_zones=isolation_zones if isolation_zones else None,
         )
-        
+
         # Update component positions
         placed = []
         for comp in components:
@@ -373,7 +470,7 @@ class SchematicMAPOOptimizer:
                 description=comp.description,
             )
             placed.append(placed_comp)
-        
+
         return placed
     
     async def _route_wires(
@@ -486,43 +583,77 @@ class SchematicMAPOOptimizer:
         max_iterations: int,
         design_type: str,
         design_intent: str,
+        ideation_context: Optional[IdeationContext] = None,
     ) -> SchematicState:
         """
         Run MAP-Elites + Red Queen optimization until smoke test passes.
+
+        Args:
+            initial_state: Starting schematic state.
+            smoke_result: Initial smoke test result.
+            max_iterations: Maximum optimization iterations.
+            design_type: Type of design for pattern matching.
+            design_intent: Natural language design description.
+            ideation_context: Optional structured ideation context.  When
+                provided, the designer intent text is included in LLM
+                mutation guidance prompts, and the validation context is
+                threaded through re-validation calls so that ideation
+                test criteria are evaluated at every iteration.
         """
         map_elites = self._ensure_map_elites()
         red_queen = self._ensure_red_queen()
         validator = self._ensure_smoke_test_validator()
-        
+
+        # Build supplementary designer intent from ideation context
+        designer_intent_supplement = ""
+        if ideation_context is not None:
+            intent_text = ideation_context.design_intent_text
+            if intent_text:
+                designer_intent_supplement = (
+                    "\n\n=== DESIGNER INTENT FROM IDEATION ===\n" + intent_text
+                )
+                logger.info(
+                    "Including ideation designer intent in Gaming AI guidance "
+                    f"({len(intent_text)} chars)"
+                )
+
+        validation_ctx = ideation_context.validation if ideation_context else None
+
         # Create initial solution
         solution = SchematicSolution(state=initial_state)
         solution.behavior_descriptor = map_elites.compute_behavior_descriptor(initial_state)
         map_elites.add_solution(solution)
-        
+
         best_state = initial_state
         best_fitness = initial_state.fitness.combined if initial_state.fitness else 0.0
-        
+
         issues = smoke_result.fatal_issues + smoke_result.error_issues
-        
+
         for iteration in range(max_iterations):
             logger.info(f"Gaming AI iteration {iteration + 1}/{max_iterations}")
-            
+
             # Select cells to explore
             cells = await map_elites.select_cells_for_exploration(issues, num_cells=3)
-            
+
             for cell in cells:
                 if cell.is_empty:
                     continue
-                
-                # Get LLM mutation guidance
-                guidance = await map_elites.guide_mutation(cell.solution, issues)
+
+                # Get LLM mutation guidance - enrich issues with designer intent
+                enriched_issues = list(issues)
+                if designer_intent_supplement:
+                    enriched_issues.append(designer_intent_supplement)
+
+                guidance = await map_elites.guide_mutation(cell.solution, enriched_issues)
                 logger.debug(f"Mutation guidance: {guidance.mutation_type} - {guidance.description}")
-                
+
                 # Apply mutation
                 mutated_state = await self._apply_mutation(cell.solution.state, guidance)
-                
-                # Re-validate
-                validated_state, new_smoke_result = await validator.validate_and_score(mutated_state)
+
+                # Re-validate with ideation validation context
+                validated_state, new_smoke_result = await validator.validate_and_score(
+                    mutated_state, validation_context=validation_ctx
+                )
                 
                 # Create new solution
                 new_solution = SchematicSolution(state=validated_state)

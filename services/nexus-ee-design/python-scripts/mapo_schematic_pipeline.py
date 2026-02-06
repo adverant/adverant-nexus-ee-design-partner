@@ -63,6 +63,13 @@ from progress_emitter import (
     SchematicEventType,
     calculate_overall_progress,
 )
+from ideation_context import (
+    IdeationContext,
+    SymbolResolutionContext,
+    ConnectionInferenceContext,
+    PlacementContext,
+    ValidationContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +369,8 @@ class MAPOSchematicPipeline:
         block_diagram: Optional[Dict[str, Any]] = None,
         design_name: str = "schematic",
         reference_images: Optional[List[bytes]] = None,
-        skip_validation: bool = False
+        skip_validation: bool = False,
+        ideation_context: Optional[IdeationContext] = None,
     ) -> PipelineResult:
         """
         Generate a validated schematic from BOM and design intent.
@@ -375,6 +383,11 @@ class MAPOSchematicPipeline:
             design_name: Name for the output schematic
             reference_images: Optional reference design images for comparison
             skip_validation: Skip the MAPO validation loop (for testing)
+            ideation_context: Optional structured ideation context extracted
+                from ideation artifacts via build_ideation_context().
+                When provided, enriches every pipeline phase with structured
+                data (BOM hints, explicit connections, placement hints,
+                validation criteria) instead of relying solely on text.
 
         Returns:
             PipelineResult with schematic and validation info
@@ -588,6 +601,15 @@ class MAPOSchematicPipeline:
             if self._layout_optimizer:
                 self._start_phase(SchematicPhase.LAYOUT, "Running layout optimization...")
                 logger.info("Running layout optimization...")
+
+                # Extract placement hints from ideation context
+                placement_hints = ideation_context.placement if ideation_context else None
+                if placement_hints:
+                    logger.info(
+                        f"Using placement hints: {len(placement_hints.subsystem_blocks)} subsystems, "
+                        f"signal_flow={placement_hints.signal_flow_direction}"
+                    )
+
                 for i, sheet in enumerate(sheets):
                     self._emit_progress(
                         SchematicPhase.LAYOUT,
@@ -598,7 +620,8 @@ class MAPOSchematicPipeline:
                     optimization_result = self._layout_optimizer.optimize_layout(
                         symbols=sheet.symbols,
                         connections=connection_objs if connection_objs else [],
-                        bom=bom
+                        bom=bom,
+                        placement_hints=placement_hints
                     )
                     # Apply optimized positions
                     for comp_ref, position in optimization_result.optimized_positions.items():

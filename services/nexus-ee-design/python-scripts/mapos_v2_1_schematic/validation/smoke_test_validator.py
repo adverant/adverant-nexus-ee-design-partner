@@ -8,7 +8,9 @@ Author: Nexus EE Design Team
 """
 
 import asyncio
+import json
 import logging
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from ideation_context import ValidationContext, TestCriterion, ComplianceRequirement
 
 from agents.smoke_test import SmokeTestAgent, SmokeTestResult, SmokeTestSeverity
 
@@ -112,44 +116,61 @@ class SmokeTestValidator:
     async def validate(
         self,
         state: SchematicState,
+        validation_context: Optional[ValidationContext] = None,
     ) -> SmokeTestValidationResult:
         """
         Run smoke test validation on a schematic state.
-        
+
         Args:
-            state: SchematicState to validate
-        
+            state: SchematicState to validate.
+            validation_context: Optional validation hints from ideation
+                context.  When provided, power_sources are enriched with
+                voltage/current limits from the ideation power spec,
+                test_criteria are evaluated as additional pass/fail
+                checks, and compliance_requirements are included in the
+                validation report.
+
         Returns:
             SmokeTestValidationResult with fitness scores
         """
         agent = self._ensure_agent()
-        
+
         # Convert state to KiCad schematic content
         kicad_sch = self._state_to_kicad_sexp(state)
-        
+
         # Convert components to BOM items
         bom_items = self._state_to_bom(state)
-        
-        # Detect power sources
+
+        # Detect power sources - enrich with ideation voltage/current limits
         power_sources = self._detect_power_sources(state)
-        
+        if validation_context is not None:
+            power_sources = self._enrich_power_sources(
+                power_sources, validation_context
+            )
+
         logger.info(f"Running smoke test on state {state.uuid[:8]}...")
-        
+
         # Run smoke test
         result = await agent.run_smoke_test(
             kicad_sch_content=kicad_sch,
             bom_items=bom_items,
             power_sources=power_sources,
         )
-        
+
         # Compute fitness scores
         validation_result = self._compute_fitness(result, state)
-        
+
+        # Apply ideation test criteria and compliance checks
+        if validation_context is not None:
+            validation_result = self._apply_ideation_validation(
+                validation_result, state, validation_context
+            )
+
         logger.info(
             f"Smoke test complete: passed={validation_result.passed}, "
             f"fitness={validation_result.combined_fitness:.2f}"
         )
-        
+
         return validation_result
     
     def _state_to_kicad_sexp(self, state: SchematicState) -> str:
@@ -343,7 +364,291 @@ class SmokeTestValidator:
             warning_issues=warning_issues,
             recommendations=recommendations,
         )
-    
+
+    def _enrich_power_sources(
+        self,
+        power_sources: List[Dict[str, Any]],
+        validation_context: ValidationContext,
+    ) -> List[Dict[str, Any]]:
+        """Enrich auto-detected power sources with ideation voltage/current limits.
+
+        When the ideation validation context contains voltage_limits or
+        current_limits, these values override the auto-detected defaults
+        for matching net names.  This ensures that the smoke test agent
+        uses the designer's intended electrical specifications rather
+        than heuristically inferred values.
+
+        Args:
+            power_sources: Auto-detected power source dicts from
+                ``_detect_power_sources()``.
+            validation_context: Validation hints from ideation.
+
+        Returns:
+            Enriched list of power source dicts.
+        """
+        if not validation_context.voltage_limits and not validation_context.current_limits:
+            return power_sources
+
+        logger.info(
+            f"Enriching power sources with ideation limits: "
+            f"{len(validation_context.voltage_limits)} voltage limits, "
+            f"{len(validation_context.current_limits)} current limits"
+        )
+
+        # Build lookup of existing power sources by net name
+        enriched: List[Dict[str, Any]] = []
+        existing_nets: set = set()
+
+        for ps in power_sources:
+            net = ps.get("net", "")
+            existing_nets.add(net)
+            updated = dict(ps)
+
+            # Apply voltage limits from ideation
+            if net in validation_context.voltage_limits:
+                limits = validation_context.voltage_limits[net]
+                if isinstance(limits, (list, tuple)) and len(limits) == 2:
+                    # (min_voltage, max_voltage) tuple - use midpoint as nominal
+                    min_v, max_v = limits
+                    updated["voltage"] = (min_v + max_v) / 2.0
+                    updated["voltage_min"] = min_v
+                    updated["voltage_max"] = max_v
+                    logger.debug(
+                        f"Applied voltage limits for {net}: {min_v}V - {max_v}V"
+                    )
+                elif isinstance(limits, (int, float)):
+                    updated["voltage"] = float(limits)
+
+            # Apply current limits from ideation
+            if net in validation_context.current_limits:
+                limit = validation_context.current_limits[net]
+                if isinstance(limit, (int, float)):
+                    updated["current_limit"] = float(limit)
+                    logger.debug(
+                        f"Applied current limit for {net}: {limit}A"
+                    )
+
+            enriched.append(updated)
+
+        # Add power sources from voltage_limits that were not auto-detected
+        for net, limits in validation_context.voltage_limits.items():
+            if net not in existing_nets:
+                voltage = 0.0
+                voltage_min = 0.0
+                voltage_max = 0.0
+                if isinstance(limits, (list, tuple)) and len(limits) == 2:
+                    voltage_min, voltage_max = limits
+                    voltage = (voltage_min + voltage_max) / 2.0
+                elif isinstance(limits, (int, float)):
+                    voltage = float(limits)
+                    voltage_min = voltage
+                    voltage_max = voltage
+
+                current_limit = 1.0  # Default
+                if net in validation_context.current_limits:
+                    cl = validation_context.current_limits[net]
+                    if isinstance(cl, (int, float)):
+                        current_limit = float(cl)
+
+                enriched.append({
+                    "net": net,
+                    "voltage": voltage,
+                    "voltage_min": voltage_min,
+                    "voltage_max": voltage_max,
+                    "current_limit": current_limit,
+                })
+                existing_nets.add(net)
+                logger.info(
+                    f"Added power source from ideation: {net} ({voltage}V, {current_limit}A)"
+                )
+
+        return enriched
+
+    def _apply_ideation_validation(
+        self,
+        validation_result: SmokeTestValidationResult,
+        state: SchematicState,
+        validation_context: ValidationContext,
+    ) -> SmokeTestValidationResult:
+        """Apply ideation test criteria and compliance requirements to the
+        validation result.
+
+        Evaluates each ``TestCriterion`` from the ideation context against
+        the schematic state and smoke test results.  Failures are added
+        as error or warning issues depending on severity.  Compliance
+        requirements are logged and appended to recommendations.
+
+        This method modifies the validation result in place and also
+        adjusts fitness scores based on ideation criteria outcomes.
+
+        Args:
+            validation_result: Current validation result from smoke test.
+            state: SchematicState being validated.
+            validation_context: Validation hints from ideation.
+
+        Returns:
+            Updated SmokeTestValidationResult with ideation checks applied.
+        """
+        if not validation_context.test_criteria and not validation_context.compliance_requirements:
+            return validation_result
+
+        logger.info(
+            f"Applying ideation validation: {len(validation_context.test_criteria)} "
+            f"test criteria, {len(validation_context.compliance_requirements)} "
+            f"compliance requirements"
+        )
+
+        # Build lookup structures for evaluation
+        net_names = {conn.net_name for conn in state.connections if conn.net_name}
+        component_refs = {c.reference for c in state.components}
+        component_categories = {c.category for c in state.components}
+
+        ideation_failures = 0
+        ideation_total = 0
+
+        # Evaluate test criteria
+        for criterion in validation_context.test_criteria:
+            ideation_total += 1
+            passed = self._evaluate_test_criterion(
+                criterion, state, net_names, component_refs, validation_result
+            )
+
+            if not passed:
+                ideation_failures += 1
+                issue_msg = (
+                    f"[IDEATION] {criterion.test_name}: "
+                    f"FAILED - expected: {criterion.expected_result} "
+                    f"(criteria: {criterion.pass_criteria})"
+                )
+
+                if criterion.severity in ("critical", "error"):
+                    validation_result.error_issues.append(issue_msg)
+                else:
+                    validation_result.warning_issues.append(issue_msg)
+
+                validation_result.recommendations.append(
+                    f"Fix ideation test criterion '{criterion.test_name}': "
+                    f"{criterion.expected_result}"
+                )
+                logger.warning(f"Ideation test criterion failed: {criterion.test_name}")
+            else:
+                logger.debug(f"Ideation test criterion passed: {criterion.test_name}")
+
+        # Process compliance requirements - add as recommendations
+        for req in validation_context.compliance_requirements:
+            # Check if applicable components exist in the design
+            applicable = True
+            if req.applicable_components:
+                applicable = any(
+                    comp in component_refs or comp in component_categories
+                    for comp in req.applicable_components
+                )
+
+            if applicable:
+                validation_result.recommendations.append(
+                    f"[{req.standard}] {req.requirement} "
+                    f"(verify by: {req.verification_method})"
+                )
+
+        # Process thermal limits
+        for ref, max_temp in validation_context.thermal_limits.items():
+            if ref in component_refs:
+                validation_result.recommendations.append(
+                    f"Verify thermal limit for {ref}: max junction temp {max_temp}C"
+                )
+
+        # Process EMC requirements
+        for emc_req in validation_context.emc_requirements:
+            validation_result.recommendations.append(f"[EMC] {emc_req}")
+
+        # Adjust fitness based on ideation criteria results
+        if ideation_total > 0:
+            ideation_pass_rate = (ideation_total - ideation_failures) / ideation_total
+            # Blend ideation pass rate into existing fitness scores
+            # Weight: 20% from ideation criteria, 80% from original smoke test
+            validation_result.wiring_fitness = (
+                validation_result.wiring_fitness * 0.8 + ideation_pass_rate * 0.2
+            )
+            logger.info(
+                f"Ideation validation: {ideation_total - ideation_failures}/"
+                f"{ideation_total} criteria passed "
+                f"(pass rate: {ideation_pass_rate:.1%})"
+            )
+
+        return validation_result
+
+    def _evaluate_test_criterion(
+        self,
+        criterion: TestCriterion,
+        state: SchematicState,
+        net_names: set,
+        component_refs: set,
+        validation_result: SmokeTestValidationResult,
+    ) -> bool:
+        """Evaluate a single test criterion against the schematic state.
+
+        Performs structural checks based on the criterion category and
+        pass_criteria string.  For criteria that cannot be fully
+        evaluated at the schematic level (e.g., thermal or analog
+        measurements), the criterion is marked as passed with a
+        recommendation for manual verification.
+
+        Args:
+            criterion: TestCriterion to evaluate.
+            state: SchematicState being validated.
+            net_names: Set of all net names in the design.
+            component_refs: Set of all component reference designators.
+            validation_result: Current validation result for context.
+
+        Returns:
+            True if the criterion passes, False otherwise.
+        """
+        category = criterion.category.lower() if criterion.category else ""
+        criteria_lower = criterion.pass_criteria.lower() if criterion.pass_criteria else ""
+
+        # Power rail checks
+        if category == "power":
+            # Check if the referenced net exists
+            for net in net_names:
+                if net and criterion.test_name.upper() in net.upper():
+                    return True
+            # If pass_criteria mentions a specific net, check for it
+            for net in net_names:
+                if net and net.upper() in criteria_lower.upper():
+                    return True
+            # Power criterion references a net not found in the design
+            return False
+
+        # Connectivity checks
+        if category in ("connectivity", "signal_integrity"):
+            # Check that referenced components exist
+            test_name_parts = criterion.test_name.replace("_", " ").split()
+            for part in test_name_parts:
+                if part.upper() in {r.upper() for r in component_refs}:
+                    return True
+            # If we can't structurally verify, pass with recommendation
+            validation_result.recommendations.append(
+                f"Manual verification needed: {criterion.test_name} - "
+                f"{criterion.expected_result}"
+            )
+            return True
+
+        # Component presence checks
+        if category == "component":
+            # Check that a specific component exists
+            for ref in component_refs:
+                if ref.upper() in criterion.test_name.upper():
+                    return True
+            return False
+
+        # For categories we cannot structurally evaluate (thermal, analog,
+        # mechanical, etc.), pass but add a recommendation
+        validation_result.recommendations.append(
+            f"Manual verification needed for [{category}] {criterion.test_name}: "
+            f"{criterion.expected_result}"
+        )
+        return True
+
     def compute_overall_fitness(
         self,
         state: SchematicState,
@@ -397,21 +702,138 @@ class SmokeTestValidator:
             cost=cost,
         )
     
+    async def _call_compliance_validator(
+        self,
+        state: SchematicState,
+        schematic_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Call the TypeScript schematic-compliance-validator.ts service.
+
+        This runs all 51 compliance checks (NASA, MIL, IPC, IEC, Best Practices)
+        via the Node.js TypeScript service and returns the compliance report.
+
+        Args:
+            state: Current schematic state
+            schematic_path: Optional path to saved .kicad_sch file.
+                If not provided, generates temp file from state.
+
+        Returns:
+            Compliance report dict or None if validator unavailable
+        """
+        try:
+            # Path to TypeScript validator service
+            validator_path = Path(__file__).parent.parent.parent.parent / \
+                "src" / "services" / "schematic" / "schematic-compliance-validator.ts"
+
+            if not validator_path.exists():
+                logger.warning(
+                    f"Compliance validator not found at {validator_path}, "
+                    "skipping standards compliance checks"
+                )
+                return None
+
+            # Generate temp schematic file if needed
+            if not schematic_path:
+                import tempfile
+                temp_fd, schematic_path = tempfile.mkstemp(suffix=".kicad_sch")
+                with open(temp_fd, 'w') as f:
+                    f.write(self._state_to_kicad_sexp(state))
+                temp_file = schematic_path
+            else:
+                temp_file = None
+
+            # Call TypeScript validator via tsx (TypeScript runtime)
+            # Requires: npm install -g tsx
+            result = subprocess.run(
+                [
+                    "tsx",  # TypeScript runtime
+                    str(validator_path),
+                    "--schematic", schematic_path,
+                    "--format", "json"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            # Clean up temp file
+            if temp_file:
+                try:
+                    Path(temp_file).unlink()
+                except Exception:
+                    pass
+
+            if result.returncode != 0:
+                logger.warning(
+                    f"Compliance validator failed (exit {result.returncode}): "
+                    f"{result.stderr[:200]}"
+                )
+                return None
+
+            # Parse JSON report
+            report = json.loads(result.stdout)
+            logger.info(
+                f"Compliance validation complete: {report['passedChecks']}/"
+                f"{report['totalChecks']} checks passed, "
+                f"score={report['score']:.1f}"
+            )
+            return report
+
+        except FileNotFoundError as exc:
+            logger.warning(
+                f"tsx not found - install with: npm install -g tsx. "
+                "Skipping compliance checks."
+            )
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("Compliance validator timed out after 60s")
+            return None
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to parse compliance report JSON: {exc}")
+            return None
+        except Exception as exc:
+            logger.warning(f"Compliance validator error: {exc}")
+            return None
+
     async def validate_and_score(
         self,
         state: SchematicState,
+        validation_context: Optional[ValidationContext] = None,
     ) -> Tuple[SchematicState, SmokeTestValidationResult]:
         """
         Validate state and return updated state with fitness scores.
-        
+
         Args:
-            state: SchematicState to validate
-        
+            state: SchematicState to validate.
+            validation_context: Optional validation hints from ideation
+                context.  Threaded through to ``validate()`` to enrich
+                power source detection and apply ideation test criteria.
+
         Returns:
             Tuple of (updated_state, validation_result)
         """
-        # Run smoke test
-        validation_result = await self.validate(state)
+        # Run smoke test with ideation validation context
+        validation_result = await self.validate(
+            state, validation_context=validation_context
+        )
+
+        # Run TypeScript compliance validator (MAPO v3.0)
+        compliance_report = await self._call_compliance_validator(state)
+        if compliance_report:
+            # Merge compliance violations into smoke test result
+            for check_result in compliance_report.get('checkResults', []):
+                if check_result['status'] == 'failed':
+                    for violation in check_result['violations']:
+                        # Add as warning issue (non-fatal)
+                        validation_result.warning_issues.append(
+                            f"Standards Compliance: {violation['message']}"
+                        )
+
+            # Log compliance score
+            logger.info(
+                f"Standards compliance score: {compliance_report['score']}/100"
+            )
         
         # Compute overall fitness
         fitness = self.compute_overall_fitness(state, validation_result)

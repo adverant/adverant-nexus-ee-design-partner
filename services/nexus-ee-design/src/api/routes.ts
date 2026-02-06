@@ -22,6 +22,8 @@ import { getSkillsEngineClient } from '../state.js';
 import { createSkillsRoutes } from './skills-routes.js';
 import { createHILRoutes } from './hil-routes.js';
 import { getSchematicWsManager } from './schematic-ws.js';
+import { createSymbolAssemblyRoutes } from './routes/symbol-assembly.js';
+import { createComplianceRoutes } from './routes/compliance.js';
 
 // Repository imports
 import {
@@ -4006,6 +4008,20 @@ export function createApiRoutes(io: SocketIOServer): Router {
       next(error);
     }
   });
+
+  // ============================================================================
+  // Symbol Assembly Routes (MAPO v3.0)
+  // ============================================================================
+
+  router.use('/projects/:projectId/symbol-assembly', createSymbolAssemblyRoutes());
+  log.info('Symbol assembly routes mounted');
+
+  // ============================================================================
+  // Compliance Validation Routes (MAPO v3.0)
+  // ============================================================================
+
+  router.use('/projects/:projectId/compliance', createComplianceRoutes());
+  log.info('Compliance validation routes mounted');
 
   // ============================================================================
   // HIL Testing Routes (mounted from hil-routes.ts)

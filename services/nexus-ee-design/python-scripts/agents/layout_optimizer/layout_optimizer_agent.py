@@ -18,6 +18,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Import ideation context types for placement hints
+try:
+    from ideation_context import PlacementContext, SubsystemBlock
+except ImportError:
+    PlacementContext = None
+    SubsystemBlock = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +144,7 @@ class LayoutOptimizerAgent:
         symbols: List[Any],  # List[SymbolInstance]
         connections: List[Any],  # List[Connection]
         bom: Optional[List[Dict]] = None,
+        placement_hints: Optional[Any] = None,
     ) -> OptimizationResult:
         """
         Optimize layout for a schematic sheet.
@@ -145,6 +153,10 @@ class LayoutOptimizerAgent:
             symbols: List of SymbolInstance objects
             connections: List of Connection objects
             bom: Optional BOM with component categories
+            placement_hints: Optional PlacementContext from ideation
+                artifacts. When provided, subsystem blocks, signal flow
+                direction, critical proximity pairs, and isolation zones
+                override the default category-based zone assignments.
 
         Returns:
             OptimizationResult with before/after positions

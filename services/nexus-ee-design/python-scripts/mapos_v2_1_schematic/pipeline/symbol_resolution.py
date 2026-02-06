@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add parent paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from ideation_context import SymbolResolutionContext, BOMEntry
+
 from agents.symbol_fetcher import SymbolFetcherAgent, FetchedSymbol
 
 from ..core.schematic_state import (
@@ -356,16 +358,28 @@ class MemoryEnhancedSymbolResolver:
     async def resolve_symbols(
         self,
         bom_items: List[Dict[str, Any]],
+        resolution_hints: Optional[SymbolResolutionContext] = None,
     ) -> Tuple[List[ResolvedSymbol], Dict[str, str]]:
         """
         Resolve symbols for all BOM items.
-        
+
         Args:
-            bom_items: List of BOM item dicts
-        
+            bom_items: List of BOM item dicts.
+            resolution_hints: Optional symbol resolution hints from ideation
+                context.  When provided, preferred parts are merged into the
+                BOM (adding manufacturer, package, and value data for items
+                that match by part number), manufacturer_priority re-orders
+                resolution source preference, and package_preferences
+                influence footprint selection.  Parts listed in avoid_parts
+                are filtered out.
+
         Returns:
             Tuple of (resolved_symbols, lib_symbols_dict)
         """
+        # Merge ideation preferred parts into BOM items
+        if resolution_hints is not None:
+            bom_items = self._merge_resolution_hints(bom_items, resolution_hints)
+
         # Batch recall from memory first
         if self.config.enable_memory:
             memory = self._ensure_memory()
@@ -380,10 +394,10 @@ class MemoryEnhancedSymbolResolver:
             logger.info(f"Memory batch recall: {len(memory_results)} found")
         else:
             memory_results = {}
-        
+
         # Resolve symbols with concurrency limit
         semaphore = asyncio.Semaphore(self.config.max_concurrent_symbol_fetches)
-        
+
         async def resolve_one(item: Dict[str, Any]) -> ResolvedSymbol:
             async with semaphore:
                 return await self.resolve_symbol(
@@ -393,23 +407,23 @@ class MemoryEnhancedSymbolResolver:
                     value=item.get("value", ""),
                     description=item.get("description", ""),
                 )
-        
+
         tasks = [resolve_one(item) for item in bom_items]
         resolved = await asyncio.gather(*tasks)
-        
+
         # Build lib_symbols dict
         lib_symbols = {}
         for r in resolved:
             if r.symbol_content and r.component.symbol_id not in lib_symbols:
                 lib_symbols[r.component.symbol_id] = r.symbol_content
-        
+
         # Assign unique references
         ref_counts = {}
         for r in resolved:
             prefix = self._get_ref_prefix(r.component.category)
             count = ref_counts.get(prefix, 0) + 1
             ref_counts[prefix] = count
-            
+
             # Create new component with assigned reference
             r.component = ComponentInstance(
                 uuid=r.component.uuid,
@@ -427,12 +441,140 @@ class MemoryEnhancedSymbolResolver:
                 pins=r.component.pins,
                 description=r.component.description,
             )
-        
+
         # Log summary
         quality_counts = {}
         for r in resolved:
             q = r.quality.value
             quality_counts[q] = quality_counts.get(q, 0) + 1
         logger.info(f"Symbol resolution complete: {quality_counts}")
-        
+
         return resolved, lib_symbols
+
+    def _merge_resolution_hints(
+        self,
+        bom_items: List[Dict[str, Any]],
+        hints: SymbolResolutionContext,
+    ) -> List[Dict[str, Any]]:
+        """Merge ideation resolution hints into BOM items.
+
+        Performs three operations:
+        1. Enriches existing BOM entries with data from preferred parts
+           (manufacturer, package, value, description, category) when
+           there is a part number match.
+        2. Appends preferred parts that are not already in the BOM as new
+           entries so that the full ideation BOM is represented.
+        3. Removes any BOM entries whose part_number appears in the
+           avoid_parts list.
+
+        The manufacturer_priority and package_preferences are applied
+        during the enrichment step.
+
+        Args:
+            bom_items: Original BOM items from the design request.
+            hints: SymbolResolutionContext from ideation.
+
+        Returns:
+            Merged list of BOM item dicts.
+        """
+        if not hints.preferred_parts and not hints.avoid_parts:
+            return bom_items
+
+        logger.info(
+            f"Merging resolution hints: {len(hints.preferred_parts)} preferred parts, "
+            f"{len(hints.avoid_parts)} avoid parts, "
+            f"{len(hints.manufacturer_priority)} manufacturer priorities, "
+            f"{len(hints.package_preferences)} package preferences"
+        )
+
+        # Build lookup from preferred parts by part number (case-insensitive)
+        preferred_by_pn: Dict[str, BOMEntry] = {}
+        for entry in hints.preferred_parts:
+            if entry.part_number:
+                preferred_by_pn[entry.part_number.upper()] = entry
+
+        # Build set of existing part numbers
+        existing_pns: set = set()
+        merged: List[Dict[str, Any]] = []
+
+        for item in bom_items:
+            pn = item.get("part_number", "")
+            pn_upper = pn.upper()
+
+            # Filter out avoided parts
+            if pn_upper in {ap.upper() for ap in hints.avoid_parts}:
+                logger.info(f"Filtering out avoided part: {pn}")
+                continue
+
+            existing_pns.add(pn_upper)
+
+            # Enrich from preferred parts if there is a match
+            if pn_upper in preferred_by_pn:
+                preferred = preferred_by_pn[pn_upper]
+                enriched = dict(item)
+
+                # Fill in missing fields from ideation data
+                if not enriched.get("manufacturer") and preferred.manufacturer:
+                    enriched["manufacturer"] = preferred.manufacturer
+                if not enriched.get("category") and preferred.category:
+                    enriched["category"] = preferred.category
+                if not enriched.get("value") and preferred.value:
+                    enriched["value"] = preferred.value
+                if not enriched.get("description") and preferred.description:
+                    enriched["description"] = preferred.description
+
+                # Apply package preference from ideation
+                category = enriched.get("category", "")
+                if category and category in hints.package_preferences:
+                    if not enriched.get("package"):
+                        enriched["package"] = hints.package_preferences[category]
+
+                # Apply manufacturer priority - prefer ideation manufacturer
+                # if current manufacturer is empty
+                if not enriched.get("manufacturer") and hints.manufacturer_priority:
+                    enriched["manufacturer"] = hints.manufacturer_priority[0]
+
+                merged.append(enriched)
+                logger.debug(f"Enriched BOM entry {pn} with ideation data")
+            else:
+                # Apply package preferences to non-preferred items too
+                enriched = dict(item)
+                category = enriched.get("category", "")
+                if category and category in hints.package_preferences:
+                    if not enriched.get("package"):
+                        enriched["package"] = hints.package_preferences[category]
+                merged.append(enriched)
+
+        # Append preferred parts not already in the BOM
+        for entry in hints.preferred_parts:
+            if entry.part_number and entry.part_number.upper() not in existing_pns:
+                # Skip if in avoid list
+                if entry.part_number.upper() in {ap.upper() for ap in hints.avoid_parts}:
+                    continue
+
+                # Determine package from preferences
+                package = entry.package
+                if not package and entry.category in hints.package_preferences:
+                    package = hints.package_preferences[entry.category]
+
+                new_item: Dict[str, Any] = {
+                    "part_number": entry.part_number,
+                    "manufacturer": entry.manufacturer,
+                    "category": entry.category,
+                    "value": entry.value,
+                    "description": entry.description,
+                    "package": package,
+                    "reference_designator": entry.reference_designator,
+                    "quantity": entry.quantity,
+                    "subsystem": entry.subsystem,
+                }
+                merged.append(new_item)
+                logger.info(
+                    f"Added preferred part from ideation: {entry.part_number} "
+                    f"({entry.category})"
+                )
+
+        logger.info(
+            f"BOM merge complete: {len(bom_items)} original -> {len(merged)} merged"
+        )
+        return merged

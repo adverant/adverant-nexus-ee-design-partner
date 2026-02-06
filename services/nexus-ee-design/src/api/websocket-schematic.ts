@@ -63,6 +63,21 @@ export enum SchematicEventType {
   EXPORT_PROGRESS = 'export_progress',
   EXPORT_COMPLETE = 'export_complete',
 
+  // Compliance Checklist events (MAPO v3.0)
+  CHECKLIST_ITEM_START = 'checklist_item_start',
+  CHECKLIST_ITEM_PASS = 'checklist_item_pass',
+  CHECKLIST_ITEM_FAIL = 'checklist_item_fail',
+  CHECKLIST_BATCH_UPDATE = 'checklist_batch_update',
+  COMPLIANCE_SCORE_UPDATE = 'compliance_score_update',
+
+  // Symbol Assembly events (MAPO v3.0)
+  SYMBOL_ASSEMBLY_START = 'symbol_assembly_start',
+  SYMBOL_ASSEMBLY_SEARCH = 'symbol_assembly_search',
+  SYMBOL_ASSEMBLY_FOUND = 'symbol_assembly_found',
+  SYMBOL_ASSEMBLY_GENERATED = 'symbol_assembly_generated',
+  SYMBOL_ASSEMBLY_DATASHEET = 'symbol_assembly_datasheet',
+  SYMBOL_ASSEMBLY_COMPLETE = 'symbol_assembly_complete',
+
   // Final states
   COMPLETE = 'complete',
   ERROR = 'error',
@@ -79,6 +94,7 @@ export type SchematicPhase =
   | 'assembly'
   | 'smoke_test'
   | 'gaming_ai'
+  | 'standards'
   | 'validation'
   | 'export';
 
@@ -140,6 +156,51 @@ export interface SchematicProgressEvent {
   /** Error details (for ERROR type) */
   error_message?: string;
   error_code?: string;
+
+  /** Compliance checklist update (MAPO v3.0) */
+  checklist_update?: {
+    checkId: string;
+    status: 'checking' | 'passed' | 'failed';
+    title?: string;
+    result?: {
+      passed: boolean;
+      score: number;
+      message: string;
+      violations?: Array<{
+        id: string;
+        componentRef?: string;
+        netName?: string;
+        message: string;
+        suggestion?: string;
+      }>;
+    };
+  };
+
+  /** Compliance batch update (MAPO v3.0) */
+  checklist_batch?: {
+    updates: Array<{
+      checkId: string;
+      status: 'passed' | 'failed' | 'skipped';
+      result?: { passed: boolean; score: number; message: string };
+    }>;
+    overallScore: number;
+  };
+
+  /** Compliance score (MAPO v3.0) */
+  compliance_score?: {
+    overallScore: number;
+    passRate: number;
+    criticalFailures: number;
+  };
+
+  /** Symbol assembly progress (MAPO v3.0) */
+  symbol_assembly?: {
+    componentName?: string;
+    source?: string;
+    status?: 'searching' | 'found' | 'generated' | 'error';
+    totalComponents?: number;
+    completedComponents?: number;
+  };
 
   /** Additional data */
   data?: Record<string, unknown>;
@@ -216,15 +277,16 @@ export function createProgressEvent(
  * Used to calculate overall progress from phase progress
  */
 export const PHASE_PROGRESS_RANGES: Record<SchematicPhase, [number, number]> = {
-  symbols: [0, 30],
-  connections: [30, 50],
-  layout: [50, 60],
-  wiring: [60, 70],
-  assembly: [70, 80],
-  smoke_test: [80, 90],
-  gaming_ai: [90, 95], // Only if smoke test fails
-  validation: [90, 95], // Overlaps with gaming_ai (one or the other)
-  export: [95, 100],
+  symbols: [0, 25],
+  connections: [25, 45],
+  layout: [45, 55],
+  wiring: [55, 65],
+  assembly: [65, 72],
+  smoke_test: [72, 80],
+  gaming_ai: [80, 87], // Only if smoke test fails
+  standards: [80, 87], // Compliance checks (overlaps with gaming_ai)
+  validation: [87, 93],
+  export: [93, 100],
 };
 
 /**

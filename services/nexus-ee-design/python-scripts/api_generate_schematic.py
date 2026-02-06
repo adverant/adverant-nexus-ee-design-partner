@@ -35,6 +35,8 @@ from mapo_schematic_pipeline import (
     PipelineResult,
 )
 from progress_emitter import ProgressEmitter, init_progress
+from ideation_context import IdeationContext
+from ideation_extractors import build_ideation_context, ExtractionError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -283,11 +285,33 @@ async def run_generation(
             progress_emitter = init_progress(operation_id)
             logger.info(f"Progress streaming enabled for operation: {operation_id}")
 
-        # Log ideation artifacts if provided
+        # Build structured IdeationContext from artifacts (replaces create_design_intent)
+        ideation_context: Optional[IdeationContext] = None
         if ideation_artifacts:
-            logger.info(f"Using {len(ideation_artifacts)} ideation artifacts for context")
+            logger.info(f"Building IdeationContext from {len(ideation_artifacts)} ideation artifacts")
             for artifact in ideation_artifacts:
                 logger.info(f"  - {artifact.get('name', 'unknown')} ({artifact.get('artifact_type', 'unknown')})")
+            try:
+                ideation_context = await build_ideation_context(
+                    raw_artifacts=ideation_artifacts,
+                    subsystems=subsystems or [],
+                    project_name=project_name,
+                )
+                logger.info(
+                    f"IdeationContext built: bom={ideation_context.has_bom_artifacts}, "
+                    f"connections={ideation_context.has_connection_hints}, "
+                    f"placement={ideation_context.has_placement_hints}, "
+                    f"validation={ideation_context.has_validation_criteria}"
+                )
+            except ExtractionError as exc:
+                logger.error(f"IdeationContext extraction failed: {exc}")
+                return {
+                    "success": False,
+                    "error": f"Ideation artifact extraction failed: {exc}",
+                    "schematic_content": "",
+                    "component_count": 0,
+                    "errors": [str(exc)],
+                }
 
         # Generate BOM from subsystems if not provided
         if bom is None and subsystems:
@@ -297,9 +321,12 @@ async def run_generation(
             bom = []
             logger.warning("No BOM or subsystems provided, generating minimal schematic")
 
-        # Generate design intent if not provided, using ideation artifacts for context
+        # Use IdeationContext design_intent_text for backward compat, or legacy create_design_intent
         if design_intent is None:
-            design_intent = create_design_intent(subsystems or [], project_name, ideation_artifacts)
+            if ideation_context:
+                design_intent = ideation_context.design_intent_text
+            else:
+                design_intent = create_design_intent(subsystems or [], project_name, ideation_artifacts)
 
         # Configure output directory
         if output_dir:
@@ -335,7 +362,8 @@ async def run_generation(
                 bom=bom,
                 design_intent=design_intent,
                 design_name=design_name,
-                skip_validation=skip_validation
+                skip_validation=skip_validation,
+                ideation_context=ideation_context,
             )
         finally:
             await pipeline.close()
@@ -486,14 +514,16 @@ async def run_generation_v2_1(
     max_iterations: int = 100,
     output_dir: Optional[str] = None,
     project_id: Optional[str] = None,
+    ideation_artifacts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Run MAPO v2.1 schematic generation with:
+    Run MAPO v3.0 schematic generation with:
+    - Deep ideation artifact integration via IdeationContext
     - LLM-orchestrated Gaming AI optimization
     - Nexus-memory learning for symbols and wiring
     - Smoke test validation
     - Quality-diversity optimization via MAP-Elites + Red Queen
-    
+
     Args:
         bom: Explicit BOM list
         subsystems: List of subsystem definitions (will be converted to BOM)
@@ -504,7 +534,8 @@ async def run_generation_v2_1(
         max_iterations: Max Gaming AI iterations
         output_dir: Custom output directory
         project_id: Project ID for organization
-    
+        ideation_artifacts: List of ideation artifacts for structured context
+
     Returns:
         Dictionary with generation results
     """
@@ -513,7 +544,26 @@ async def run_generation_v2_1(
             SchematicMAPOOptimizer,
             SchematicMAPOConfig,
         )
-        
+
+        # Build structured IdeationContext from artifacts
+        ideation_context: Optional[IdeationContext] = None
+        if ideation_artifacts:
+            logger.info(f"Building IdeationContext for v3.0 from {len(ideation_artifacts)} artifacts")
+            try:
+                ideation_context = await build_ideation_context(
+                    raw_artifacts=ideation_artifacts,
+                    subsystems=subsystems or [],
+                    project_name=project_name,
+                )
+            except ExtractionError as exc:
+                logger.error(f"IdeationContext extraction failed: {exc}")
+                return {
+                    "success": False,
+                    "error": f"Ideation artifact extraction failed: {exc}",
+                    "version": "3.0",
+                    "errors": [str(exc)],
+                }
+
         # Generate BOM from subsystems if not provided
         if bom is None and subsystems:
             bom = create_foc_esc_bom(subsystems)
@@ -521,10 +571,13 @@ async def run_generation_v2_1(
         elif bom is None:
             bom = []
             logger.warning("No BOM or subsystems provided")
-        
-        # Generate design intent if not provided
+
+        # Generate design intent: prefer IdeationContext, fallback to legacy
         if design_intent is None:
-            design_intent = create_design_intent(subsystems or [], project_name)
+            if ideation_context:
+                design_intent = ideation_context.design_intent_text
+            else:
+                design_intent = create_design_intent(subsystems or [], project_name)
         
         # Configure output directory
         if output_dir:
@@ -551,14 +604,15 @@ async def run_generation_v2_1(
                 design_name=design_name,
                 design_type=design_type,
                 max_iterations=max_iterations,
+                ideation_context=ideation_context,
             )
         finally:
             await optimizer.close()
-        
+
         # Build response
         response = {
             "success": result.success,
-            "version": "2.1",
+            "version": "3.0",
             "schematic_path": str(result.schematic_path) if result.schematic_path else None,
             "schematic_content": result.schematic_content,
             "component_count": result.symbols_resolved,
@@ -584,14 +638,14 @@ async def run_generation_v2_1(
         return {
             "success": False,
             "error": f"MAPO v2.1 not available: {e}",
-            "version": "2.1",
+            "version": "3.0",
         }
     except Exception as e:
         logger.error(f"MAPO v2.1 generation failed: {e}", exc_info=True)
         return {
             "success": False,
             "error": str(e),
-            "version": "2.1",
+            "version": "3.0",
             "errors": [str(e)],
         }
 

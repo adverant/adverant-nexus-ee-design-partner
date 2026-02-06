@@ -21,6 +21,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+# Import ideation context types for seed connections
+try:
+    from ideation_context import ConnectionInferenceContext, PinConnection, InterfaceDefinition, PowerRail
+except ImportError:
+    ConnectionInferenceContext = None
+    PinConnection = None
+    InterfaceDefinition = None
+    PowerRail = None
+
 logger = logging.getLogger(__name__)
 
 # OpenRouter configuration (following mageagent pattern)
@@ -139,6 +148,7 @@ class ConnectionGeneratorAgent:
         bom: List[Dict[str, Any]],
         design_intent: str,
         component_pins: Optional[Dict[str, List[Dict]]] = None,
+        seed_connections: Optional[Any] = None,
     ) -> List[GeneratedConnection]:
         """
         Generate connections for a circuit based on BOM and design intent.
@@ -147,6 +157,9 @@ class ConnectionGeneratorAgent:
             bom: List of BOM items with part_number, category, reference, etc.
             design_intent: Natural language description of circuit function
             component_pins: Optional dict of reference -> list of pins
+            seed_connections: Optional ConnectionInferenceContext from ideation
+                artifacts. When provided, explicit connections, interfaces,
+                and power rails are used as seeds that the LLM must honor.
 
         Returns:
             List of GeneratedConnection objects
