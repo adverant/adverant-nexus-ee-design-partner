@@ -45,7 +45,6 @@ export {
   callLLMWithValidation,
   callLLMStreaming,
   callClaudeOpus,
-  callClaudeOpus,
   callGeminiFlash,
   callGeminiPro,
   estimateTokens,

@@ -730,7 +730,6 @@ export default {
   callLLMWithValidation,
   callLLMStreaming,
   callClaudeOpus,
-  callClaudeOpus,
   callGeminiFlash,
   callGeminiPro,
   estimateTokens,
