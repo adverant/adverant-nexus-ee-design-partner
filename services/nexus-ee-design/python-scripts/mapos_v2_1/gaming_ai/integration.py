@@ -118,7 +118,7 @@ class MAPOSRQConfig:
 
     # LLM settings (ENABLED by default)
     use_llm: bool = True
-    llm_model: str = "anthropic/claude-opus-4.5"
+    llm_model: str = "anthropic/claude-opus-4.6"
     openrouter_api_key: Optional[str] = None
 
     # Optional GPU backend

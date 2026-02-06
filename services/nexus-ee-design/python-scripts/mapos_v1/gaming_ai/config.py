@@ -214,7 +214,7 @@ class GamingAIConfig:
     Example usage:
         config = GamingAIConfig(
             mode=OptimizationMode.HYBRID,
-            llm=LLMConfig(model="anthropic/claude-opus-4.5"),
+            llm=LLMConfig(model="anthropic/claude-opus-4.6"),
         )
     """
 
@@ -333,7 +333,7 @@ class GamingAIConfig:
         llm_data = data.get("llm", {})
         llm_config = LLMConfig(
             provider=llm_data.get("provider", "openrouter"),
-            model=llm_data.get("model", "anthropic/claude-opus-4.5"),
+            model=llm_data.get("model", "anthropic/claude-opus-4.6"),
             max_tokens=llm_data.get("max_tokens", 4096),
             temperature=llm_data.get("temperature", 0.7),
         )
@@ -394,7 +394,7 @@ class GamingAIConfig:
             use_llm=os.environ.get("GAMING_AI_USE_LLM", "true").lower() == "true",
             use_neural_networks=os.environ.get("GAMING_AI_USE_NN", "false").lower() == "true",
             llm=LLMConfig(
-                model=os.environ.get("GAMING_AI_LLM_MODEL", "anthropic/claude-opus-4.5"),
+                model=os.environ.get("GAMING_AI_LLM_MODEL", "anthropic/claude-opus-4.6"),
             ),
             neural_network=NeuralNetworkConfig(
                 provider=InferenceProvider(os.environ.get("GAMING_AI_GPU_PROVIDER", "none")),

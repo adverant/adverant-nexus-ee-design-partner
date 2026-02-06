@@ -2,13 +2,13 @@
 MAPO v2.0 Layer Assignment Strategist Agent
 
 LLM agent that provides strategic guidance for layer assignments.
-Uses Claude Opus 4.5 via OpenRouter for semantic reasoning about:
+Uses Claude Opus 4.6 via OpenRouter for semantic reasoning about:
 - Net-to-layer mapping
 - Via minimization strategies
 - Signal integrity layer considerations
 - Power/ground plane utilization
 
-Author: Claude Opus 4.5 via MAPO v2.0
+Author: Claude Opus 4.6 via MAPO v2.0
 """
 
 import asyncio
@@ -77,7 +77,7 @@ class LayerHintsResult:
 
 class LayerAssignmentStrategistAgent:
     """
-    Opus 4.5 agent for layer assignment strategy.
+    Opus 4.6 agent for layer assignment strategy.
 
     Analyzes net characteristics and provides strategic hints for:
     - Which layers each net should use

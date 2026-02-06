@@ -476,7 +476,7 @@ class ProgressTracker:
                 "Consider different fix strategy - current approach not improving score"
             )
             recommendations.append(
-                "Review Opus 4.5 analysis for missed issues"
+                "Review Opus 4.6 analysis for missed issues"
             )
 
         if self.best_iteration < len(self.history) - 1:

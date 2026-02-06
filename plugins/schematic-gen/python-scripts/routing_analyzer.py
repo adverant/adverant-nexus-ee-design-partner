@@ -2,7 +2,7 @@
 """
 Routing Analyzer - PCB Trace Routing Quality Analysis
 
-Analyzes PCB copper layer images for routing quality using Claude Opus 4.5
+Analyzes PCB copper layer images for routing quality using Claude Opus 4.6
 via OpenRouter API (not direct Anthropic SDK):
 - 45° vs 90° angle detection
 - Trace overlap detection
@@ -238,7 +238,7 @@ Be thorough and specific. Count visible issues where possible.
 An amateur design MUST be clearly identified as such."""
 
         response = self.client.messages.create(
-            model="claude-opus-4-5-20251101",
+            model="claude-opus-4-6-20260206",
             max_tokens=4096,
             system=system_prompt,
             messages=[{

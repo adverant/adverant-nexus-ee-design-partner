@@ -682,23 +682,23 @@ function sleep(ms: number): Promise<void> {
 // ============================================================================
 
 /**
- * Quick call with Claude Opus 4 (highest quality)
+ * Quick call with Claude Opus 4.6 (highest quality)
  */
 export async function callClaudeOpus(
   messages: LLMMessage[],
   options: Omit<LLMOptions, 'model'> = {}
 ): Promise<LLMResponse> {
-  return callLLM(messages, { ...options, model: 'anthropic/claude-opus-4' });
+  return callLLM(messages, { ...options, model: 'anthropic/claude-opus-4.6' });
 }
 
 /**
- * Quick call with Claude Sonnet 4 (balanced)
+ * Quick call with Claude Opus 4.6 (balanced)
  */
-export async function callClaudeSonnet(
+export async function callClaudeOpus(
   messages: LLMMessage[],
   options: Omit<LLMOptions, 'model'> = {}
 ): Promise<LLMResponse> {
-  return callLLM(messages, { ...options, model: 'anthropic/claude-sonnet-4' });
+  return callLLM(messages, { ...options, model: 'anthropic/claude-opus-4.6' });
 }
 
 /**
@@ -740,7 +740,7 @@ export default {
   callLLMWithValidation,
   callLLMStreaming,
   callClaudeOpus,
-  callClaudeSonnet,
+  callClaudeOpus,
   callGeminiFlash,
   callGeminiPro,
   estimateTokens,

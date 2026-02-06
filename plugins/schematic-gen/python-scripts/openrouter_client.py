@@ -3,7 +3,7 @@
 OpenRouter Client for Visual Validation
 
 Python client for OpenRouter API, following the same pattern as MageAgent's
-TypeScript OpenRouterClient. Uses Claude Opus 4.5 for visual validation tasks.
+TypeScript OpenRouterClient. Uses Claude Opus 4.6 for visual validation tasks.
 
 Environment Variables:
     OPENROUTER_API_KEY: Required - Your OpenRouter API key
@@ -42,9 +42,9 @@ except ImportError:
 from validation_exceptions import MissingDependencyFailure
 
 
-# Model configuration - using Claude Opus 4.5 as specified
+# Model configuration - using Claude Opus 4.6 as specified
 # OpenRouter uses simplified model IDs (not the full Anthropic model names)
-CLAUDE_OPUS_MODEL = "anthropic/claude-opus-4.5"
+CLAUDE_OPUS_MODEL = "anthropic/claude-opus-4.6"
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 # Common .env file locations to check for API key
@@ -112,7 +112,7 @@ class OpenRouterClient:
     Mirrors the MageAgent OpenRouterClient pattern:
     - Uses OPENROUTER_API_KEY environment variable
     - Supports vision/multimodal requests
-    - Only uses paid models (Claude Opus 4.5)
+    - Only uses paid models (Claude Opus 4.6)
     - Includes retry logic with exponential backoff
     """
 
@@ -130,7 +130,7 @@ class OpenRouterClient:
         Args:
             api_key: OpenRouter API key (defaults to OPENROUTER_API_KEY env var)
             base_url: OpenRouter API base URL
-            model: Model to use (defaults to Claude Opus 4.5)
+            model: Model to use (defaults to Claude Opus 4.6)
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts
 
@@ -432,7 +432,7 @@ def get_openrouter_client(
 
     Args:
         api_key: Optional API key (defaults to env var)
-        model: Model to use (defaults to Claude Opus 4.5)
+        model: Model to use (defaults to Claude Opus 4.6)
 
     Returns:
         Configured OpenRouterClient

@@ -69,7 +69,7 @@ const DEFAULT_CONFIG: ConsensusConfig = {
       name: 'Claude Opus 4',
       type: 'llm',
       provider: 'anthropic',
-      model: 'claude-opus-4-5-20251101',
+      model: 'claude-opus-4-6-20260206',
       weight: 0.4,
       enabled: true,
       timeout: 60000

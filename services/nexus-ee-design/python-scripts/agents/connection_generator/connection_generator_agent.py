@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # OpenRouter configuration (following mageagent pattern)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.5"
+OPENROUTER_MODEL = "anthropic/claude-opus-4.6"
 
 
 class ConnectionType(Enum):
@@ -177,7 +177,7 @@ class ConnectionGeneratorAgent:
                 components, design_intent
             )
             if signal_connections:
-                logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.5)")
+                logger.info(f"Generated {len(signal_connections)} signal connections via LLM (Opus 4.6)")
         except Exception as e:
             llm_error = str(e)
             # FAIL FAST - Do not attempt fallback, provide verbose diagnostic
@@ -191,7 +191,7 @@ class ConnectionGeneratorAgent:
                 f"1) OPENROUTER_API_KEY env var: {'SET' if os.environ.get('OPENROUTER_API_KEY') else 'MISSING - THIS IS LIKELY THE CAUSE'}. "
                 f"2) Network connectivity: Check if pod can reach openrouter.ai. "
                 f"3) API quota: Check OpenRouter dashboard for rate limits. "
-                f"4) Model availability: anthropic/claude-opus-4.5 may be unavailable. "
+                f"4) Model availability: anthropic/claude-opus-4.6 may be unavailable. "
                 f"NO FALLBACK - Schematic generation cannot proceed without LLM connections."
             )
             logger.error(error_msg)
@@ -556,7 +556,7 @@ class ConnectionGeneratorAgent:
         components: List[ComponentInfo],
         design_intent: str
     ) -> List[GeneratedConnection]:
-        """Use LLM (Opus 4.5 via OpenRouter) to infer signal connections from design intent.
+        """Use LLM (Opus 4.6 via OpenRouter) to infer signal connections from design intent.
 
         Following mageagent pattern: uses httpx with OpenRouter /chat/completions endpoint.
         """

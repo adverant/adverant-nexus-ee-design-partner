@@ -273,8 +273,8 @@ Identify deviations from reference designs that may cause issues."""
 
     def __init__(
         self,
-        primary_model: str = "anthropic/claude-opus-4.5",
-        verification_model: str = "anthropic/claude-opus-4.5",
+        primary_model: str = "anthropic/claude-opus-4.6",
+        verification_model: str = "anthropic/claude-opus-4.6",
         api_key: Optional[str] = None
     ):
         """
@@ -298,8 +298,8 @@ Identify deviations from reference designs that may cause issues."""
                 base_url="https://openrouter.ai/api/v1"
             )
             # Map to OpenRouter model names
-            self.primary_model = "anthropic/claude-sonnet-4"  # Faster for validation
-            self.verification_model = "anthropic/claude-opus-4.5"  # Best for fixes
+            self.primary_model = "anthropic/claude-opus-4.6"  # Faster for validation
+            self.verification_model = "anthropic/claude-opus-4.6"  # Best for fixes
             logger.info("Vision validator using OpenRouter")
         elif anthropic_key:
             self.client = anthropic.Anthropic(api_key=anthropic_key)

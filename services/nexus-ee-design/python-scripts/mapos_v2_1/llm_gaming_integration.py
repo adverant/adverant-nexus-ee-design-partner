@@ -7,9 +7,9 @@ Bridges the LLM orchestration layer with Gaming AI algorithms:
 - Debate mechanism validates tournament matchups and champion selection
 - LLM extracts behavioral descriptors with domain understanding
 
-Core Philosophy: "Opus 4.5 Thinks, Gaming AI Explores, Algorithms Execute"
+Core Philosophy: "Opus 4.6 Thinks, Gaming AI Explores, Algorithms Execute"
 
-Author: Claude Opus 4.5 via MAPO v2.1
+Author: Claude Opus 4.6 via MAPO v2.1
 """
 
 import asyncio

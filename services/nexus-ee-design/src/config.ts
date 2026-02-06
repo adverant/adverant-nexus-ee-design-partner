@@ -54,7 +54,7 @@ const ConfigSchema = z.object({
   llm: z.object({
     openrouterApiKey: z.string().default(''),
     anthropicApiKey: z.string().default(''),
-    primaryModel: z.string().default('anthropic/claude-opus-4'),
+    primaryModel: z.string().default('anthropic/claude-opus-4.6'),
     validationModel: z.string().default('google/gemini-2.5-pro'),
     fastModel: z.string().default('anthropic/claude-3-5-haiku'),
   }),
@@ -260,7 +260,7 @@ function loadConfig(): Config {
     llm: {
       openrouterApiKey: process.env.OPENROUTER_API_KEY || '',
       anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
-      primaryModel: process.env.PRIMARY_LLM_MODEL || 'anthropic/claude-opus-4',
+      primaryModel: process.env.PRIMARY_LLM_MODEL || 'anthropic/claude-opus-4.6',
       validationModel: process.env.VALIDATION_LLM_MODEL || 'google/gemini-2.5-pro',
       fastModel: process.env.FAST_LLM_MODEL || 'anthropic/claude-3-5-haiku',
     },

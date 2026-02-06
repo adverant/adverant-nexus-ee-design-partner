@@ -31,8 +31,8 @@ export interface LLMImage {
 // ============================================================================
 
 export type SupportedModel =
-  | 'anthropic/claude-sonnet-4'
-  | 'anthropic/claude-opus-4'
+  | 'anthropic/claude-opus-4.6'
+  | 'anthropic/claude-opus-4.6'
   | 'google/gemini-2.0-flash'
   | 'google/gemini-2.5-pro'
   | 'anthropic/claude-3-5-haiku';
@@ -50,8 +50,8 @@ export interface ModelConfig {
 }
 
 export const MODEL_CONFIGS: Record<SupportedModel, ModelConfig> = {
-  'anthropic/claude-opus-4': {
-    id: 'anthropic/claude-opus-4',
+  'anthropic/claude-opus-4.6': {
+    id: 'anthropic/claude-opus-4.6',
     displayName: 'Claude Opus 4',
     contextWindow: 200000,
     maxOutputTokens: 32000,
@@ -61,9 +61,9 @@ export const MODEL_CONFIGS: Record<SupportedModel, ModelConfig> = {
     supportsStreaming: true,
     bestFor: ['complex reasoning', 'design review', 'architecture decisions'],
   },
-  'anthropic/claude-sonnet-4': {
-    id: 'anthropic/claude-sonnet-4',
-    displayName: 'Claude Sonnet 4',
+  'anthropic/claude-opus-4.6': {
+    id: 'anthropic/claude-opus-4.6',
+    displayName: 'Claude Opus 4.6',
     contextWindow: 200000,
     maxOutputTokens: 16000,
     inputCostPer1k: 0.003,

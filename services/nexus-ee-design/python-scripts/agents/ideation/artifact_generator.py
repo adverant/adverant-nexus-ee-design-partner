@@ -2,7 +2,7 @@
 Ideation Artifact Generator Agent.
 
 LLM-powered generation of pre-schematic design documentation.
-Uses Claude Opus 4.5 or other LLMs via OpenRouter to generate
+Uses Claude Opus 4.6 or other LLMs via OpenRouter to generate
 comprehensive design artifacts that provide context for schematic generation.
 
 Author: Nexus EE Design Team
@@ -77,7 +77,7 @@ class GeneratedArtifact:
 @dataclass
 class GenerationConfig:
     """Configuration for artifact generation."""
-    model: str = "anthropic/claude-sonnet-4"
+    model: str = "anthropic/claude-opus-4.6"
     max_tokens: int = 8192
     temperature: float = 0.3
     timeout_seconds: int = 120

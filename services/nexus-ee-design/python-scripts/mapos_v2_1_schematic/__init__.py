@@ -2,13 +2,13 @@
 MAPO v2.1 Schematic - LLM-Orchestrated Gaming AI for Schematic Generation
 
 A unified schematic generation system that combines:
-1. LLM Orchestration (Opus 4.5 via OpenRouter) for intelligent decision-making
+1. LLM Orchestration (Opus 4.6 via OpenRouter) for intelligent decision-making
 2. Nexus-Memory/GraphRAG for self-improving symbol resolution and design learning
 3. Gaming AI (MAP-Elites, Red Queen, Ralph Wiggum) for quality-diversity optimization
 4. SPICE Smoke Test to validate schematics work before output
 5. Proper Wiring via ConnectionGeneratorAgent + EnhancedWireRouter
 
-Philosophy: "Opus 4.5 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
+Philosophy: "Opus 4.6 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
 
 Usage:
     from mapos_v2_1_schematic import SchematicMAPOOptimizer, SchematicMAPOConfig

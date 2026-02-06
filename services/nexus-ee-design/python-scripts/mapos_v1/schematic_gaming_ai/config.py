@@ -163,7 +163,7 @@ class SchematicGamingAIConfig:
     mode: SchematicOptimizationMode = SchematicOptimizationMode.HYBRID
 
     # LLM settings (inherited from base config, can override)
-    llm_model: str = "anthropic/claude-sonnet-4"  # Cost-effective for mutations
+    llm_model: str = "anthropic/claude-opus-4.6"  # Cost-effective for mutations
     llm_api_key: Optional[str] = None  # From env: OPENROUTER_API_KEY
 
     # Component configs

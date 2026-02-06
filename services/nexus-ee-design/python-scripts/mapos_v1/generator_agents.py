@@ -7,7 +7,7 @@ This module implements domain-specific agents that generate PCB modifications:
 2. ThermalPowerAgent: Focuses on heat dissipation, current paths
 3. ManufacturingAgent: Focuses on DFM, cost optimization, yield
 
-Each agent uses Claude Opus 4.5 with specialized prompts and domain knowledge.
+Each agent uses Claude Opus 4.6 with specialized prompts and domain knowledge.
 Inspired by Constitutional AI's multi-agent debate and AlphaFold's MSA processing.
 """
 
@@ -45,7 +45,7 @@ class AgentConfig:
     """Configuration for a generator agent."""
     name: str
     role: AgentRole
-    model: str = "claude-opus-4-5-20251101"
+    model: str = "claude-opus-4-6-20260206"
     temperature: float = 0.7
     max_tokens: int = 4096
     focus_areas: List[str] = field(default_factory=list)

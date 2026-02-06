@@ -14,7 +14,7 @@ Algorithm:
 5. Re-route with updated costs
 6. Converge when no over-subscription
 
-Part of the MAPO v2.0 Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO v2.0 Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json
@@ -143,9 +143,9 @@ class PathFinderRouter:
     CPU-based negotiation routing (no GPU required).
 
     LLM Integration:
-    - Opus 4.5 Strategist orders nets
-    - Opus 4.5 Predictor provides congestion hints
-    - Opus 4.5 Resolver handles persistent conflicts
+    - Opus 4.6 Strategist orders nets
+    - Opus 4.6 Predictor provides congestion hints
+    - Opus 4.6 Resolver handles persistent conflicts
     """
 
     def __init__(

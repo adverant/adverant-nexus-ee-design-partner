@@ -2,7 +2,7 @@
 """
 Visual Validation System for EE Design Outputs
 
-Multi-persona visual validation using Claude Opus 4.5 vision capabilities
+Multi-persona visual validation using Claude Opus 4.6 vision capabilities
 via OpenRouter API (not direct Anthropic SDK).
 
 Validates PCB layouts, schematics, and generated images for professional quality.
@@ -297,7 +297,7 @@ Score based on human factors, not just technical correctness.""",
 def get_client():
     """Get OpenRouter client with Anthropic-compatible interface.
 
-    Uses OpenRouter API with Claude Opus 4.5 model.
+    Uses OpenRouter API with Claude Opus 4.6 model.
 
     Raises:
         MissingDependencyFailure: If openrouter_client not available or API key not set
@@ -398,7 +398,7 @@ Be rigorous and honest. Amateur work must be clearly identified as such."""
     ]
 
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-opus-4-6-20260206",
         max_tokens=4096,
         system=persona.system_prompt,
         messages=[{"role": "user", "content": user_content}]

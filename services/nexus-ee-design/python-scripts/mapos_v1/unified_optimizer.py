@@ -6,7 +6,7 @@ This module coordinates all MAPOS optimization components into a single,
 coherent pipeline. It supports multiple optimization modes:
 
 - BASE: Basic MAPOS (zone fill, net assignment, design rules, etc.)
-- LLM: LLM-guided fixing via Claude Opus 4.5 through OpenRouter
+- LLM: LLM-guided fixing via Claude Opus 4.6 through OpenRouter
 - GAMING_AI: MAP-Elites + Red Queen + Ralph Wiggum evolutionary optimization
 - HYBRID: Base -> LLM -> Gaming AI (most thorough, highest quality)
 
@@ -387,7 +387,7 @@ def main():
         epilog='''
 Optimization Modes:
   base       Basic MAPOS (zone fill, net assignment, design rules)
-  llm        LLM-guided optimization via Claude Opus 4.5
+  llm        LLM-guided optimization via Claude Opus 4.6
   gaming_ai  MAP-Elites + Red Queen + Ralph Wiggum evolution
   hybrid     All three phases (most thorough, recommended)
 

@@ -235,7 +235,7 @@ Output ONLY the KiCad S-expression, no explanation."""
         from anthropic import Anthropic
         client = Anthropic()
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-opus-4-6-20260206",
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -967,7 +967,7 @@ Identify deviations from reference designs that may cause issues."""
     }
 
     def __init__(self,
-                 primary_model: str = "claude-sonnet-4-20250514",
+                 primary_model: str = "claude-opus-4-6-20260206",
                  verification_model: str = "claude-opus-4-20250514"):
         self.primary_model = primary_model
         self.verification_model = verification_model

@@ -79,7 +79,7 @@ class TournamentJudge:
         self,
         k_factor: float = 32,
         use_llm: bool = False,
-        model: str = "claude-opus-4-5-20251101"
+        model: str = "claude-opus-4-6-20260206"
     ):
         """
         Initialize tournament judge.

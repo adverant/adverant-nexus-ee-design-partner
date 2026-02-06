@@ -2,7 +2,7 @@
 """
 Multi-Agent EE Validation with Expert Personas
 
-Uses Claude Opus 4.5 with multiple expert personas for comprehensive review:
+Uses Claude Opus 4.6 with multiple expert personas for comprehensive review:
 
 1. MIT EE Professor - Academic rigor, theoretical correctness
 2. Senior PCB Designer - Manufacturing and DFM expertise
@@ -261,7 +261,7 @@ Provide your expert review covering:
 Format as JSON with these four sections."""
 
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-opus-4-6-20260206",
         max_tokens=4096,
         system=persona.system_prompt,
         messages=[{"role": "user", "content": user_prompt}]
@@ -322,7 +322,7 @@ Provide:
 Format as JSON."""
 
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-opus-4-6-20260206",
         max_tokens=4096,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}]

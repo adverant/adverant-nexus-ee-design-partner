@@ -5,13 +5,13 @@ Debate and Critique Coordinator - Multi-agent debate mechanism.
 This module orchestrates multi-agent debate for routing decisions,
 inspired by CircuitLM research showing that agent debate reduces errors.
 
-Multiple Opus 4.5 agents debate proposals before execution:
+Multiple Opus 4.6 agents debate proposals before execution:
 1. Proposer Agent suggests modification
 2. Critic Agents identify potential issues
 3. Refinement round addresses concerns
 4. Consensus reached or escalated
 
-Part of the MAPO v2.0 Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO v2.0 Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json

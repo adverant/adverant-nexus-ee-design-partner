@@ -6,7 +6,7 @@ Provides LLM-guided quality-diversity optimization:
 - Red Queen: Adversarial co-evolution for robustness
 - Ralph Wiggum: Iterative self-improvement loop
 
-Philosophy: "Opus 4.5 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
+Philosophy: "Opus 4.6 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
 
 Author: Nexus EE Design Team
 """

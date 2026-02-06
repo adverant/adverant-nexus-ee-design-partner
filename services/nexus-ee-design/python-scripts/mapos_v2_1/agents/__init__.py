@@ -1,8 +1,8 @@
 """
 MAPO v2.0 Enhanced Agents
 
-New Opus 4.5 agents for strategic routing orchestration.
-All agents use OpenRouter API for Claude Opus 4.5 access.
+New Opus 4.6 agents for strategic routing orchestration.
+All agents use OpenRouter API for Claude Opus 4.6 access.
 
 Agent Roles:
 - RoutingStrategistAgent: Pre-routing strategy analysis

@@ -9,7 +9,7 @@ professional-quality output (9.0/10 or better).
 The loop:
 1. Generates a test PCB with the pipeline
 2. Exports images using KiCad
-3. Validates using Claude Opus 4.5 vision
+3. Validates using Claude Opus 4.6 vision
 4. If score < 9.0, analyzes issues and suggests pipeline improvements
 5. Repeats until target score achieved or max iterations reached
 
@@ -414,7 +414,7 @@ class PipelineRalphLoop:
 
     def _validate_images(self, images: List[Path], use_multi_agent: bool = True) -> Tuple[float, List[str], List[str]]:
         """
-        Validate images using Claude Opus 4.5 vision.
+        Validate images using Claude Opus 4.6 vision.
 
         Args:
             images: List of image paths to validate
@@ -617,7 +617,7 @@ print(json.dumps(result))
         pdf_score, pdf_validation_issues, pdf_suggestions = self._validate_pdf(pdf_path)
 
         # Validate images with AI
-        print("\n5. Validating images with Claude Opus 4.5...")
+        print("\n5. Validating images with Claude Opus 4.6...")
         image_score, image_issues, image_suggestions = self._validate_images(images)
 
         # Combine scores (weight: images 70%, PDF 30%)

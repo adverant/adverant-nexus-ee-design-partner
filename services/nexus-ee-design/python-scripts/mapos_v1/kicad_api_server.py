@@ -1027,7 +1027,7 @@ async def unified_optimize(request: UnifiedOptimizerRequest, background_tasks: B
 
     Modes:
     - base: Basic MAPOS (zone fill, net assignment, etc.)
-    - llm: LLM-guided fixing via Claude Opus 4.5
+    - llm: LLM-guided fixing via Claude Opus 4.6
     - gaming_ai: MAP-Elites + Red Queen + Ralph Wiggum
     - hybrid: Base -> LLM -> Gaming AI (most thorough)
     """

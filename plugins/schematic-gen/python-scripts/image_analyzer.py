@@ -97,7 +97,7 @@ class ImageAnalyzer:
         image_data, media_type = self._load_image(image_path)
 
         response = self.client.messages.create(
-            model="claude-opus-4-5-20251101",
+            model="claude-opus-4-6-20260206",
             max_tokens=4096,
             system=system_prompt,
             messages=[{

@@ -2,10 +2,10 @@
 """
 Signal Integrity Advisor Agent - LLM-driven SI guidance without EM simulation.
 
-This agent uses Claude Opus 4.5 via OpenRouter combined with analytical formulas
+This agent uses Claude Opus 4.6 via OpenRouter combined with analytical formulas
 to provide signal integrity guidance for impedance-critical routing.
 
-Part of the MAPO v2.0 Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO v2.0 Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json
@@ -126,7 +126,7 @@ class SIGuidance:
 
 class SignalIntegrityAdvisorAgent(GeneratorAgent):
     """
-    Opus 4.5 agent for signal integrity guidance.
+    Opus 4.6 agent for signal integrity guidance.
 
     Advises on:
     - Trace width for target impedance (given stackup)
@@ -485,7 +485,7 @@ Focus on practical, manufacturable guidance.
         return prompt
 
     async def _call_openrouter(self, prompt: str) -> str:
-        """Call Claude Opus 4.5 via OpenRouter."""
+        """Call Claude Opus 4.6 via OpenRouter."""
         api_key = os.environ.get('OPENROUTER_API_KEY')
 
         if not api_key:

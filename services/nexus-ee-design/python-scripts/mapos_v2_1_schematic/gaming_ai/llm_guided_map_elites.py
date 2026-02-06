@@ -2,7 +2,7 @@
 MAPO v2.1 Schematic - LLM-Guided MAP-Elites
 
 Quality-diversity optimization with LLM guidance for schematic generation.
-Combines MAP-Elites archive exploration with Opus 4.5 for intelligent
+Combines MAP-Elites archive exploration with Opus 4.6 for intelligent
 mutation selection and guidance.
 
 Author: Nexus EE Design Team

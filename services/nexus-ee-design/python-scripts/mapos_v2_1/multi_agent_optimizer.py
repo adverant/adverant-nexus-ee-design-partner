@@ -2,7 +2,7 @@
 MAPO v2.0 Multi-Agent Optimizer
 
 Enhanced 9-Phase Pipeline with LLM-First Architecture.
-"Opus 4.5 Thinks, Algorithms Execute"
+"Opus 4.6 Thinks, Algorithms Execute"
 
 Key Enhancements over v1.0:
 1. LLM Strategic Planning Phase (NEW)
@@ -29,7 +29,7 @@ Research Sources:
 - OrthoRoute PathFinder Algorithm
 - AlphaFold2 Iterative Refinement
 
-Author: Claude Opus 4.5 via MAPO v2.0
+Author: Claude Opus 4.6 via MAPO v2.0
 """
 
 import asyncio
@@ -192,7 +192,7 @@ class MultiAgentOptimizer:
     Orchestrates the 9-phase optimization pipeline with LLM-first architecture.
 
     Key Features:
-    - LLM agents for strategic decisions (Opus 4.5 via OpenRouter)
+    - LLM agents for strategic decisions (Opus 4.6 via OpenRouter)
     - CPU algorithms for execution (PathFinder, CBS, DP)
     - Debate-and-critique for complex decisions
     - Iterative refinement with convergence detection

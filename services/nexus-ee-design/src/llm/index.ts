@@ -20,7 +20,7 @@
  * const response = await callLLM([
  *   { role: 'system', content: 'You are an expert...' },
  *   { role: 'user', content: 'Design a power supply...' }
- * ], { model: 'anthropic/claude-opus-4' });
+ * ], { model: 'anthropic/claude-opus-4.6' });
  *
  * // With JSON validation
  * const result = await callLLMWithValidation(
@@ -45,7 +45,7 @@ export {
   callLLMWithValidation,
   callLLMStreaming,
   callClaudeOpus,
-  callClaudeSonnet,
+  callClaudeOpus,
   callGeminiFlash,
   callGeminiPro,
   estimateTokens,

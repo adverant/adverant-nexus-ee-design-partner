@@ -3,7 +3,7 @@ Enhanced Visual Validator - Image-based schematic validation with visual feedbac
 
 Features:
 - Extracts PNG images via kicad-worker (NO fallbacks)
-- Opus 4.5 ultrathinking for visual analysis with progress context
+- Opus 4.6 ultrathinking for visual analysis with progress context
 - Progress tracking with stagnation detection
 - Automatic issue-to-fix transformation
 - S-expression modification for fix application

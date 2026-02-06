@@ -25,14 +25,14 @@ class SchematicMAPOConfig:
     - Smoke test validation
     - Fitness function weights
     
-    Philosophy: "Opus 4.5 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
+    Philosophy: "Opus 4.6 Thinks, Gaming AI Explores, Algorithms Execute, Memory Learns"
     """
     
     # ===== LLM Configuration =====
     openrouter_api_key: str = field(
         default_factory=lambda: os.environ.get("OPENROUTER_API_KEY", "")
     )
-    openrouter_model: str = "anthropic/claude-opus-4.5"
+    openrouter_model: str = "anthropic/claude-opus-4.6"
     openrouter_base_url: str = "https://openrouter.ai/api/v1/chat/completions"
     llm_temperature: float = 0.3  # Lower for more deterministic responses
     llm_max_tokens: int = 4096

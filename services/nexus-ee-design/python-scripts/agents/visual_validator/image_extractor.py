@@ -5,7 +5,7 @@ NO FALLBACKS - Only uses kicad-worker HTTP API. Verbose errors on failure.
 
 This extractor is designed for the MAPO visual feedback loop where:
 1. Schematic content is sent to kicad-worker
-2. PNG image is returned for Opus 4.5 vision analysis
+2. PNG image is returned for Opus 4.6 vision analysis
 3. Errors are raised with full context for debugging
 
 Author: Nexus EE Design Team
@@ -123,7 +123,7 @@ class SchematicImageExtractor:
             opus_response = await analyze_with_opus(result.image_data)
     """
 
-    OPTIMAL_DPI = 300  # Optimal resolution for Opus 4.5 vision analysis
+    OPTIMAL_DPI = 300  # Optimal resolution for Opus 4.6 vision analysis
     DEFAULT_TIMEOUT = 120.0  # 2 minutes for large schematics
 
     def __init__(
@@ -139,7 +139,7 @@ class SchematicImageExtractor:
 
         Args:
             kicad_worker_url: URL of kicad-worker service. Uses env var if not provided.
-            dpi: Resolution for PNG export (default 300 for Opus 4.5)
+            dpi: Resolution for PNG export (default 300 for Opus 4.6)
             timeout: HTTP request timeout in seconds
             save_to_disk: Whether to save PNG to disk (useful for debugging)
             output_dir: Directory for saved images (uses temp dir if not provided)

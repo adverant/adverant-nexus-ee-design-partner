@@ -4,7 +4,7 @@ Schematic Assembler Agent - Assembles KiCad schematics using real symbols.
 Takes a BOM, block diagram, and connections to produce properly laid out
 KiCad schematic files with real component symbols.
 
-Uses LLM-first approach via OpenRouter with Claude Opus 4.5 for:
+Uses LLM-first approach via OpenRouter with Claude Opus 4.6 for:
 - Pin parsing from KiCad S-expressions
 - Wire routing validation
 - Connection verification
@@ -59,7 +59,7 @@ class SchematicAssemblyError(Exception):
 # OpenRouter configuration for LLM-first approach
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.5"  # Opus 4.5 via OpenRouter
+OPENROUTER_MODEL = "anthropic/claude-opus-4.6"  # Opus 4.6 via OpenRouter
 
 
 class PinType(Enum):
@@ -252,7 +252,7 @@ class SchematicAssemblerAgent:
         """
         Initialize the assembler with LLM-first approach.
 
-        Uses Claude Opus 4.5 via OpenRouter for:
+        Uses Claude Opus 4.6 via OpenRouter for:
         - Pin parsing from KiCad S-expressions
         - Wire routing validation
         - Connection verification
@@ -265,7 +265,7 @@ class SchematicAssemblerAgent:
         self.graphrag = graphrag_client
         self.ref_counters: Dict[str, int] = {}
 
-        # LLM-first: OpenRouter client for Claude Opus 4.5
+        # LLM-first: OpenRouter client for Claude Opus 4.6
         self._openrouter_api_key = OPENROUTER_API_KEY
         self._http_client: Optional[httpx.AsyncClient] = None
         self._pin_parse_cache: Dict[str, List[Pin]] = {}  # Cache parsed pins by sexp hash
@@ -275,7 +275,7 @@ class SchematicAssemblerAgent:
                 "Set OPENROUTER_API_KEY environment variable for AI-first approach."
             )
         else:
-            logger.info("LLM-first mode enabled via OpenRouter (Claude Opus 4.5)")
+            logger.info("LLM-first mode enabled via OpenRouter (Claude Opus 4.6)")
 
         # Initialize enhanced wire router (MANDATORY)
         self.enhanced_router = EnhancedWireRouter()
@@ -442,7 +442,7 @@ class SchematicAssemblerAgent:
         """
         Extract the actual symbol name from a KiCad S-expression using LLM.
 
-        AI-first approach: Uses Claude Opus 4.5 to intelligently identify the
+        AI-first approach: Uses Claude Opus 4.6 to intelligently identify the
         primary symbol name, excluding sub-symbol suffixes like _0_1 or _1_1.
         """
         if not self._openrouter_api_key:
@@ -506,9 +506,9 @@ Return ONLY the symbol name (no quotes, no explanation):"""
 
     async def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
         """
-        Parse pin information from KiCad S-expression using LLM (Opus 4.5 via OpenRouter).
+        Parse pin information from KiCad S-expression using LLM (Opus 4.6 via OpenRouter).
 
-        AI-first approach: Uses Claude Opus 4.5 to intelligently parse pin definitions
+        AI-first approach: Uses Claude Opus 4.6 to intelligently parse pin definitions
         from any KiCad S-expression format (v6, v7, v8, custom). The LLM understands
         the semantic structure and extracts pins reliably regardless of format variations.
 
@@ -1255,7 +1255,7 @@ JSON array of pins:"""
         """
         Use LLM to semantically validate the wire routing.
 
-        AI-first approach: Uses Claude Opus 4.5 to analyze the routing and
+        AI-first approach: Uses Claude Opus 4.6 to analyze the routing and
         identify potential issues that simple structural checks might miss.
         """
         if self._http_client is None:
@@ -1485,7 +1485,7 @@ Return ONLY the JSON, no explanations."""
         """
         Extract the inner symbol definition from a kicad_symbol_lib wrapper using LLM.
 
-        AI-first approach: Uses Claude Opus 4.5 to intelligently identify and extract
+        AI-first approach: Uses Claude Opus 4.6 to intelligently identify and extract
         the primary symbol definition from a KiCad symbol library S-expression.
 
         The input format is:

@@ -2,11 +2,11 @@
 """
 Congestion Predictor Agent - LLM-driven congestion prediction without GPU/ML.
 
-This agent uses Claude Opus 4.5 via OpenRouter to predict routing congestion
+This agent uses Claude Opus 4.6 via OpenRouter to predict routing congestion
 BEFORE actual routing begins, using semantic analysis of component placement
 and netlist topology.
 
-Part of the MAPO v2.0 Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO v2.0 Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json
@@ -79,7 +79,7 @@ class CongestionPrediction:
 
 class CongestionPredictorAgent(GeneratorAgent):
     """
-    Opus 4.5 agent that predicts routing congestion without ML/GPU.
+    Opus 4.6 agent that predicts routing congestion without ML/GPU.
 
     Uses semantic understanding of:
     - Pin density in regions
@@ -403,7 +403,7 @@ Consider:
         return prompt
 
     async def _call_openrouter(self, prompt: str) -> str:
-        """Call Claude Opus 4.5 via OpenRouter."""
+        """Call Claude Opus 4.6 via OpenRouter."""
         api_key = os.environ.get('OPENROUTER_API_KEY')
 
         if not api_key:

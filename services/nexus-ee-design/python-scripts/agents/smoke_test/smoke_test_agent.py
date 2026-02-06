@@ -1,7 +1,7 @@
 """
 SmokeTestAgent - LLM-based SPICE circuit validation
 
-AI-first approach: Uses Claude Opus 4.5 to analyze generated schematics and
+AI-first approach: Uses Claude Opus 4.6 to analyze generated schematics and
 validate they will not "smoke" when power is applied.
 
 Validates:
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # OpenRouter configuration for LLM-first approach
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.5"  # Opus 4.5 via OpenRouter
+OPENROUTER_MODEL = "anthropic/claude-opus-4.6"  # Opus 4.6 via OpenRouter
 
 
 class SmokeTestSeverity(Enum):
@@ -99,7 +99,7 @@ class SmokeTestAgent:
     """
     LLM-based smoke test agent for circuit validation.
 
-    Uses Claude Opus 4.5 to intelligently analyze schematics and identify
+    Uses Claude Opus 4.6 to intelligently analyze schematics and identify
     potential issues that would cause the circuit to fail when powered.
 
     AI-first approach:
@@ -180,7 +180,7 @@ class SmokeTestAgent:
         power_sources: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Run comprehensive smoke test using LLM (Opus 4.5).
+        Run comprehensive smoke test using LLM (Opus 4.6).
 
         AI-first approach: The LLM analyzes the entire schematic and performs
         all necessary checks using its understanding of electronics.

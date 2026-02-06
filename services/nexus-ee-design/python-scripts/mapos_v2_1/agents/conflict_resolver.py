@@ -2,11 +2,11 @@
 """
 Conflict Resolver Agent - LLM-driven routing conflict resolution.
 
-This agent uses Claude Opus 4.5 via OpenRouter to resolve routing conflicts
+This agent uses Claude Opus 4.6 via OpenRouter to resolve routing conflicts
 when CBS (Conflict-Based Search) identifies nets competing for the same
 routing resources.
 
-Part of the MAPO v2.0 Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO v2.0 Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json
@@ -92,7 +92,7 @@ class ResolutionPlan:
 
 class ConflictResolverAgent(GeneratorAgent):
     """
-    Opus 4.5 agent specialized in routing conflict resolution.
+    Opus 4.6 agent specialized in routing conflict resolution.
 
     When CBS (Conflict-Based Search) identifies conflicts:
     1. Analyzes conflict severity and type
@@ -361,7 +361,7 @@ Return resolutions for ALL conflicts in a single plan.
         return prompt
 
     async def _call_openrouter(self, prompt: str) -> str:
-        """Call Claude Opus 4.5 via OpenRouter."""
+        """Call Claude Opus 4.6 via OpenRouter."""
         api_key = os.environ.get('OPENROUTER_API_KEY')
 
         if not api_key:

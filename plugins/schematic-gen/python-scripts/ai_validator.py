@@ -2,7 +2,7 @@
 """
 AI-First Schematic & PCB Validation
 
-Uses Claude Opus 4.5 for intelligent analysis and decision-making.
+Uses Claude Opus 4.6 for intelligent analysis and decision-making.
 Instead of regex parsing, sends design files directly to Claude for:
 1. Connectivity analysis
 2. Design rule checking
@@ -143,9 +143,9 @@ FILE CONTENT:
 
 Provide comprehensive validation results as JSON."""
 
-    # Call Claude Opus 4.5
+    # Call Claude Opus 4.6
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-opus-4-6-20260206",
         max_tokens=8192,
         messages=[
             {
@@ -174,7 +174,7 @@ Provide comprehensive validation results as JSON."""
     return {
         "file": file_path,
         "type": file_type,
-        "model": "claude-opus-4-5-20251101",
+        "model": "claude-opus-4-6-20260206",
         "analysis": result
     }
 
@@ -227,7 +227,7 @@ PCB ({Path(pcb_path).name}):
 Verify they are consistent and provide validation results as JSON."""
 
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-opus-4-6-20260206",
         max_tokens=8192,
         messages=[{"role": "user", "content": user_message}],
         system=system_prompt
@@ -248,7 +248,7 @@ Verify they are consistent and provide validation results as JSON."""
     return {
         "schematic": schematic_path,
         "pcb": pcb_path,
-        "model": "claude-opus-4-5-20251101",
+        "model": "claude-opus-4-6-20260206",
         "analysis": result
     }
 
@@ -288,7 +288,7 @@ List:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='AI-First validation using Claude Opus 4.5'
+        description='AI-First validation using Claude Opus 4.6'
     )
     parser.add_argument(
         '--schematic', '-s',

@@ -98,7 +98,7 @@ class GamingAIConfig:
 
     # LLM settings (ENABLED by default)
     use_llm: bool = True
-    llm_model: str = "anthropic/claude-opus-4.5"
+    llm_model: str = "anthropic/claude-opus-4.6"
 
     # Optional GPU backend
     gpu_provider: Optional[str] = None  # "runpod", "modal", "replicate"

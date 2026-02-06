@@ -15,7 +15,7 @@ Architecture:
 └─────────────────────────────────────────────────────────────┘
                     ↓
     ┌───────────────────────────┐  ┌───────────────────────────┐
-    │  Claude Opus 4.5          │  │  Kimi K2.5                │
+    │  Claude Opus 4.6          │  │  Kimi K2.5                │
     │  (Ultrathinking Mode)     │  │  (Independent Analysis)   │
     │                           │  │                           │
     │  Extended reasoning       │  │  Alternative perspective  │
@@ -240,7 +240,7 @@ def _create_fallback_image(schematic_path: str, output_path: str) -> bool:
 
 class DualLLMVisualValidator:
     """
-    Dual-LLM visual validator using Opus 4.5 and Kimi K2.5.
+    Dual-LLM visual validator using Opus 4.6 and Kimi K2.5.
 
     CRITICAL: This validator analyzes RENDERED IMAGES, not text/S-expressions.
     """
@@ -250,7 +250,7 @@ class DualLLMVisualValidator:
     AGREEMENT_THRESHOLD = 0.70
     MAX_LOOP_ITERATIONS = 10
 
-    # Ultrathinking prompt for Opus 4.5
+    # Ultrathinking prompt for Opus 4.6
     OPUS_PROMPT = """You are analyzing a rendered schematic image for professional quality validation.
 
 IMPORTANT: Engage EXTENDED THINKING mode. Use maximum reasoning depth for deep visual analysis.
@@ -430,7 +430,7 @@ RESPOND IN THIS JSON FORMAT:
         Initialize the dual-LLM validator with OpenRouter support.
 
         Args:
-            opus_client: Anthropic client for Opus 4.5 (optional, auto-configured)
+            opus_client: Anthropic client for Opus 4.6 (optional, auto-configured)
             kimi_client: Moonshot API client for Kimi K2.5 (optional)
             openrouter_api_key: OpenRouter API key (recommended - can access both models)
         """
@@ -440,7 +440,7 @@ RESPOND IN THIS JSON FORMAT:
         # Configure Opus client via OpenRouter (preferred) or direct Anthropic API
         if opus_client:
             self.opus_client = opus_client
-            self.opus_model = "anthropic/claude-opus-4.5"
+            self.opus_model = "anthropic/claude-opus-4.6"
         elif self.openrouter_api_key:
             try:
                 import anthropic
@@ -448,7 +448,7 @@ RESPOND IN THIS JSON FORMAT:
                     api_key=self.openrouter_api_key,
                     base_url="https://openrouter.ai/api/v1"
                 )
-                self.opus_model = "anthropic/claude-opus-4.5"  # OpenRouter format
+                self.opus_model = "anthropic/claude-opus-4.6"  # OpenRouter format
                 logger.info("Opus client configured via OpenRouter")
             except ImportError:
                 logger.warning("Anthropic client not available")
@@ -459,7 +459,7 @@ RESPOND IN THIS JSON FORMAT:
             try:
                 import anthropic
                 self.opus_client = anthropic.Anthropic()
-                self.opus_model = "anthropic/claude-opus-4.5"
+                self.opus_model = "anthropic/claude-opus-4.6"
             except Exception as e:
                 logger.warning(f"Anthropic client not available: {e}")
                 self.opus_client = None
@@ -515,7 +515,7 @@ RESPOND IN THIS JSON FORMAT:
             # Handle exceptions
             if isinstance(opus_result, Exception):
                 logger.error(f"Opus analysis failed: {opus_result}")
-                opus_result = self._create_fallback_analysis("Claude Opus 4.5")
+                opus_result = self._create_fallback_analysis("Claude Opus 4.6")
 
             if isinstance(kimi_result, Exception):
                 logger.error(f"Kimi analysis failed: {kimi_result}")
@@ -547,7 +547,7 @@ RESPOND IN THIS JSON FORMAT:
         specification: str
     ) -> VisualAnalysis:
         """
-        Analyze schematic image with Claude Opus 4.5 (ultrathinking).
+        Analyze schematic image with Claude Opus 4.6 (ultrathinking).
 
         CRITICAL: This sends the actual rendered IMAGE to the LLM.
         """
@@ -558,7 +558,7 @@ RESPOND IN THIS JSON FORMAT:
             if self.opus_client:
                 # Use Anthropic client directly
                 response = self.opus_client.messages.create(
-                    model="claude-opus-4-5-20251101",
+                    model="claude-opus-4-6-20260206",
                     max_tokens=4096,
                     messages=[
                         {
@@ -585,14 +585,14 @@ RESPOND IN THIS JSON FORMAT:
 
                 return self._parse_llm_response(
                     response.content[0].text,
-                    "Claude Opus 4.5",
+                    "Claude Opus 4.6",
                     (time.time() - start_time) * 1000
                 )
 
             elif self.openrouter_api_key:
                 # Use OpenRouter
                 return await self._call_openrouter(
-                    "anthropic/claude-opus-4",
+                    "anthropic/claude-opus-4.6",
                     image_data,
                     self.OPUS_PROMPT + (f"\n\nDesign Specification:\n{specification}" if specification else ""),
                     start_time
@@ -615,7 +615,7 @@ RESPOND IN THIS JSON FORMAT:
         start_time: float
     ) -> VisualAnalysis:
         """
-        Analyze schematic image with Claude Opus 4.5 using enhanced prompt.
+        Analyze schematic image with Claude Opus 4.6 using enhanced prompt.
 
         This version accepts a pre-formatted prompt with progress context.
         NO FALLBACK - raises errors on failure.
@@ -625,7 +625,7 @@ RESPOND IN THIS JSON FORMAT:
         try:
             if self.opus_client:
                 response = self.opus_client.messages.create(
-                    model="claude-opus-4-5-20251101",
+                    model="claude-opus-4-6-20260206",
                     max_tokens=4096,
                     messages=[
                         {
@@ -650,13 +650,13 @@ RESPOND IN THIS JSON FORMAT:
 
                 return self._parse_llm_response(
                     response.content[0].text,
-                    "Claude Opus 4.5",
+                    "Claude Opus 4.6",
                     (time.time() - start_time) * 1000
                 )
 
             elif self.openrouter_api_key:
                 return await self._call_openrouter(
-                    "anthropic/claude-opus-4",
+                    "anthropic/claude-opus-4.6",
                     image_data,
                     prompt,
                     start_time
@@ -966,7 +966,7 @@ class ValidationLoop:
     """
     Enhanced MAPO Gaming validation loop with visual feedback.
 
-    Uses kicad-worker for image extraction, Opus 4.5 for visual analysis,
+    Uses kicad-worker for image extraction, Opus 4.6 for visual analysis,
     progress tracking for stagnation detection, and automatic fix application.
 
     NO FALLBACKS - Strict error handling with verbose reporting.

@@ -2,11 +2,11 @@
 """
 Routing Strategist Agent - LLM-driven strategic routing analysis.
 
-This agent uses Claude Opus 4.5 via OpenRouter to determine optimal routing
+This agent uses Claude Opus 4.6 via OpenRouter to determine optimal routing
 strategy BEFORE routing begins. It analyzes circuit topology, predicts
 congestion, and recommends routing approaches for each net.
 
-Part of the MAPO Enhancement: "Opus 4.5 Thinks, Algorithms Execute"
+Part of the MAPO Enhancement: "Opus 4.6 Thinks, Algorithms Execute"
 """
 
 import json
@@ -97,7 +97,7 @@ class RoutingStrategy:
 
 class RoutingStrategistAgent(GeneratorAgent):
     """
-    Opus 4.5 agent that determines routing strategy BEFORE routing begins.
+    Opus 4.6 agent that determines routing strategy BEFORE routing begins.
 
     Analyzes:
     - Net criticality (power, signal, high-speed, differential)
@@ -318,7 +318,7 @@ Focus on:
         return prompt
 
     async def _call_openrouter(self, prompt: str) -> str:
-        """Call Claude Opus 4.5 via OpenRouter."""
+        """Call Claude Opus 4.6 via OpenRouter."""
         api_key = os.environ.get('OPENROUTER_API_KEY')
 
         if not api_key:

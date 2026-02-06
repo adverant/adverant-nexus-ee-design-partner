@@ -3,7 +3,7 @@
 Silkscreen Checker - PCB Silkscreen Layer Validation
 
 Validates PCB silkscreen layer for completeness and quality using
-Claude Opus 4.5 via OpenRouter API (not direct Anthropic SDK):
+Claude Opus 4.6 via OpenRouter API (not direct Anthropic SDK):
 - Reference designator presence
 - Polarity markings for diodes/capacitors
 - Pin 1 indicators for ICs
@@ -307,7 +307,7 @@ Provide detailed JSON analysis:
 Be thorough - examine every part of the image."""
 
         response = self.client.messages.create(
-            model="claude-opus-4-5-20251101",
+            model="claude-opus-4-6-20260206",
             max_tokens=4096,
             system=system_prompt,
             messages=[{

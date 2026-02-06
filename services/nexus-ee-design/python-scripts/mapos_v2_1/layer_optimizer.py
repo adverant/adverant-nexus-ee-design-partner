@@ -20,7 +20,7 @@ Research Sources:
 - IPC-2221 layer stackup guidelines
 - Altium/Cadence layer assignment best practices
 
-Author: Claude Opus 4.5 via MAPO v2.0
+Author: Claude Opus 4.6 via MAPO v2.0
 """
 
 import asyncio

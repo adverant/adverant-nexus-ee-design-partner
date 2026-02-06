@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LLM PCB Fixer - Use Claude Opus 4.5 for intelligent PCB DRC violation fixing.
+LLM PCB Fixer - Use Claude Opus 4.6 for intelligent PCB DRC violation fixing.
 
 This replaces brittle regex patterns with LLM-guided analysis and fix generation.
 The LLM analyzes DRC reports, understands the PCB structure, and generates
@@ -8,7 +8,7 @@ targeted S-expression modifications.
 
 NO MOCKS, NO STUBS, NO SHORTCUTS - Real LLM calls and real PCB modifications.
 
-Uses OpenRouter API with Claude Opus 4.5 model.
+Uses OpenRouter API with Claude Opus 4.6 model.
 Integrates fix pattern caching to reduce repeat LLM calls (~$0.30 each).
 """
 
@@ -55,7 +55,7 @@ class FixProposal:
 
 class LLMPCBFixer:
     """
-    Use Claude Opus 4.5 to intelligently fix PCB DRC violations.
+    Use Claude Opus 4.6 to intelligently fix PCB DRC violations.
 
     The LLM:
     1. Analyzes DRC report to understand violation patterns
@@ -76,13 +76,13 @@ class LLMPCBFixer:
         self.max_iterations = max_iterations
         self.kicad_cli = self._find_kicad_cli()
 
-        # Initialize OpenRouter client for Claude Opus 4.5
+        # Initialize OpenRouter client for Claude Opus 4.6
         self.api_key = api_key or os.environ.get('OPENROUTER_API_KEY')
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY required for LLM-guided fixing")
 
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.model = "anthropic/claude-opus-4.5"
+        self.model = "anthropic/claude-opus-4.6"
 
         if not self.pcb_path.exists():
             raise FileNotFoundError(f"PCB file not found: {pcb_path}")
@@ -292,7 +292,7 @@ Output your analysis as JSON:
 
     def _call_openrouter(self, prompt: str, max_tokens: int = 4096, max_retries: int = 3) -> str:
         """
-        Call OpenRouter API with Claude Opus 4.5 and exponential backoff retry.
+        Call OpenRouter API with Claude Opus 4.6 and exponential backoff retry.
 
         Implements retry pattern from Nexus Skills Engine for robust API calls.
         """
@@ -622,7 +622,7 @@ Output JSON:
             }
 
         # Get LLM analysis
-        print("\nAsking Opus 4.5 for fix recommendations...")
+        print("\nAsking Opus 4.6 for fix recommendations...")
         analysis = self.analyze_violations_with_llm(drc_data)
 
         # Parse LLM response
@@ -686,7 +686,7 @@ Output JSON:
     def run(self) -> Dict[str, Any]:
         """Run the LLM-guided fixing loop."""
         print("=" * 60)
-        print("LLM PCB FIXER - Claude Opus 4.5 Guided")
+        print("LLM PCB FIXER - Claude Opus 4.6 Guided")
         print("=" * 60)
         print(f"PCB: {self.pcb_path}")
         print(f"Target: {self.target_violations} violations")
@@ -764,7 +764,7 @@ Output JSON:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LLM-guided PCB DRC violation fixer using Claude Opus 4.5'
+        description='LLM-guided PCB DRC violation fixer using Claude Opus 4.6'
     )
     parser.add_argument('pcb_path', help='Path to KiCad PCB file')
     parser.add_argument('--target', '-t', type=int, default=0,

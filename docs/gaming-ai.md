@@ -137,7 +137,7 @@ config = GamingAIConfig(
     use_neural_networks=False,  # Optional acceleration
 
     # LLM Settings
-    llm_model="anthropic/claude-sonnet-4",
+    llm_model="anthropic/claude-opus-4.6",
 
     # Evolution Settings
     evolution_generations=30,
@@ -161,7 +161,7 @@ from mapos.schematic_gaming_ai import (
 
 config = SchematicGamingAIConfig(
     mode=SchematicOptimizationMode.HYBRID,
-    llm_model="anthropic/claude-sonnet-4",
+    llm_model="anthropic/claude-opus-4.6",
 )
 
 result = await optimize_schematic(

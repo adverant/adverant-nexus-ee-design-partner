@@ -15,7 +15,7 @@ Research Sources:
 - Multi-Agent Based Minimal-Layer Via Routing (ScienceDirect 2025)
 - Adapted from MAPF to PCB routing domain
 
-Author: Claude Opus 4.5 via MAPO v2.0
+Author: Claude Opus 4.6 via MAPO v2.0
 """
 
 import asyncio

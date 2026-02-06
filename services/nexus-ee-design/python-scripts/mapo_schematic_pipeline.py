@@ -119,9 +119,9 @@ class PipelineConfig:
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
 
-    # Validation - MUST use Opus 4.5 only per user directive
-    primary_model: str = "anthropic/claude-opus-4.5"
-    verification_model: str = "anthropic/claude-opus-4.5"
+    # Validation - MUST use Opus 4.6 only per user directive
+    primary_model: str = "anthropic/claude-opus-4.6"
+    verification_model: str = "anthropic/claude-opus-4.6"
     validation_threshold: float = 0.85
     max_iterations: int = 5
 
@@ -323,7 +323,7 @@ class MAPOSchematicPipeline:
         self._functional_validator = MAPOFunctionalValidator()
         logger.info("MAPO functional validator initialized")
 
-        # Initialize dual-LLM visual validator (Phase 16 - Opus 4.5 + Kimi K2.5)
+        # Initialize dual-LLM visual validator (Phase 16 - Opus 4.6 + Kimi K2.5)
         self._visual_validator = DualLLMVisualValidator()
         logger.info("Dual-LLM visual validator initialized")
 
@@ -430,7 +430,7 @@ class MAPOSchematicPipeline:
 
                 self._emit_progress(
                     SchematicPhase.CONNECTIONS, 20,
-                    "Calling Claude Opus 4.5 for signal inference...",
+                    "Calling Claude Opus 4.6 for signal inference...",
                     event_type=SchematicEventType.CONNECTIONS_LLM_CALL.value
                 )
 

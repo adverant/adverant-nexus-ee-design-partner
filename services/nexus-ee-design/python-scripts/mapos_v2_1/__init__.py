@@ -2,7 +2,7 @@
 MAPO v2.1 - LLM-Orchestrated Gaming AI for PCB Optimization
 
 Merges LLM orchestration with Gaming AI algorithms:
-- Core Philosophy: "Opus 4.5 Thinks, Gaming AI Explores, Algorithms Execute"
+- Core Philosophy: "Opus 4.6 Thinks, Gaming AI Explores, Algorithms Execute"
 
 Key Features:
 1. LLM Strategic Planning (Routing Strategist + Congestion Predictor)

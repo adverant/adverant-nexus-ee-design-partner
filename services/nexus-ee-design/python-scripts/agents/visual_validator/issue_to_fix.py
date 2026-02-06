@@ -1,7 +1,7 @@
 """
 Issue-to-Fix Transformer - Converts visual validation issues to actionable schematic fixes.
 
-Uses Opus 4.5 to analyze issues and generate specific fix operations that can be
+Uses Opus 4.6 to analyze issues and generate specific fix operations that can be
 applied to the KiCad S-expression schematic content.
 
 NO FALLBACKS - Strict error handling with verbose reporting.
@@ -62,7 +62,7 @@ LLM Response (truncated):
 TROUBLESHOOTING:
 1. Check OPENROUTER_API_KEY is set
 2. Review issue format matches expected schema
-3. Check Opus 4.5 is available
+3. Check Opus 4.6 is available
 ================================================================================
 """
         super().__init__(full_message)
@@ -160,7 +160,7 @@ class IssueToFixTransformer:
     """
     Transforms visual validation issues into actionable schematic fixes.
 
-    Uses Opus 4.5 to analyze issues and generate specific fix operations
+    Uses Opus 4.6 to analyze issues and generate specific fix operations
     with parameters for S-expression modification.
 
     NO FALLBACKS - Strict transformation with verbose errors.
@@ -539,7 +539,7 @@ RESPOND ONLY WITH THE JSON ARRAY, NO OTHER TEXT.
         context: Dict[str, Any],
         max_fixes: int
     ) -> List[SchematicFix]:
-        """Use Opus 4.5 to generate fixes for complex issues."""
+        """Use Opus 4.6 to generate fixes for complex issues."""
         try:
             import httpx
         except ImportError:
