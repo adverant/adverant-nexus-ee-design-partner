@@ -16,7 +16,7 @@ export default function EEDesignPartner() {
   const pathname = usePathname();
 
   // Get initial project from URL or null
-  const urlProjectId = searchParams.get("projectId");
+  const urlProjectId = searchParams?.get("projectId") ?? null;
   const [activeProject, setActiveProject] = useState<string | null>(urlProjectId);
 
   // Sync project state with URL on initial load and URL changes
@@ -32,7 +32,7 @@ export default function EEDesignPartner() {
       setActiveProject(projectId);
 
       // Update URL with new projectId
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
       if (projectId) {
         params.set("projectId", projectId);
       } else {

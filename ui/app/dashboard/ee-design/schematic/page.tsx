@@ -16,7 +16,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 export default function SchematicPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const projectId = searchParams.get("projectId");
+  const projectId = searchParams?.get("projectId") ?? null;
 
   useEffect(() => {
     // Build the redirect URL

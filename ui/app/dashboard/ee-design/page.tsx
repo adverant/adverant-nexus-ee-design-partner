@@ -16,8 +16,8 @@ import { useSearchParams, useRouter } from "next/navigation";
 export default function EEDesignPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const projectId = searchParams.get("projectId");
-  const tab = searchParams.get("tab") || "schematic";
+  const projectId = searchParams?.get("projectId") ?? null;
+  const tab = searchParams?.get("tab") || "schematic";
 
   useEffect(() => {
     // Build the redirect URL

@@ -33,6 +33,7 @@ import { MAPOProgress } from "./panels/MAPOProgress";
 import { DRCResults, type DRCResult } from "./panels/DRCResults";
 import { BOMEditor, type BOMItem } from "./panels/BOMEditor";
 import { BenchTesting, type TestPoint } from "./panels/BenchTesting";
+import { GatherSymbolsButton } from "./schematic/GatherSymbolsButton";
 import { useEEDesignStore } from "@/hooks/useEEDesignStore";
 
 // ============================================================================
@@ -117,8 +118,10 @@ function SchematicViewer({ projectId }: { projectId: string }) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [generationId, setGenerationId] = useState<string | null>(null);
+  const [ideationArtifacts, setIdeationArtifacts] = useState<Array<{ type: string; content: string }>>([]);
+  const [symbolsGathered, setSymbolsGathered] = useState(false);
 
-  // Fetch schematic URL for project
+  // Fetch schematic URL and ideation artifacts for project
   useEffect(() => {
     async function fetchSchematic() {
       setIsLoading(true);
@@ -149,7 +152,23 @@ function SchematicViewer({ projectId }: { projectId: string }) {
       }
     }
 
+    async function fetchIdeationArtifacts() {
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/v1/projects/${projectId}/ideation-artifacts`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setIdeationArtifacts(data.artifacts || []);
+        }
+      } catch {
+        // Non-critical - button will just be disabled
+        console.warn("Failed to fetch ideation artifacts");
+      }
+    }
+
     fetchSchematic();
+    fetchIdeationArtifacts();
   }, [projectId]);
 
   if (isLoading) {
@@ -178,20 +197,44 @@ function SchematicViewer({ projectId }: { projectId: string }) {
   if (!schematicUrl) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-center">
+        <div className="text-center max-w-md">
           <FileQuestion className="w-12 h-12 text-slate-600 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-white mb-2">No Schematic Generated</h3>
-          <p className="text-sm text-slate-400 max-w-md">
-            Use the terminal to generate a schematic with the <code className="text-cyan-400">/schematic-gen</code> command.
-          </p>
+
+          {/* Step 1: Gather Symbols & Datasheets */}
+          <div className="mb-6">
+            <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Step 1: Gather Components</p>
+            <GatherSymbolsButton
+              projectId={projectId}
+              ideationArtifacts={ideationArtifacts}
+              onComplete={() => setSymbolsGathered(true)}
+              disabled={ideationArtifacts.length === 0}
+            />
+            {ideationArtifacts.length === 0 && (
+              <p className="text-xs text-slate-500 mt-2">
+                Create design documents first to enable symbol gathering.
+              </p>
+            )}
+          </div>
+
+          {/* Step 2: Generate Schematic */}
+          <div>
+            <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">
+              Step 2: Generate Schematic
+            </p>
+            <p className="text-sm text-slate-400">
+              Use the terminal with the <code className="text-cyan-400">/schematic-gen</code> command
+              {!symbolsGathered && " (gather symbols first)"}.
+            </p>
+          </div>
+
           {generationId && (
-            <div className="mt-6 max-w-md mx-auto">
+            <div className="mt-6">
               <MAPOProgress
                 generationId={generationId}
                 generationType="schematic"
                 onComplete={(success) => {
                   if (success) {
-                    // Refresh to get new schematic
                     setGenerationId(null);
                     setIsLoading(true);
                   }
@@ -611,7 +654,7 @@ export function DesignTabs({ projectId }: DesignTabsProps) {
   const pathname = usePathname();
 
   // Get initial tab from URL or default to "schematic"
-  const urlTab = searchParams.get("tab");
+  const urlTab = searchParams?.get("tab") ?? null;
   const [activeTab, setActiveTab] = useState(
     urlTab && TABS.some((t) => t.id === urlTab) ? urlTab : "schematic"
   );
@@ -627,7 +670,7 @@ export function DesignTabs({ projectId }: DesignTabsProps) {
   const handleTabChange = useCallback(
     (newTab: string) => {
       setActiveTab(newTab);
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
       params.set("tab", newTab);
       if (projectId) {
         params.set("projectId", projectId);

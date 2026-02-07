@@ -3,6 +3,11 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
 
+  // Disable SSG bailout for useSearchParams() - this is a dynamic SPA dashboard
+  experimental: {
+    missingSuspenseWithCSRBailout: false,
+  },
+
   // Transpile packages that need it
   transpilePackages: [
     'three',

@@ -97,7 +97,7 @@ export function ComplianceFilters({
     filter.standard?.length,
     filter.hasViolations ? 1 : 0,
     filter.autoFixable ? 1 : 0,
-  ].reduce((sum, count) => sum + (count || 0), 0);
+  ].reduce<number>((sum, count) => sum + (count || 0), 0);
 
   return (
     <div className={cn("space-y-3 rounded-lg border bg-white p-4 shadow-sm", className)}>
