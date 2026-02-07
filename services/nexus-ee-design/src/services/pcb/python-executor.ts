@@ -259,6 +259,7 @@ if __name__ == "__main__":
       cwd?: string;
       env?: Record<string, string>;
       onProgress?: ProgressCallback;
+      stdin?: string; // Optional stdin data (e.g., JSON payload)
     }
   ): Promise<ScriptResult> {
     if (!this.initialized) {
@@ -288,7 +289,8 @@ if __name__ == "__main__":
         timeout: options?.timeout || this.config.timeout,
         cwd: options?.cwd || this.config.workDir,
         env: options?.env,
-        onProgress: options?.onProgress
+        onProgress: options?.onProgress,
+        stdin: options?.stdin
       });
 
       job.status = result.success ? 'completed' : 'failed';
@@ -328,6 +330,7 @@ if __name__ == "__main__":
       cwd: string;
       env?: Record<string, string>;
       onProgress?: ProgressCallback;
+      stdin?: string;
     }
   ): Promise<ScriptResult> {
     return new Promise((resolve, reject) => {
@@ -354,6 +357,12 @@ if __name__ == "__main__":
         env,
         stdio: ['pipe', 'pipe', 'pipe']
       });
+
+      // Write stdin data if provided (e.g., for --stdin flag to avoid E2BIG errors)
+      if (options.stdin && proc.stdin) {
+        proc.stdin.write(options.stdin);
+        proc.stdin.end();
+      }
 
       const timeoutHandle = setTimeout(() => {
         proc.kill('SIGKILL');

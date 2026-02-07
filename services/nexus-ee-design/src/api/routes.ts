@@ -1801,11 +1801,13 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
           try {
             // Use executeWithProgress to relay PROGRESS: events via WebSocket
+            // Pass JSON via stdin instead of CLI args to avoid E2BIG errors with large payloads
             const result = await pythonExecutor.executeWithProgress(
             'api_generate_schematic.py',
-            ['--json', JSON.stringify(mapoInput)],
+            ['--stdin'],  // Use --stdin flag instead of --json to avoid E2BIG errors
             {
               timeout: 900000, // 15 minute timeout - schematic gen includes LLM + SPICE smoke test
+              stdin: JSON.stringify(mapoInput),  // Pass JSON via stdin instead of CLI arg
               onProgress: (event: ProgressEvent) => {
                 // Relay progress event to WebSocket subscribers
                 // Cast to SchematicProgressEvent (types are compatible at runtime)
