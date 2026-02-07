@@ -1,0 +1,74 @@
+# Visual Quality Assessment Rubric for Electronic Schematics
+# Used by VisualVerifier to score schematic layouts with Claude Opus 4.5
+
+rubric:
+  - id: symbol_overlap
+    name: "Symbol Overlap"
+    weight: 0.15
+    pass_criteria: "No overlapping symbols"
+    scoring: "0 overlaps = 100, 1-2 overlaps = 50, 3+ overlaps = 0"
+    description: "Symbols must not overlap with each other or with text labels"
+
+  - id: wire_crossings
+    name: "Wire Crossings"
+    weight: 0.12
+    pass_criteria: "Minimize crossings, use junction dots where wires connect"
+    scoring: "0-5 crossings = 100, 6-15 crossings = 70, 16+ crossings = 40"
+    description: "Excessive wire crossings reduce readability and increase error risk"
+
+  - id: signal_flow
+    name: "Signal Flow Direction"
+    weight: 0.15
+    pass_criteria: "Left-to-right signal flow clearly visible"
+    scoring: "Clear flow = 100, partial flow = 60, no clear flow = 20"
+    description: "Input signals on left, output signals on right, following natural reading direction"
+
+  - id: power_flow
+    name: "Power Flow Direction"
+    weight: 0.10
+    pass_criteria: "Top-to-bottom power distribution (VCC at top, GND at bottom)"
+    scoring: "Clear flow = 100, partial flow = 60, no clear flow = 20"
+    description: "Power rails should flow from top (positive) to bottom (ground)"
+
+  - id: functional_grouping
+    name: "Functional Grouping"
+    weight: 0.15
+    pass_criteria: "Related components grouped visually into functional blocks"
+    scoring: "Clear groups = 100, partial grouping = 60, no grouping = 20"
+    description: "Components with related functions should be physically grouped together"
+
+  - id: net_labels
+    name: "Net Label Readability"
+    weight: 0.10
+    pass_criteria: "All labels readable, no overlaps with wires or symbols"
+    scoring: "All clear = 100, some issues = 60, many issues = 30"
+    description: "Net labels must be legible and properly positioned"
+
+  - id: spacing
+    name: "Component Spacing"
+    weight: 0.10
+    pass_criteria: "Adequate spacing between components (minimum 2 grid units)"
+    scoring: "Good spacing = 100, tight spacing = 60, cramped = 30"
+    description: "Components should have sufficient space for clarity and future modifications"
+
+  - id: professional_appearance
+    name: "Professional Appearance"
+    weight: 0.13
+    pass_criteria: "Overall professional, production-ready appearance"
+    scoring: "Professional = 100, acceptable = 70, poor = 40"
+    description: "Schematic should look organized, balanced, and ready for manufacturing"
+
+# Scoring thresholds
+thresholds:
+  excellent: 95  # Outstanding quality
+  pass: 90       # Production-ready minimum
+  acceptable: 70 # Needs improvement
+  poor: 50       # Major issues
+
+# Image generation settings
+image_settings:
+  format: "png"
+  density: 300  # DPI for rasterization
+  background: "white"
+  max_width: 4096
+  max_height: 4096

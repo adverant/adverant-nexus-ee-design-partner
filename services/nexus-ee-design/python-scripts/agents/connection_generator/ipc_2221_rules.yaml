@@ -1,0 +1,118 @@
+# IPC-2221 Generic Standard on Printed Board Design
+# Rules database for connection generator validation
+
+conductor_spacing:
+  # Minimum spacing by voltage class (mm)
+  # Reference: IPC-2221 Table 6-1
+  voltage_classes:
+    - max_voltage: 15
+      min_spacing: 0.13  # 0.13mm = 5 mils
+    - max_voltage: 30
+      min_spacing: 0.25  # 0.25mm = 10 mils
+    - max_voltage: 50
+      min_spacing: 0.50  # 0.50mm = 20 mils
+    - max_voltage: 100
+      min_spacing: 0.80  # 0.80mm = 31 mils
+    - max_voltage: 150
+      min_spacing: 1.25  # 1.25mm = 49 mils
+    - max_voltage: 300
+      min_spacing: 2.50  # 2.50mm = 98 mils
+    - max_voltage: 500
+      min_spacing: 6.40  # 6.40mm = 252 mils
+
+conductor_width:
+  # External layers, 1oz copper, 10°C rise
+  # Reference: IPC-2221 Table 6-3
+  current_capacity:
+    - current_amps: 0.5
+      min_width: 0.20  # mm
+    - current_amps: 1.0
+      min_width: 0.40
+    - current_amps: 2.0
+      min_width: 0.80
+    - current_amps: 3.0
+      min_width: 1.50
+    - current_amps: 5.0
+      min_width: 2.50
+    - current_amps: 10.0
+      min_width: 5.00
+
+routing_rules:
+  - id: no_acute_angles
+    description: "No angles less than 45 degrees"
+    severity: error
+    reason: "Acute angles cause signal reflections and manufacturing issues"
+
+  - id: minimize_crossings
+    description: "Minimize wire crossings"
+    severity: warning
+    target: "< 10 crossings per schematic"
+    reason: "Crossings increase schematic complexity and potential for errors"
+
+  - id: high_speed_shielding
+    description: "High-speed signals should avoid crossings"
+    severity: error
+    applies_to: ["clock", "high_speed"]
+    reason: "Crossings cause crosstalk and signal integrity issues on high-speed nets"
+
+  - id: power_separation
+    description: "Power and ground on separate layers if possible"
+    severity: warning
+    applies_to: ["power", "ground"]
+
+  - id: impedance_control
+    description: "Maintain impedance on controlled impedance nets"
+    severity: error
+    applies_to: ["differential", "high_speed"]
+    reason: "Impedance discontinuities cause signal reflections"
+
+  - id: differential_pair_spacing
+    description: "Differential pairs must maintain equal length and spacing"
+    severity: error
+    applies_to: ["differential"]
+    max_length_mismatch: 5.0  # mm
+
+  - id: via_spacing
+    description: "Minimum via spacing"
+    severity: error
+    min_spacing: 0.30  # mm
+
+signal_types:
+  power:
+    description: "Power rails (VCC, +5V, etc.)"
+    default_width: 0.80  # mm - wider for power
+    default_current: 2.0  # amps
+
+  ground:
+    description: "Ground rails (GND, 0V, etc.)"
+    default_width: 0.80  # mm - wider for ground
+    default_current: 3.0  # amps
+
+  signal:
+    description: "General purpose signals"
+    default_width: 0.25  # mm
+    default_current: 0.1  # amps
+
+  clock:
+    description: "Clock signals"
+    default_width: 0.30  # mm
+    default_current: 0.1  # amps
+    special_rules: ["high_speed_shielding"]
+
+  high_speed:
+    description: "High-speed data (>50MHz)"
+    default_width: 0.30  # mm
+    default_current: 0.1  # amps
+    special_rules: ["high_speed_shielding", "impedance_control"]
+
+  differential:
+    description: "Differential pairs (USB, CAN, etc.)"
+    default_width: 0.30  # mm
+    default_current: 0.1  # amps
+    special_rules: ["impedance_control", "differential_pair_spacing"]
+
+  analog:
+    description: "Analog signals (ADC inputs, sensor outputs)"
+    default_width: 0.25  # mm
+    default_current: 0.05  # amps
+    special_rules: ["minimize_crossings"]

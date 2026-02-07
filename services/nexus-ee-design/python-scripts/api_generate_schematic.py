@@ -37,6 +37,7 @@ from mapo_schematic_pipeline import (
 from progress_emitter import ProgressEmitter, init_progress
 from ideation_context import IdeationContext
 from ideation_extractors import build_ideation_context, ExtractionError
+from ralph_loop_orchestrator import RalphLoopOrchestrator, RalphLoopResult
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,6 +259,10 @@ async def run_generation(
     auto_export: bool = True,  # Enable auto-export to PDF/image and NFS
     operation_id: Optional[str] = None,  # Operation ID for WebSocket streaming
     ideation_artifacts: Optional[List[Dict[str, Any]]] = None,  # Ideation artifacts for context
+    enable_ralph_loop: bool = False,  # Enable Ralph Loop iterative improvement
+    ralph_max_iterations: int = 100,  # Max Ralph Loop iterations
+    ralph_target_score: float = 100.0,  # Target score (0-100)
+    ralph_plateau_threshold: int = 20,  # Stop if no improvement for N iterations
 ) -> Dict[str, Any]:
     """
     Run the MAPO schematic generation pipeline.
@@ -353,20 +358,60 @@ async def run_generation(
             project_id=project_id,
         )
 
-        # Run generation using pipeline with config (not convenience function)
-        # The config includes auto_export settings for PDF/image and NFS sync
-        # Pass progress emitter for WebSocket streaming
-        pipeline = MAPOSchematicPipeline(config, progress_emitter=progress_emitter)
-        try:
-            result = await pipeline.generate(
-                bom=bom,
-                design_intent=design_intent,
-                design_name=design_name,
-                skip_validation=skip_validation,
-                ideation_context=ideation_context,
+        # Choose between Ralph Loop (iterative improvement) or traditional single-pass pipeline
+        if enable_ralph_loop:
+            # Ralph Loop: Iterative improvement orchestrator
+            logger.info(f"Using Ralph Loop orchestrator (max_iterations={ralph_max_iterations}, target={ralph_target_score}%)")
+
+            orchestrator = RalphLoopOrchestrator(
+                max_iterations=ralph_max_iterations,
+                target_score=ralph_target_score,
+                plateau_threshold=ralph_plateau_threshold,
             )
-        finally:
-            await pipeline.close()
+
+            try:
+                ralph_result: RalphLoopResult = await orchestrator.run(
+                    bom=bom,
+                    design_intent=design_intent,
+                    project_name=project_name,
+                    design_type="foc_esc",
+                    connections=None,  # Will be auto-generated
+                    ideation_context=ideation_context,
+                    operation_id=operation_id,
+                )
+
+                # Convert RalphLoopResult to PipelineResult format
+                result = PipelineResult(
+                    success=ralph_result.success,
+                    schematic_path=Path(ralph_result.final_schematic_path) if ralph_result.final_schematic_path else None,
+                    iterations=ralph_result.total_iterations,
+                    total_time_seconds=ralph_result.total_duration_seconds,
+                    errors=ralph_result.failure_analysis,
+                )
+
+                logger.info(
+                    f"Ralph Loop completed: success={ralph_result.success}, "
+                    f"iterations={ralph_result.total_iterations}, "
+                    f"final_score={ralph_result.final_score:.1f}%"
+                )
+
+            finally:
+                await orchestrator.close()
+        else:
+            # Traditional single-pass pipeline
+            logger.info("Using traditional single-pass MAPO pipeline")
+
+            pipeline = MAPOSchematicPipeline(config, progress_emitter=progress_emitter)
+            try:
+                result = await pipeline.generate(
+                    bom=bom,
+                    design_intent=design_intent,
+                    design_name=design_name,
+                    skip_validation=skip_validation,
+                    ideation_context=ideation_context,
+                )
+            finally:
+                await pipeline.close()
 
         # Read generated schematic content
         schematic_content = ""
@@ -486,6 +531,10 @@ def main():
         auto_export=params.get("auto_export", True),
         operation_id=params.get("operation_id"),  # For WebSocket streaming
         ideation_artifacts=params.get("ideation_artifacts"),  # Ideation artifacts for context
+        enable_ralph_loop=params.get("enable_ralph_loop", False),  # Ralph Loop iterative improvement
+        ralph_max_iterations=params.get("ralph_max_iterations", 100),
+        ralph_target_score=params.get("ralph_target_score", 100.0),
+        ralph_plateau_threshold=params.get("ralph_plateau_threshold", 20),
     ))
 
     # Output JSON result to stdout

@@ -236,6 +236,16 @@ class EnhancedWireRouter:
         # Post-process: fix 4-way junctions
         self._fix_four_way_junctions()
 
+        # NEW: Run DRC validation
+        drc_violations = self._validate_electrical_rules(connections, self._wires)
+        if drc_violations:
+            logger.error(f"DRC FAILED: {len(drc_violations)} violations")
+            for violation in drc_violations[:10]:  # Show first 10
+                logger.error(f"  {violation}")
+            self._warnings.extend(drc_violations)
+        else:
+            logger.info("DRC PASSED: No electrical violations")
+
         # Calculate statistics
         total_length = sum(w.length for w in self._wires)
 
@@ -686,6 +696,323 @@ class EnhancedWireRouter:
                     f"4-way junction at ({point[0]:.2f}, {point[1]:.2f}) - "
                     "consider manual adjustment"
                 )
+
+    # ========== DRC VALIDATION METHODS ==========
+
+    def _validate_electrical_rules(
+        self,
+        connections: List[Dict[str, Any]],
+        wires: List[WireSegment]
+    ) -> List[str]:
+        """
+        Validate electrical design rules (DRC).
+
+        Returns:
+            List of DRC violations
+        """
+        violations = []
+
+        # Check #1: Short circuit detection
+        violations.extend(self._check_short_circuits(wires))
+
+        # Check #2: Clearance validation
+        violations.extend(self._check_clearance(wires, connections))
+
+        # Check #3: Trace width validation
+        violations.extend(self._check_trace_widths(wires, connections))
+
+        # Check #4: 4-way junction detection (MUST FIX, not just warn)
+        violations.extend(self._check_four_way_junctions_strict(wires))
+
+        return violations
+
+    def _check_short_circuits(self, wires: List[WireSegment]) -> List[str]:
+        """Detect unintentional shorts between different nets."""
+        violations = []
+
+        # Group wires by net
+        net_wires: Dict[str, List[WireSegment]] = {}
+        for wire in wires:
+            if wire.net_name not in net_wires:
+                net_wires[wire.net_name] = []
+            net_wires[wire.net_name].append(wire)
+
+        # Check for overlaps between different nets
+        nets = list(net_wires.keys())
+        for i, net1 in enumerate(nets):
+            for net2 in nets[i+1:]:
+                # Check all wire pairs for intersection
+                for wire1 in net_wires[net1]:
+                    for wire2 in net_wires[net2]:
+                        if self._wires_intersect(wire1, wire2):
+                            violations.append(
+                                f"SHORT CIRCUIT: Nets '{net1}' and '{net2}' intersect "
+                                f"(unintentional crossing)"
+                            )
+
+        return violations
+
+    def _wires_intersect(self, wire1: WireSegment, wire2: WireSegment) -> bool:
+        """
+        Check if two wire segments intersect (crossing shorts only).
+
+        Excludes T-junctions (where one wire ends on another) and corner connections
+        (where wires share an endpoint). These are valid electrical connections, not shorts.
+
+        Only returns True for actual CROSSING intersections (like + shape), which
+        indicate unintentional shorts.
+        """
+        def ccw(a, b, c):
+            """Counter-clockwise test."""
+            return (c[1]-a[1]) * (b[0]-a[0]) > (b[1]-a[1]) * (c[0]-a[0])
+
+        def points_equal(p1, p2, tolerance=0.01):
+            """Check if two points are the same."""
+            return abs(p1[0] - p2[0]) < tolerance and abs(p1[1] - p2[1]) < tolerance
+
+        def point_on_segment(point, seg_start, seg_end, tolerance=0.01):
+            """Check if a point lies on a line segment."""
+            px, py = point
+            x1, y1 = seg_start
+            x2, y2 = seg_end
+
+            # Check if point is collinear with segment
+            cross_product = abs((py - y1) * (x2 - x1) - (px - x1) * (y2 - y1))
+            if cross_product > tolerance:
+                return False
+
+            # Check if point is between segment endpoints
+            if min(x1, x2) - tolerance <= px <= max(x1, x2) + tolerance:
+                if min(y1, y2) - tolerance <= py <= max(y1, y2) + tolerance:
+                    return True
+            return False
+
+        a1, a2 = wire1.start, wire1.end
+        b1, b2 = wire2.start, wire2.end
+
+        # Check if wires share any endpoints (corner connections) - NOT shorts
+        if (points_equal(a1, b1) or points_equal(a1, b2) or
+            points_equal(a2, b1) or points_equal(a2, b2)):
+            return False
+
+        # Check for T-junctions (one wire's endpoint touches the other wire's middle)
+        if (point_on_segment(b1, a1, a2) or point_on_segment(b2, a1, a2) or
+            point_on_segment(a1, b1, b2) or point_on_segment(a2, b1, b2)):
+            return False
+
+        # Check for actual crossing intersection (+ shape) using CCW algorithm
+        return ccw(a1, b1, b2) != ccw(a2, b1, b2) and ccw(a1, a2, b1) != ccw(a1, a2, b2)
+
+    def _check_clearance(
+        self,
+        wires: List[WireSegment],
+        connections: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Validate minimum clearance between nets (IPC-2221)."""
+        violations = []
+
+        # Simplified: Check all wire pairs
+        for i, wire1 in enumerate(wires):
+            for wire2 in wires[i+1:]:
+                if wire1.net_name == wire2.net_name:
+                    continue  # Same net, no clearance needed
+
+                # Calculate minimum distance
+                distance = self._min_distance_between_wires(wire1, wire2)
+
+                # IPC-2221: Minimum 0.13mm for 0-50V
+                min_clearance = 0.13
+
+                if distance < min_clearance:
+                    violations.append(
+                        f"CLEARANCE VIOLATION: Nets '{wire1.net_name}' and "
+                        f"'{wire2.net_name}' are {distance:.3f}mm apart "
+                        f"(min: {min_clearance:.3f}mm per IPC-2221)"
+                    )
+
+        return violations
+
+    def _min_distance_between_wires(self, wire1: WireSegment, wire2: WireSegment) -> float:
+        """
+        Calculate minimum distance between two wire segments.
+
+        Uses proper point-to-line-segment distance calculation, not just endpoint-to-endpoint.
+        """
+        def point_to_segment_distance(point: Tuple[float, float], seg_start: Tuple[float, float],
+                                       seg_end: Tuple[float, float]) -> float:
+            """Calculate minimum distance from a point to a line segment."""
+            px, py = point
+            x1, y1 = seg_start
+            x2, y2 = seg_end
+
+            # Vector from start to end
+            dx = x2 - x1
+            dy = y2 - y1
+
+            # If segment is a point, return distance to that point
+            if dx == 0 and dy == 0:
+                return ((px - x1)**2 + (py - y1)**2) ** 0.5
+
+            # Parameter t for projection of point onto line
+            t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx**2 + dy**2)))
+
+            # Closest point on segment
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+
+            # Distance from point to closest point
+            return ((px - closest_x)**2 + (py - closest_y)**2) ** 0.5
+
+        # Calculate all point-to-segment distances
+        min_dist = float('inf')
+
+        # Wire1 endpoints to wire2 segment
+        min_dist = min(min_dist, point_to_segment_distance(wire1.start, wire2.start, wire2.end))
+        min_dist = min(min_dist, point_to_segment_distance(wire1.end, wire2.start, wire2.end))
+
+        # Wire2 endpoints to wire1 segment
+        min_dist = min(min_dist, point_to_segment_distance(wire2.start, wire1.start, wire1.end))
+        min_dist = min(min_dist, point_to_segment_distance(wire2.end, wire1.start, wire1.end))
+
+        return min_dist
+
+    def _check_four_way_junctions_strict(self, wires: List[WireSegment]) -> List[str]:
+        """Strictly check and report 4-way junctions as ERRORS."""
+        violations = []
+
+        # Count wire endpoints at each position
+        endpoint_counts: Dict[Tuple[float, float], List[str]] = {}
+        for wire in wires:
+            for point in [wire.start, wire.end]:
+                key = (round(point[0], 2), round(point[1], 2))
+                if key not in endpoint_counts:
+                    endpoint_counts[key] = []
+                endpoint_counts[key].append(wire.net_name)
+
+        # Check for 4-way junctions
+        for pos, nets in endpoint_counts.items():
+            if len(nets) >= 4:
+                violations.append(
+                    f"4-WAY JUNCTION ERROR: {len(nets)} wires meet at ({pos[0]}, {pos[1]}) "
+                    f"MUST split into 3-way junctions per IPC best practices."
+                )
+
+        return violations
+
+    def _check_trace_widths(
+        self,
+        wires: List[WireSegment],
+        connections: List[Dict[str, Any]]
+    ) -> List[str]:
+        """
+        Validate trace widths meet IPC-2221 current capacity requirements.
+
+        Uses IPC-2221 formula for external layers, 1oz copper, 10°C rise:
+        A = (I / (k * ΔT^b))^(1/c)
+        where:
+            I = current in amps
+            k = 0.048 (constant for external layers)
+            ΔT = temperature rise (10°C)
+            b = 0.44
+            c = 0.725
+            A = cross-sectional area in sq mils
+
+        Then convert area to width based on copper thickness (1oz = 1.378 mils).
+
+        Args:
+            wires: List of wire segments to validate
+            connections: List of connection dictionaries (may contain net metadata)
+
+        Returns:
+            List of violation strings for traces that are too narrow
+        """
+        import math
+
+        violations = []
+
+        # IPC-2221 constants for external layers, 1oz copper, 10°C rise
+        K = 0.048
+        DELTA_T = 10.0  # Temperature rise in °C
+        B = 0.44
+        C = 0.725
+        COPPER_THICKNESS_MILS = 1.378  # 1oz copper thickness in mils
+        MILS_TO_MM = 0.0254  # Conversion factor
+
+        # Default current ratings by net type (amps)
+        # These match IPC-2221 rules.yaml signal_types
+        DEFAULT_CURRENTS = {
+            "power": 2.0,      # VCC, +5V, etc.
+            "ground": 3.0,     # GND
+            "signal": 0.1,     # General signals
+            "bus": 0.1,        # Bus signals
+            "critical": 0.1,   # High-speed signals
+        }
+
+        # Build net-to-current mapping
+        net_currents = {}
+
+        # Extract current from connections (if available)
+        for conn in connections:
+            net_name = conn.get("net_name", "")
+            if not net_name:
+                continue
+
+            # Check if this is a power/ground net (infer higher current)
+            connection_type = conn.get("connection_type", "signal")
+
+            # Use default current based on connection type
+            current = DEFAULT_CURRENTS.get(connection_type, 0.1)
+
+            # Power nets typically carry more current
+            net_name_lower = net_name.lower()
+            if any(pwr in net_name_lower for pwr in ["vcc", "vdd", "+5v", "+3v3", "+12v", "power"]):
+                current = max(current, DEFAULT_CURRENTS["power"])
+            elif any(gnd in net_name_lower for gnd in ["gnd", "ground", "vss"]):
+                current = max(current, DEFAULT_CURRENTS["ground"])
+
+            net_currents[net_name] = current
+
+        # Group wires by net and calculate total width needed per net
+        net_wires = {}
+        for wire in wires:
+            if wire.net_name not in net_wires:
+                net_wires[wire.net_name] = []
+            net_wires[wire.net_name].append(wire)
+
+        # Validate each net
+        for net_name, net_wire_list in net_wires.items():
+            # Get current for this net
+            current = net_currents.get(net_name, DEFAULT_CURRENTS["signal"])
+
+            # Skip validation for very low current signals
+            if current < 0.05:
+                continue
+
+            # Calculate minimum required trace width using IPC-2221 formula
+            # A = (I / (k * ΔT^b))^(1/c)  [area in sq mils]
+            area_sq_mils = (current / (K * (DELTA_T ** B))) ** (1 / C)
+
+            # Width = Area / Thickness
+            width_mils = area_sq_mils / COPPER_THICKNESS_MILS
+
+            # Convert to mm
+            min_width_mm = width_mils * MILS_TO_MM
+
+            # For schematic validation, we assume a default trace width
+            # In real PCB, this would come from the wire object
+            # For now, assume standard schematic trace (0.25mm for signals, 0.80mm for power)
+            actual_width_mm = 0.80 if current >= 1.0 else 0.25
+
+            # Check if actual width meets requirement
+            if actual_width_mm < min_width_mm:
+                violations.append(
+                    f"TRACE WIDTH VIOLATION: Net '{net_name}' carries {current:.2f}A "
+                    f"but trace width {actual_width_mm:.3f}mm is less than required "
+                    f"{min_width_mm:.3f}mm per IPC-2221 (1oz copper, 10°C rise). "
+                    f"Increase trace width to {min_width_mm:.3f}mm or use heavier copper."
+                )
+
+        return violations
 
 
 def convert_to_kicad_wires(result: RoutingResult) -> List[Dict[str, Any]]:

@@ -1,0 +1,83 @@
+{
+  "design_name": "FOC_ESC_Test",
+  "design_intent": "Field Oriented Control Electronic Speed Controller with 3-phase gate drivers, CAN communication, STM32G431 MCU, 3.3V logic, high-speed PWM outputs for motor control",
+  "bom": [
+    {
+      "reference": "U1",
+      "part_number": "STM32G431CBT6",
+      "category": "MCU",
+      "value": "STM32G431",
+      "description": "ARM Cortex-M4 MCU with FPU, 170MHz, 3.3V"
+    },
+    {
+      "reference": "U2",
+      "part_number": "UCC21520DW",
+      "category": "Gate_Driver",
+      "value": "UCC21520",
+      "description": "Dual-channel gate driver for MOSFETs"
+    },
+    {
+      "reference": "U3",
+      "part_number": "UCC21520DW",
+      "category": "Gate_Driver",
+      "value": "UCC21520",
+      "description": "Dual-channel gate driver for MOSFETs"
+    },
+    {
+      "reference": "U4",
+      "part_number": "TJA1051T/3",
+      "category": "CAN_Transceiver",
+      "value": "TJA1051",
+      "description": "CAN transceiver for communication"
+    },
+    {
+      "reference": "C1",
+      "part_number": "CL21A106KAYNNNE",
+      "category": "Capacitor",
+      "value": "10uF",
+      "description": "Bulk capacitor"
+    },
+    {
+      "reference": "C2",
+      "part_number": "C0603C104K5RAC",
+      "category": "Capacitor",
+      "value": "100nF",
+      "description": "Bypass cap for U1"
+    },
+    {
+      "reference": "C3",
+      "part_number": "C0603C104K5RAC",
+      "category": "Capacitor",
+      "value": "100nF",
+      "description": "Bypass cap for U2"
+    },
+    {
+      "reference": "C4",
+      "part_number": "C0603C104K5RAC",
+      "category": "Capacitor",
+      "value": "100nF",
+      "description": "Bypass cap for U3"
+    },
+    {
+      "reference": "R1",
+      "part_number": "RC0603FR-0710KL",
+      "category": "Resistor",
+      "value": "10kΩ",
+      "description": "Pull-up resistor"
+    },
+    {
+      "reference": "R2",
+      "part_number": "RC0603FR-07120RL",
+      "category": "Resistor",
+      "value": "120Ω",
+      "description": "CAN termination"
+    },
+    {
+      "reference": "J1",
+      "part_number": "5-146255-4",
+      "category": "Connector",
+      "value": "4-pin",
+      "description": "Power and CAN connector"
+    }
+  ]
+}

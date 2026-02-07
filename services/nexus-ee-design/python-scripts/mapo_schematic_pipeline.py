@@ -8,6 +8,7 @@ Integrates:
 - Vision Validator (LLM-based multi-expert validation)
 - MAPO Loop (iterative refinement until quality threshold)
 
+Version: 3.1
 Author: Nexus EE Design Team
 """
 
@@ -72,6 +73,8 @@ from ideation_context import (
 )
 
 logger = logging.getLogger(__name__)
+
+MAPO_VERSION = "3.1"
 
 
 class SchematicGenerationError(Exception):
@@ -245,6 +248,7 @@ class MAPOSchematicPipeline:
         self._renderer: Optional[Any] = None  # KiCanvas renderer
         self._artifact_exporter: Optional[ArtifactExporterAgent] = None  # PDF/image export + NFS sync
         self._smoke_test: Optional[SmokeTestAgent] = None  # SPICE-based circuit validation
+        # Note: Gaming AI optimization uses stateless optimize_schematic() function
 
     def _emit_progress(
         self,
