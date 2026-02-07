@@ -158,10 +158,14 @@ export class MAPOSchematicClient {
     const tempDir = process.env.TEMP_DIR || "/tmp";
     const bomPath = path.join(tempDir, `bom-${Date.now()}.json`);
     const connectionsPath = path.join(tempDir, `connections-${Date.now()}.json`);
+    const intentPath = path.join(tempDir, `intent-${Date.now()}.txt`);
 
     try {
       // Write BOM to temp file
       await fs.writeFile(bomPath, JSON.stringify(bom, null, 2));
+
+      // Write design intent to temp file (avoid E2BIG error from large CLI args)
+      await fs.writeFile(intentPath, designIntent, "utf-8");
 
       // Write connections if provided
       if (connections) {
@@ -173,8 +177,8 @@ export class MAPOSchematicClient {
         this.pipelinePath,
         "--bom",
         bomPath,
-        "--intent",
-        designIntent,
+        "--intent-file",
+        intentPath,
         "--output",
         designName,
       ];
@@ -191,6 +195,7 @@ export class MAPOSchematicClient {
       // Cleanup temp files
       try {
         await fs.unlink(bomPath);
+        await fs.unlink(intentPath);
         if (connections) {
           await fs.unlink(connectionsPath);
         }

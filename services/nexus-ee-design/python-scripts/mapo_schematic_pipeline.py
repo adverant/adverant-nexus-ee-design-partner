@@ -1187,7 +1187,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="MAPO Schematic Generation Pipeline")
     parser.add_argument("--bom", type=str, help="Path to BOM JSON file")
-    parser.add_argument("--intent", type=str, required=True, help="Design intent description")
+
+    # Design intent: support both direct string (--intent) and file (--intent-file)
+    intent_group = parser.add_mutually_exclusive_group(required=True)
+    intent_group.add_argument("--intent", type=str, help="Design intent description (direct string)")
+    intent_group.add_argument("--intent-file", type=str, help="Path to file containing design intent (avoids E2BIG errors)")
+
     parser.add_argument("--output", type=str, default="schematic", help="Output name")
     parser.add_argument("--skip-validation", action="store_true", help="Skip MAPO validation")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
@@ -1227,6 +1232,13 @@ if __name__ == "__main__":
                 {"part_number": "1k", "category": "Resistor", "value": "1k"},
             ]
 
+        # Load design intent from file or direct argument
+        if args.intent_file:
+            with open(args.intent_file, 'r', encoding='utf-8') as f:
+                design_intent = f.read()
+        else:
+            design_intent = args.intent
+
         # Create pipeline config with export settings
         config = PipelineConfig(
             auto_export=not args.no_export,
@@ -1240,7 +1252,7 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print("MAPO Schematic Generation Pipeline")
         print(f"{'='*60}")
-        print(f"Design Intent: {args.intent}")
+        print(f"Design Intent: {design_intent[:200]}..." if len(design_intent) > 200 else f"Design Intent: {design_intent}")
         print(f"Components: {len(bom)}")
         print(f"Skip Validation: {args.skip_validation}")
         print(f"Auto-Export: {config.auto_export}")
@@ -1252,7 +1264,7 @@ if __name__ == "__main__":
         try:
             result = await pipeline.generate(
                 bom=bom,
-                design_intent=args.intent,
+                design_intent=design_intent,
                 design_name=args.output,
                 skip_validation=args.skip_validation
             )
