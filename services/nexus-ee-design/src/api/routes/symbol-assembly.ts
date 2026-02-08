@@ -115,8 +115,18 @@ export function createSymbolAssemblyRoutes(): Router {
       const pythonPath = config.kicad.pythonPath || 'python3';
       const scriptPath = path.join(
         config.kicad.scriptsDir,
-        '../agents/symbol_assembly/symbol_assembler.py'
+        'agents/symbol_assembly/symbol_assembler.py'
       );
+
+      // Fail fast: verify script exists before spawning async process
+      try {
+        await fs.access(scriptPath);
+      } catch {
+        throw new Error(
+          `Symbol assembler script not found at ${scriptPath}. ` +
+          `config.kicad.scriptsDir=${config.kicad.scriptsDir}`
+        );
+      }
 
       const python = spawn(pythonPath, [
         scriptPath,
