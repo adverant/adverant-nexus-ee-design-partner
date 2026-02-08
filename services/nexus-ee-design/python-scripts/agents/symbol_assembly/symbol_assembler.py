@@ -256,7 +256,8 @@ class AssemblyReport:
     """
 
     project_id: str
-    started_at: str
+    operation_id: str = ""
+    started_at: str = ""
     completed_at: str = ""
     total_components: int = 0
     symbols_found: int = 0
@@ -280,6 +281,7 @@ class AssemblyReport:
         """Serialize for JSON output."""
         return {
             "project_id": self.project_id,
+            "operationId": self.operation_id,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "total_components": self.total_components,
@@ -603,6 +605,7 @@ class SymbolAssembler:
 
         report = AssemblyReport(
             project_id=project_id,
+            operation_id=operation_id,
             started_at=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -2009,3 +2012,70 @@ __all__ = [
     # Main class
     "SymbolAssembler",
 ]
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Symbol Assembly Agent - gather symbols, datasheets, and characterizations"
+    )
+    parser.add_argument("--project-id", required=True, help="Project identifier")
+    parser.add_argument("--operation-id", required=True, help="Operation ID for progress tracking")
+    parser.add_argument("--artifacts-json", required=True, help="Path to JSON file containing ideation artifacts")
+    parser.add_argument("--output-dir", required=True, help="Output directory for assembly artifacts")
+
+    args = parser.parse_args()
+
+    # Configure logging to stderr (stdout is reserved for PROGRESS: events)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    # Load artifacts from the JSON file
+    artifacts_path = Path(args.artifacts_json)
+    if not artifacts_path.exists():
+        logger.error(f"Artifacts file not found: {artifacts_path}")
+        sys.exit(1)
+
+    try:
+        artifacts = json.loads(artifacts_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.error(f"Failed to read artifacts file {artifacts_path}: {exc}")
+        sys.exit(1)
+
+    logger.info(
+        f"Starting symbol assembly: project={args.project_id}, "
+        f"operation={args.operation_id}, artifacts={len(artifacts)}"
+    )
+
+    async def _main() -> None:
+        assembler = SymbolAssembler(
+            project_id=args.project_id,
+            operation_id=args.operation_id,
+            output_base_path=str(Path(args.output_dir).parent.parent),
+        )
+        try:
+            report = await assembler.run(
+                project_id=args.project_id,
+                artifacts=artifacts,
+                operation_id=args.operation_id,
+            )
+            logger.info(
+                f"Assembly complete: {report.symbols_found}/{report.total_components} "
+                f"symbols found, {report.datasheets_downloaded} datasheets, "
+                f"{report.errors_count} errors"
+            )
+            if report.errors_count > 0:
+                for err in report.errors:
+                    logger.warning(f"  Error: {err}")
+        finally:
+            await assembler.close()
+
+    asyncio.run(_main())
