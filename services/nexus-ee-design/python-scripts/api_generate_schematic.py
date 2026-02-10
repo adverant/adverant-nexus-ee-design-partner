@@ -471,6 +471,70 @@ async def run_generation(
         }
 
 
+def _patch_agent_providers(proxy_url: str) -> None:
+    """
+    Patch module-level OpenRouter constants in already-imported agent modules
+    to route through the Claude Code Max proxy pod instead.
+
+    This is needed because Python caches module imports, so env vars set after
+    import don't affect module-level constants like OPENROUTER_BASE_URL.
+    """
+    proxy_chat_url = f"{proxy_url}/v1/chat/completions"
+
+    # Patch schematic assembler
+    try:
+        import agents.schematic_assembler.assembler_agent as assembler_mod
+        assembler_mod.OPENROUTER_BASE_URL = proxy_chat_url
+        assembler_mod.OPENROUTER_API_KEY = "internal-proxy"
+        logger.info("Patched schematic_assembler -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch schematic_assembler: {e}")
+
+    # Patch smoke test agent
+    try:
+        import agents.smoke_test.smoke_test_agent as smoke_mod
+        smoke_mod.OPENROUTER_BASE_URL = proxy_chat_url
+        smoke_mod.OPENROUTER_API_KEY = "internal-proxy"
+        logger.info("Patched smoke_test_agent -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch smoke_test_agent: {e}")
+
+    # Patch visual validator (dual LLM)
+    try:
+        import agents.visual_validator.dual_llm_validator as dual_val_mod
+        # dual_llm_validator uses instance variables, patched at init time via env var
+        logger.info("Visual validator will use AI_PROVIDER env var at init time")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch dual_llm_validator: {e}")
+
+    # Patch issue_to_fix transformer
+    try:
+        import agents.visual_validator.issue_to_fix as fix_mod
+        fix_mod.OPENROUTER_BASE_URL = f"{proxy_url}/v1"
+        fix_mod.OPENROUTER_API_KEY = "internal-proxy"
+        logger.info("Patched issue_to_fix -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch issue_to_fix: {e}")
+
+    # Patch symbol assembly
+    try:
+        import agents.symbol_assembly.symbol_assembler as sym_mod
+        sym_mod.OPENROUTER_BASE_URL = proxy_chat_url
+        sym_mod.OPENROUTER_API_KEY = "internal-proxy"
+        logger.info("Patched symbol_assembler -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch symbol_assembler: {e}")
+
+    # Patch connection generator (already has native support, but patch for safety)
+    try:
+        import agents.connection_generator.connection_generator_agent as conn_mod
+        conn_mod.LLM_BASE_URL = f"{proxy_url}/v1"
+        conn_mod.AI_PROVIDER = "claude_code_max"
+        logger.info("Patched connection_generator -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch connection_generator: {e}")
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -517,6 +581,25 @@ def main():
         result = {"success": False, "error": f"Invalid JSON input: {e}"}
         print(json.dumps(result))
         sys.exit(1)
+
+    # Apply AI provider preference from dashboard (passed via X-AI-Provider header)
+    # This sets the env var AND patches already-imported module-level constants
+    ai_provider = params.get("ai_provider")
+    if ai_provider:
+        os.environ["AI_PROVIDER"] = ai_provider
+        logger.info(f"AI provider set from request: {ai_provider}")
+        if ai_provider == "claude_code_max":
+            proxy_url = os.environ.get(
+                "CLAUDE_CODE_PROXY_URL",
+                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+            )
+            logger.info(
+                "Using Claude Code Max proxy pod for all LLM calls "
+                f"(proxy URL: {proxy_url})"
+            )
+            # Patch module-level constants in already-imported agents
+            # (Python caches imports, so env vars set after import don't affect module-level vars)
+            _patch_agent_providers(proxy_url)
 
     # Run async generation
     result = asyncio.run(run_generation(

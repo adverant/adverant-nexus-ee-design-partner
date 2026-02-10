@@ -56,14 +56,20 @@ class LLMClient:
             raise ImportError("httpx required for LLM backend. Install with: pip install httpx")
 
         if self._client is None:
+            headers = {"Content-Type": "application/json"}
+
+            if self.config.provider == "claude_code_max":
+                # Claude Code Max proxy pod - no auth or OpenRouter headers needed
+                logger.info(f"LLMClient: Using Claude Code Max proxy at {self.config.base_url}")
+            else:
+                # OpenRouter - include auth and referrer headers
+                headers["Authorization"] = f"Bearer {self.config.api_key}"
+                headers["HTTP-Referer"] = "https://adverant.ai"
+                headers["X-Title"] = "MAPOS Gaming AI"
+
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.config.timeout_seconds),
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "HTTP-Referer": "https://adverant.ai",
-                    "X-Title": "MAPOS Gaming AI",
-                    "Content-Type": "application/json",
-                }
+                headers=headers
             )
         return self._client
 
@@ -84,8 +90,11 @@ class LLMClient:
         Returns:
             Generated text response
         """
-        if not self.config.api_key:
-            raise ValueError("OpenRouter API key not configured")
+        if not self.config.api_key and self.config.provider != "claude_code_max":
+            raise ValueError(
+                "LLM API key not configured. "
+                "Set OPENROUTER_API_KEY or use AI_PROVIDER=claude_code_max"
+            )
 
         client = await self._get_client()
 
@@ -114,12 +123,12 @@ class LLMClient:
                 response.raise_for_status()
                 data = response.json()
 
-                # Handle error responses from OpenRouter
+                # Handle error responses from LLM provider
                 if "error" in data:
                     error_msg = data.get("error", {})
                     if isinstance(error_msg, dict):
                         error_msg = error_msg.get("message", str(error_msg))
-                    raise RuntimeError(f"OpenRouter error: {error_msg}")
+                    raise RuntimeError(f"LLM provider ({self.config.provider}) error: {error_msg}")
 
                 # Extract response content
                 if "choices" not in data or not data["choices"]:

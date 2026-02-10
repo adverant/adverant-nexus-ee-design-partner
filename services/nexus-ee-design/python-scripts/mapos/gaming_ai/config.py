@@ -38,9 +38,11 @@ class InferenceProvider(Enum):
 
 @dataclass
 class LLMConfig:
-    """Configuration for LLM provider (OpenRouter)."""
+    """Configuration for LLM provider (OpenRouter or Claude Code Max proxy)."""
 
-    provider: str = "openrouter"
+    provider: str = field(
+        default_factory=lambda: os.environ.get("AI_PROVIDER", "openrouter")
+    )
     model: str = "anthropic/claude-3.5-haiku:beta"  # Fast, cost-effective for mutations
     api_key: Optional[str] = field(
         default_factory=lambda: os.environ.get("OPENROUTER_API_KEY")
@@ -51,6 +53,19 @@ class LLMConfig:
     timeout_seconds: int = 60
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
+
+    def __post_init__(self):
+        """Resolve base_url and auth based on provider."""
+        if self.provider == "claude_code_max":
+            proxy_url = os.environ.get(
+                "CLAUDE_CODE_PROXY_URL",
+                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+            )
+            self.base_url = f"{proxy_url}/v1"
+            # No API key needed for internal cluster proxy
+            if not self.api_key:
+                self.api_key = "internal-proxy"
+            logger.info(f"LLMConfig: Using Claude Code Max proxy at {self.base_url}")
 
 
 @dataclass
@@ -248,10 +263,10 @@ class GamingAIConfig:
 
     def _validate(self):
         """Validate configuration values."""
-        if self.use_llm and not self.llm.api_key:
+        if self.use_llm and not self.llm.api_key and self.llm.provider != "claude_code_max":
             logger.warning(
                 "LLM enabled but no API key provided. "
-                "Set OPENROUTER_API_KEY environment variable."
+                "Set OPENROUTER_API_KEY environment variable or AI_PROVIDER=claude_code_max."
             )
 
         if self.use_neural_networks and self.neural_network.provider == InferenceProvider.NONE:

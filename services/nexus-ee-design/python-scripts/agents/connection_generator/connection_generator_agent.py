@@ -50,9 +50,20 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# OpenRouter configuration (following mageagent pattern)
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.6"
+# LLM provider configuration
+# Supports both OpenRouter (default) and Claude Code Max proxy pod
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "openrouter")
+CLAUDE_CODE_PROXY_URL = os.environ.get(
+    "CLAUDE_CODE_PROXY_URL",
+    "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+)
+
+if AI_PROVIDER == "claude_code_max":
+    LLM_BASE_URL = f"{CLAUDE_CODE_PROXY_URL}/v1"
+else:
+    LLM_BASE_URL = "https://openrouter.ai/api/v1"
+
+LLM_MODEL = "anthropic/claude-opus-4.6"
 
 # Validation configuration
 MAX_WIRE_GENERATION_RETRIES = 5
@@ -154,8 +165,15 @@ class ConnectionGeneratorAgent:
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the connection generator for logical connection generation."""
-        # OpenRouter API key (required for LLM operations)
-        self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self._ai_provider = AI_PROVIDER
+        self._llm_base_url = LLM_BASE_URL
+
+        # API key: not needed for claude_code_max proxy, required for openrouter
+        if self._ai_provider == "claude_code_max":
+            self._api_key = "internal-proxy"
+        else:
+            self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+
         self._http_client: Optional[httpx.AsyncClient] = None
 
         # Load IPC-2221 rules for current/voltage specifications
@@ -166,15 +184,14 @@ class ConnectionGeneratorAgent:
         with open(rules_path) as f:
             self.ipc_rules = yaml.safe_load(f)
 
-        # Note: WireValidator is NOT used here (physical routing validation
-        # is done by WireRouter agent). This agent only validates logical connections.
-
-        if self._openrouter_api_key:
-            logger.info("ConnectionGeneratorAgent v3.2: Logical connection generation mode")
+        if self._ai_provider == "claude_code_max":
+            logger.info(f"ConnectionGeneratorAgent v3.2: Using Claude Code Max proxy at {self._llm_base_url}")
+        elif self._api_key:
+            logger.info("ConnectionGeneratorAgent v3.2: Logical connection generation mode (OpenRouter)")
         else:
             logger.error(
-                "CRITICAL: OPENROUTER_API_KEY not set! LLM connection generation will fail. "
-                "Set OPENROUTER_API_KEY environment variable with a valid key from https://openrouter.ai/keys"
+                "CRITICAL: No LLM provider configured! "
+                "Set OPENROUTER_API_KEY or AI_PROVIDER=claude_code_max"
             )
 
     async def generate_connections(
@@ -566,24 +583,25 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
 
     async def _call_llm_for_wires(self, prompt: str) -> List[Dict]:
         """
-        Call LLM (Opus 4.6 via OpenRouter) to generate logical connections.
+        Call LLM (Opus 4.6) to generate logical connections.
 
+        Routes through Claude Code Max proxy or OpenRouter based on AI_PROVIDER.
         Returns raw connection data (not yet converted to GeneratedConnection).
         """
-        # Validate API key
-        if not self._openrouter_api_key:
+        # Validate provider config
+        if self._ai_provider != "claude_code_max" and not self._api_key:
             raise ValueError(
-                "CRITICAL: Cannot generate wires - OPENROUTER_API_KEY not set!\n"
-                "Set OPENROUTER_API_KEY environment variable"
+                "CRITICAL: Cannot generate wires - no LLM provider configured!\n"
+                "Set OPENROUTER_API_KEY or AI_PROVIDER=claude_code_max"
             )
 
         # Initialize HTTP client if needed
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
 
-        # Build OpenRouter request
+        # Build request payload (OpenAI-compatible format works with both providers)
         request_payload = {
-            "model": OPENROUTER_MODEL,
+            "model": LLM_MODEL,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -591,17 +609,21 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
             "temperature": 0.1,   # Low temperature for structured output
         }
 
-        headers = {
-            "Authorization": f"Bearer {self._openrouter_api_key}",
-            "HTTP-Referer": "https://adverant.ai",
-            "X-Title": "Nexus EE Design Connection Generator v3.1",
-            "Content-Type": "application/json",
-        }
+        # Build headers based on provider
+        headers = {"Content-Type": "application/json"}
+        if self._ai_provider == "claude_code_max":
+            # No auth or OpenRouter headers needed for internal proxy
+            pass
+        else:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+            headers["HTTP-Referer"] = "https://adverant.ai"
+            headers["X-Title"] = "Nexus EE Design Connection Generator v3.2"
 
-        logger.info(f"Calling OpenRouter API ({OPENROUTER_MODEL}) for logical connection generation...")
+        provider_label = "Claude Code Max proxy" if self._ai_provider == "claude_code_max" else "OpenRouter"
+        logger.info(f"Calling {provider_label} ({LLM_MODEL}) for logical connection generation...")
 
         response = await self._http_client.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
+            f"{self._llm_base_url}/chat/completions",
             json=request_payload,
             headers=headers,
         )
@@ -609,7 +631,7 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
         # Check for HTTP errors
         if response.status_code != 200:
             raise ValueError(
-                f"OpenRouter API Error: Status {response.status_code}, "
+                f"LLM API Error ({provider_label}): Status {response.status_code}, "
                 f"Response: {response.text[:500]}"
             )
 

@@ -1751,6 +1751,9 @@ export function createApiRoutes(io: SocketIOServer): Router {
           artifactTypes: artifactsForContext.map((a) => a.type),
         });
 
+        // Read AI provider preference from dashboard headers
+        const aiProvider = req.headers['x-ai-provider'] as string | undefined;
+
         // Prepare input for MAPO pipeline with operation ID for progress streaming
         const mapoInput = {
           subsystems,
@@ -1760,6 +1763,9 @@ export function createApiRoutes(io: SocketIOServer): Router {
           operation_id: operationId, // For WebSocket progress streaming
           project_id: projectId,
           ideation_artifacts: artifactsForContext, // Include ideation context for better schematic generation
+          // Pass AI provider preference so Python pipeline routes through
+          // the user's selected provider (e.g., claude_code_max proxy pod)
+          ai_provider: aiProvider || undefined,
         };
 
         // IMMEDIATELY return operationId to frontend so it can subscribe to WebSocket

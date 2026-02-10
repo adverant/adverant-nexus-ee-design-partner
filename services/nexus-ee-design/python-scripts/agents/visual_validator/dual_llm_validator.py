@@ -435,12 +435,39 @@ RESPOND IN THIS JSON FORMAT:
             openrouter_api_key: OpenRouter API key (recommended - can access both models)
         """
         self.kimi_client = kimi_client
+        self._ai_provider = os.environ.get("AI_PROVIDER", "openrouter")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
-        # Configure Opus client via OpenRouter (preferred) or direct Anthropic API
+        # Resolve LLM base URL based on provider
+        if self._ai_provider == "claude_code_max":
+            proxy_url = os.environ.get(
+                "CLAUDE_CODE_PROXY_URL",
+                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+            )
+            self._llm_base_url = f"{proxy_url}/v1"
+            self._llm_chat_url = f"{proxy_url}/v1/chat/completions"
+            logger.info(f"DualLLMVisualValidator: Using Claude Code Max proxy at {proxy_url}")
+        else:
+            self._llm_base_url = "https://openrouter.ai/api/v1"
+            self._llm_chat_url = "https://openrouter.ai/api/v1/chat/completions"
+
+        # Configure Opus client via Claude Code Max proxy, OpenRouter, or direct Anthropic API
         if opus_client:
             self.opus_client = opus_client
             self.opus_model = "anthropic/claude-opus-4.6"
+        elif self._ai_provider == "claude_code_max":
+            try:
+                import anthropic
+                self.opus_client = anthropic.Anthropic(
+                    api_key="internal-proxy",
+                    base_url=self._llm_base_url,
+                )
+                self.opus_model = "anthropic/claude-opus-4.6"
+                logger.info("Opus client configured via Claude Code Max proxy")
+            except ImportError:
+                logger.warning("Anthropic client not available")
+                self.opus_client = None
+                self.opus_model = None
         elif self.openrouter_api_key:
             try:
                 import anthropic
@@ -749,12 +776,14 @@ RESPOND IN THIS JSON FORMAT:
 
         try:
             async with aiohttp.ClientSession() as session:
+                # Use provider-specific URL and headers
+                headers = {"Content-Type": "application/json"}
+                if self._ai_provider != "claude_code_max":
+                    headers["Authorization"] = f"Bearer {self.openrouter_api_key}"
+
                 async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.openrouter_api_key}",
-                        "Content-Type": "application/json"
-                    },
+                    self._llm_chat_url,
+                    headers=headers,
                     json={
                         "model": model,
                         "messages": [
