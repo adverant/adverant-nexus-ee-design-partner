@@ -123,7 +123,17 @@ spec:
             - name: SIM_TIMEOUT_SECONDS
               value: "3600"
 
-            # API Keys from secrets (optional)
+            # LLM routing: "claude_code_max" routes Anthropic models through
+            # the in-cluster Claude Code proxy; any other value uses OpenRouter
+            - name: LLM_ANTHROPIC_ROUTE
+              value: "claude_code_max"
+            - name: LLM_CLAUDE_CODE_PROXY_URL
+              value: "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+            - name: LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS
+              value: "300"
+
+            # API Keys from secrets (optional - only needed for non-Anthropic
+            # models or when LLM_ANTHROPIC_ROUTE != "claude_code_max")
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -52,6 +52,27 @@ OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL: str = "anthropic/claude-opus-4.6"
 
+# LLM routing: "claude_code_max" routes Anthropic models through the proxy,
+# any other value (or empty) uses OpenRouter for everything.
+LLM_ANTHROPIC_ROUTE: str = os.environ.get("LLM_ANTHROPIC_ROUTE", "claude_code_max")
+LLM_CLAUDE_CODE_PROXY_URL: str = os.environ.get(
+    "LLM_CLAUDE_CODE_PROXY_URL",
+    "http://claude-code-proxy.nexus.svc.cluster.local:3100",
+)
+LLM_CLAUDE_CODE_PROXY_TIMEOUT: int = int(
+    os.environ.get("LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS", "300")
+)
+
+# Map OpenRouter model IDs to native Anthropic model IDs for the proxy
+OPENROUTER_TO_ANTHROPIC_MODEL_ID: dict[str, str] = {
+    "anthropic/claude-opus-4.6": "claude-opus-4-6",
+    "anthropic/claude-opus-4-6-20260206": "claude-opus-4-6",
+    "anthropic/claude-sonnet-4-5": "claude-sonnet-4-5",
+    "anthropic/claude-sonnet-4": "claude-sonnet-4",
+    "anthropic/claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
+    "anthropic/claude-3.5-haiku": "claude-3-5-haiku-20241022",
+}
+
 NEXUS_API_KEY: str = os.environ.get("NEXUS_API_KEY", "")
 NEXUS_API_URL: str = os.environ.get("NEXUS_API_URL", "https://api.adverant.ai")
 
@@ -714,8 +735,9 @@ class SymbolAssembler:
         artifacts: List[Dict[str, Any]],
     ) -> List[ComponentRequirement]:
         """
-        Use Opus 4.6 via OpenRouter to extract every electronic component
-        from the supplied ideation artifacts.
+        Use Opus 4.6 to extract every electronic component from the supplied
+        ideation artifacts. Routes through Claude Code Max proxy or OpenRouter
+        based on LLM_ANTHROPIC_ROUTE configuration.
 
         ALL extraction uses Opus 4.6 -- **NEVER** regex.
 
@@ -730,10 +752,11 @@ class SymbolAssembler:
         Raises:
             RuntimeError: If the LLM call fails or returns unparseable output.
         """
-        if not OPENROUTER_API_KEY:
+        if not self._should_use_proxy() and not OPENROUTER_API_KEY:
             raise RuntimeError(
-                "OPENROUTER_API_KEY environment variable is required for "
-                "Opus 4.6 content extraction. Symbol assembly cannot proceed."
+                "No LLM endpoint available for Opus 4.6 content extraction. "
+                "Either set LLM_ANTHROPIC_ROUTE=claude_code_max (to use Claude "
+                "Code Max proxy) or provide OPENROUTER_API_KEY."
             )
 
         # Serialize artifacts into a text block for the LLM
@@ -1527,9 +1550,11 @@ class SymbolAssembler:
             RuntimeError: If OPENROUTER_API_KEY is not set or if the LLM
                 returns an invalid response.
         """
-        if not OPENROUTER_API_KEY:
+        if not self._should_use_proxy() and not OPENROUTER_API_KEY:
             raise RuntimeError(
-                "OPENROUTER_API_KEY required for LLM symbol generation"
+                "No LLM endpoint available for symbol generation. "
+                "Either set LLM_ANTHROPIC_ROUTE=claude_code_max or "
+                "provide OPENROUTER_API_KEY."
             )
 
         prompt = (
@@ -1721,10 +1746,11 @@ class SymbolAssembler:
             Path to the characterization markdown file, or ``None`` if
             creation failed.
         """
-        if not OPENROUTER_API_KEY:
+        if not self._should_use_proxy() and not OPENROUTER_API_KEY:
             logger.warning(
                 f"Cannot create characterization for {comp.part_number}: "
-                "OPENROUTER_API_KEY not set"
+                "no LLM endpoint available (set LLM_ANTHROPIC_ROUTE=claude_code_max "
+                "or OPENROUTER_API_KEY)"
             )
             return None
 
@@ -1787,7 +1813,7 @@ class SymbolAssembler:
         Returns:
             Direct URL to the datasheet PDF, or ``None`` if not found.
         """
-        if not OPENROUTER_API_KEY:
+        if not self._should_use_proxy() and not OPENROUTER_API_KEY:
             return None
 
         prompt = (
@@ -1929,12 +1955,38 @@ class SymbolAssembler:
         )
 
     # ------------------------------------------------------------------
-    # Opus 4.6 OpenRouter call
+    # LLM routing helpers
+    # ------------------------------------------------------------------
+
+    def _is_anthropic_model(self, model_id: str) -> bool:
+        """Check if a model ID refers to an Anthropic model."""
+        return model_id.startswith("anthropic/") or model_id.startswith("claude-")
+
+    def _should_use_proxy(self) -> bool:
+        """Whether to route Anthropic models through Claude Code Max proxy."""
+        return (
+            LLM_ANTHROPIC_ROUTE == "claude_code_max"
+            and self._is_anthropic_model(OPENROUTER_MODEL)
+        )
+
+    def _get_proxy_model_id(self) -> str:
+        """Translate OpenRouter model ID to native Anthropic model ID."""
+        return OPENROUTER_TO_ANTHROPIC_MODEL_ID.get(
+            OPENROUTER_MODEL, "claude-opus-4-6"
+        )
+
+    # ------------------------------------------------------------------
+    # Opus 4.6 LLM call (routes via proxy or OpenRouter)
     # ------------------------------------------------------------------
 
     async def _call_opus(self, prompt: str) -> str:
         """
-        Call Opus 4.6 via OpenRouter (OpenAI-compatible chat completions API).
+        Call Opus 4.6 via Claude Code Max proxy (preferred for Anthropic models)
+        or OpenRouter (for non-Anthropic models / when proxy is not configured).
+
+        Routing is controlled by LLM_ANTHROPIC_ROUTE env var:
+        - "claude_code_max": Anthropic models go through the in-cluster proxy
+        - any other value: all models go through OpenRouter
 
         Args:
             prompt: The user prompt to send.
@@ -1943,14 +1995,82 @@ class SymbolAssembler:
             The assistant response text.
 
         Raises:
-            RuntimeError: If the API key is missing, the HTTP call fails,
-                or the response is empty / malformed.
+            RuntimeError: If the LLM call fails for any reason.
         """
+        if self._should_use_proxy():
+            return await self._call_via_proxy(prompt)
+        return await self._call_via_openrouter(prompt)
+
+    async def _call_via_proxy(self, prompt: str) -> str:
+        """Route an Anthropic model call through Claude Code Max proxy."""
+        proxy_model = self._get_proxy_model_id()
+        endpoint = f"{LLM_CLAUDE_CODE_PROXY_URL}/v1/chat/completions"
+
+        logger.info(
+            "Routing Anthropic model through Claude Code Max proxy: "
+            f"model={proxy_model}, endpoint={endpoint}"
+        )
+
+        http = await self._get_http()
+
+        payload = {
+            "model": proxy_model,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 8192,
+            "temperature": 0.1,
+        }
+
+        try:
+            response = await http.post(
+                endpoint,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=float(LLM_CLAUDE_CODE_PROXY_TIMEOUT),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Claude Code Max proxy connection failed: {exc}. "
+                f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
+                f"Check proxy pod status: kubectl get pods -n nexus -l app=claude-code-proxy"
+            ) from exc
+
+        if response.status_code != 200:
+            error_body = response.text[:2000]
+            raise RuntimeError(
+                f"Claude Code Max proxy returned HTTP {response.status_code}. "
+                f"Model: {proxy_model}. "
+                f"Proxy URL: {endpoint}. "
+                f"Response body: {error_body}. "
+                f"Hint: Check proxy OAuth status via GET {LLM_CLAUDE_CODE_PROXY_URL}/auth/status"
+            )
+
+        data = response.json()
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError(
+                f"Claude Code Max proxy returned empty choices. "
+                f"Model: {proxy_model}. "
+                f"Full response: {json.dumps(data)[:2000]}"
+            )
+
+        return choices[0].get("message", {}).get("content", "")
+
+    async def _call_via_openrouter(self, prompt: str) -> str:
+        """Route an LLM call through OpenRouter."""
         if not OPENROUTER_API_KEY:
             raise RuntimeError(
-                "OPENROUTER_API_KEY environment variable is required for "
-                "Opus 4.6 calls"
+                "OPENROUTER_API_KEY environment variable is required. "
+                f"Model: {OPENROUTER_MODEL}. "
+                f"LLM_ANTHROPIC_ROUTE={LLM_ANTHROPIC_ROUTE}. "
+                "Hint: For Anthropic models, set LLM_ANTHROPIC_ROUTE=claude_code_max "
+                "to use the Claude Code Max proxy instead of OpenRouter."
             )
+
+        logger.info(
+            f"Routing model through OpenRouter: model={OPENROUTER_MODEL}"
+        )
 
         http = await self._get_http()
 
@@ -1977,10 +2097,21 @@ class SymbolAssembler:
 
         if response.status_code != 200:
             error_body = response.text[:2000]
+            status = response.status_code
+            hint = ""
+            if status == 401:
+                hint = (
+                    " Hint: OpenRouter API key is invalid or expired. "
+                    "Check OPENROUTER_API_KEY env var and OpenRouter dashboard."
+                )
+            elif status == 402:
+                hint = " Hint: OpenRouter account has insufficient credits."
+            elif status == 429:
+                hint = " Hint: OpenRouter rate limit exceeded. Retry after backoff."
             raise RuntimeError(
-                f"OpenRouter API returned HTTP {response.status_code}. "
+                f"OpenRouter API returned HTTP {status}. "
                 f"Model: {OPENROUTER_MODEL}. "
-                f"Response body: {error_body}"
+                f"Response body: {error_body}.{hint}"
             )
 
         data = response.json()
@@ -1988,6 +2119,7 @@ class SymbolAssembler:
         if not choices:
             raise RuntimeError(
                 f"OpenRouter API returned empty choices. "
+                f"Model: {OPENROUTER_MODEL}. "
                 f"Full response: {json.dumps(data)[:2000]}"
             )
 
