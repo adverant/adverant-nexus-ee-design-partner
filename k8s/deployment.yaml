@@ -52,7 +52,7 @@ spec:
 
       containers:
         - name: nexus-ee-design
-          image: localhost:5000/nexus-ee-design:nexus-ee-design-20260202-010513-bdfe383
+          image: localhost:5000/nexus-ee-design:nexus-ee-design-20260210-112246-8a13f4a
           imagePullPolicy: Always
 
           ports:
