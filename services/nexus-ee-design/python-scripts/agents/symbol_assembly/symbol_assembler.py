@@ -289,6 +289,7 @@ class AssemblyReport:
     symbols_llm_generated: int = 0
     datasheets_downloaded: int = 0
     characterizations_created: int = 0
+    status: str = "running"
     errors_count: int = 0
     components: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -303,6 +304,7 @@ class AssemblyReport:
         return {
             "project_id": self.project_id,
             "operationId": self.operation_id,
+            "status": self.status,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "total_components": self.total_components,
@@ -696,6 +698,7 @@ class SymbolAssembler:
             await self._ingest_to_graphrag(results)
 
             # Write assembly_report.json
+            report.status = "complete"
             report.completed_at = datetime.now(timezone.utc).isoformat()
             report_path = self._output_dir / "assembly_report.json"
             report_path.write_text(json.dumps(report.to_dict(), indent=2))
@@ -718,10 +721,22 @@ class SymbolAssembler:
             tb = traceback.format_exc()
             error_msg = f"Symbol assembly failed: {exc}\n{tb}"
             logger.error(error_msg)
+            # Print to stderr so Node route handler captures the actual error
+            print(f"ASSEMBLY_ERROR: {exc}", file=sys.stderr)
             self._progress.log_error(error_msg)
             report.errors.append(error_msg)
             report.errors_count += 1
+            report.status = "error"
             report.completed_at = datetime.now(timezone.utc).isoformat()
+            # Write error report to disk so GET endpoint returns error instead of 404
+            try:
+                report_path = self._output_dir / "assembly_report.json"
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(json.dumps(report.to_dict(), indent=2))
+                logger.info(f"Error report written to {report_path}")
+            except Exception as write_exc:
+                logger.error(f"Failed to write error report: {write_exc}")
+                print(f"ASSEMBLY_ERROR: Failed to write error report: {write_exc}", file=sys.stderr)
             return report
         finally:
             await self.close()
