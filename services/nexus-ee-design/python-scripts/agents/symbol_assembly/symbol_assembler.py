@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 from dataclasses import dataclass, field
@@ -838,15 +839,20 @@ class SymbolAssembler:
 
         response_text = await self._call_opus(prompt)
 
-        # Parse the JSON response
+        # Parse the JSON response - handle markdown fences and preamble text
         try:
             cleaned = response_text.strip()
-            if cleaned.startswith("```"):
-                first_newline = cleaned.index("\n")
-                cleaned = cleaned[first_newline + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
+
+            # Extract content from markdown code fences anywhere in response
+            fence_match = re.search(r'```(?:json)?\s*\n(.*?)```', cleaned, re.DOTALL)
+            if fence_match:
+                cleaned = fence_match.group(1).strip()
+            else:
+                # No fences - try to find raw JSON array
+                bracket_start = cleaned.find('[')
+                bracket_end = cleaned.rfind(']')
+                if bracket_start != -1 and bracket_end > bracket_start:
+                    cleaned = cleaned[bracket_start:bracket_end + 1]
 
             raw_components = json.loads(cleaned)
         except (json.JSONDecodeError, ValueError) as parse_err:
@@ -1600,14 +1606,16 @@ class SymbolAssembler:
 
         response_text = await self._call_opus(prompt)
 
-        # Clean response (strip markdown fences if present)
+        # Clean response (strip markdown fences and preamble text)
         cleaned = response_text.strip()
-        if cleaned.startswith("```"):
-            first_nl = cleaned.index("\n")
-            cleaned = cleaned[first_nl + 1:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
+        fence_match = re.search(r'```(?:\w*)\s*\n(.*?)```', cleaned, re.DOTALL)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+        elif not cleaned.startswith("(symbol"):
+            # No fences, try to find S-expression start
+            sym_start = cleaned.find("(symbol")
+            if sym_start != -1:
+                cleaned = cleaned[sym_start:]
 
         if not cleaned.startswith("(symbol"):
             logger.error(
