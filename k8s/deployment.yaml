@@ -130,7 +130,7 @@ spec:
             - name: LLM_CLAUDE_CODE_PROXY_URL
               value: "http://claude-code-proxy.nexus.svc.cluster.local:3100"
             - name: LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS
-              value: "300"
+              value: "600"
 
             # API Keys from secrets (optional - only needed for non-Anthropic
             # models or when LLM_ANTHROPIC_ROUTE != "claude_code_max")

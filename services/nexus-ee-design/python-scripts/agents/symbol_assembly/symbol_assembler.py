@@ -60,7 +60,7 @@ LLM_CLAUDE_CODE_PROXY_URL: str = os.environ.get(
     "http://claude-code-proxy.nexus.svc.cluster.local:3100",
 )
 LLM_CLAUDE_CODE_PROXY_TIMEOUT: int = int(
-    os.environ.get("LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS", "300")
+    os.environ.get("LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS", "600")
 )
 
 # Map OpenRouter model IDs to native Anthropic model IDs for the proxy
@@ -2037,16 +2037,38 @@ class SymbolAssembler:
             "temperature": 0.1,
         }
 
+        # Use separate timeouts: connect should be fast, read can be slow
+        # for large prompts (22 artifacts → long Opus response time).
+        proxy_timeout = httpx.Timeout(
+            connect=30.0,
+            read=float(LLM_CLAUDE_CODE_PROXY_TIMEOUT),
+            write=60.0,
+            pool=30.0,
+        )
+
         try:
             response = await http.post(
                 endpoint,
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=float(LLM_CLAUDE_CODE_PROXY_TIMEOUT),
+                timeout=proxy_timeout,
             )
+        except httpx.ReadTimeout as exc:
+            raise RuntimeError(
+                f"Claude Code Max proxy read timeout after {LLM_CLAUDE_CODE_PROXY_TIMEOUT}s. "
+                f"The prompt may be too large for a single LLM call. "
+                f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
+                f"Consider increasing LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS (current: {LLM_CLAUDE_CODE_PROXY_TIMEOUT})"
+            ) from exc
+        except httpx.ConnectError as exc:
+            raise RuntimeError(
+                f"Claude Code Max proxy connection refused. "
+                f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
+                f"Check proxy pod status: kubectl get pods -n nexus -l app=claude-code-proxy"
+            ) from exc
         except Exception as exc:
             raise RuntimeError(
-                f"Claude Code Max proxy connection failed: {exc}. "
+                f"Claude Code Max proxy request failed: {exc}. "
                 f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
                 f"Check proxy pod status: kubectl get pods -n nexus -l app=claude-code-proxy"
             ) from exc
