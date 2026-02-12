@@ -103,6 +103,9 @@ export function createSymbolAssemblyRoutes(): Router {
       // Get WebSocket manager for streaming progress
       const wsManager = getSchematicWsManager();
 
+      // Register operation in WebSocket manager so events aren't dropped
+      wsManager.createOperation(projectId, operationId);
+
       // Create output directory
       const outputDir = path.join(config.artifacts.basePath, projectId, 'symbol-assembly');
       await fs.mkdir(outputDir, { recursive: true });
@@ -136,6 +139,15 @@ export function createSymbolAssemblyRoutes(): Router {
         '--output-dir', outputDir,
       ]);
 
+      // Emit initial start event so frontend leaves "Initializing..."
+      wsManager.emitProgress(operationId, {
+        type: SchematicEventType.SYMBOL_ASSEMBLY_START,
+        operationId,
+        timestamp: new Date().toISOString(),
+        progress_percentage: 0,
+        current_step: `Starting symbol assembly for ${ideationArtifacts.length} artifacts...`,
+      });
+
       // Stream progress to WebSocket
       python.stdout.on('data', (data) => {
         const lines = data.toString().split('\n');
@@ -158,7 +170,17 @@ export function createSymbolAssemblyRoutes(): Router {
       });
 
       python.stderr.on('data', (data) => {
-        log.error('Symbol assembler error', { operation: operationId, stderr: data.toString() } as any);
+        const stderr = data.toString().trim();
+        log.error('Symbol assembler error', { operation: operationId, stderr } as any);
+        // Forward stderr to client so errors are visible
+        wsManager.emitProgress(operationId, {
+          type: SchematicEventType.ERROR,
+          operationId,
+          timestamp: new Date().toISOString(),
+          progress_percentage: 0,
+          current_step: `Python error: ${stderr.slice(0, 200)}`,
+          error_message: stderr,
+        });
       });
 
       python.on('close', (code) => {

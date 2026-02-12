@@ -105,8 +105,8 @@ export class SchematicWebSocketManager extends EventEmitter {
    * Create a new operation and return its ID.
    * Call this when starting schematic generation.
    */
-  createOperation(projectId: string): string {
-    const operationId = uuidv4();
+  createOperation(projectId: string, existingOperationId?: string): string {
+    const operationId = existingOperationId || uuidv4();
     const operation: SchematicOperation = {
       operationId,
       projectId,
