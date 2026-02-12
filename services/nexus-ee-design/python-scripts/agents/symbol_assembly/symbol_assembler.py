@@ -883,9 +883,10 @@ class SymbolAssembler:
                 f"{len(chunk_parts)} artifacts, "
                 f"{len(prompt)} chars prompt"
             )
-            await self._emit(
-                f"[ANALYZE] Parsing ideation artifacts with Opus 4.6... "
-                f"({chunk_label})"
+            self._progress.log_analyze(
+                f"Parsing ideation artifacts with Opus 4.6... "
+                f"({chunk_label})",
+                phase_progress=int((chunk_idx / len(chunks)) * 90),
             )
 
             response_text = await self._call_opus(prompt)
