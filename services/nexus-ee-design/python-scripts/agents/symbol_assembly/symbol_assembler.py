@@ -787,7 +787,7 @@ class SymbolAssembler:
                 "Code Max proxy) or provide OPENROUTER_API_KEY."
             )
 
-        # Serialize artifacts into a text block for the LLM
+        # Serialize artifacts into text parts for the LLM
         artifact_text_parts: List[str] = []
         for artifact in artifacts:
             name = artifact.get("name", "untitled")
@@ -805,9 +805,31 @@ class SymbolAssembler:
             logger.warning("No artifact content to analyze")
             return []
 
-        combined_text = "\n".join(artifact_text_parts)
+        # Chunk artifacts into batches to avoid exceeding context window.
+        # Each chunk is processed separately, then results are merged.
+        # ~80K chars per chunk keeps prompts well within the 200K token limit.
+        MAX_CHUNK_CHARS = 80_000
+        chunks: List[List[str]] = []
+        current_chunk: List[str] = []
+        current_size = 0
+        for part in artifact_text_parts:
+            part_len = len(part)
+            if current_chunk and current_size + part_len > MAX_CHUNK_CHARS:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_size = 0
+            current_chunk.append(part)
+            current_size += part_len
+        if current_chunk:
+            chunks.append(current_chunk)
 
-        prompt = (
+        logger.info(
+            f"Split {len(artifact_text_parts)} artifacts into "
+            f"{len(chunks)} analysis chunks "
+            f"(max {MAX_CHUNK_CHARS} chars/chunk)"
+        )
+
+        extraction_prompt_template = (
             "You are an expert electronics engineer. Analyze the following "
             "ideation artifacts from an EE design project and extract EVERY "
             "electronic component referenced. Return a JSON array of objects, "
@@ -846,42 +868,42 @@ class SymbolAssembler:
             "explanation.\n"
             "\n"
             "ARTIFACTS:\n"
-            f"{combined_text}"
         )
 
-        response_text = await self._call_opus(prompt)
+        # Process each chunk and collect raw component dicts
+        all_raw_components: List[dict] = []
+        for chunk_idx, chunk_parts in enumerate(chunks):
+            chunk_text = "\n".join(chunk_parts)
+            chunk_label = f"chunk {chunk_idx + 1}/{len(chunks)}"
 
-        # Parse the JSON response - handle markdown fences and preamble text
-        try:
-            cleaned = response_text.strip()
+            prompt = extraction_prompt_template + chunk_text
 
-            # Extract content from markdown code fences anywhere in response
-            fence_match = re.search(r'```(?:json)?\s*\n(.*?)```', cleaned, re.DOTALL)
-            if fence_match:
-                cleaned = fence_match.group(1).strip()
-            else:
-                # No fences - try to find raw JSON array
-                bracket_start = cleaned.find('[')
-                bracket_end = cleaned.rfind(']')
-                if bracket_start != -1 and bracket_end > bracket_start:
-                    cleaned = cleaned[bracket_start:bracket_end + 1]
-
-            raw_components = json.loads(cleaned)
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            error_msg = (
-                f"Failed to parse Opus 4.6 component extraction response as "
-                f"JSON. Parse error: {parse_err}. "
-                f"Response (first 2000 chars): {response_text[:2000]}"
+            logger.info(
+                f"Analyzing {chunk_label}: "
+                f"{len(chunk_parts)} artifacts, "
+                f"{len(prompt)} chars prompt"
             )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg) from parse_err
-
-        if not isinstance(raw_components, list):
-            raise RuntimeError(
-                f"Opus 4.6 returned non-array type "
-                f"({type(raw_components).__name__}) for component extraction. "
-                f"Response: {response_text[:2000]}"
+            await self._emit(
+                f"[ANALYZE] Parsing ideation artifacts with Opus 4.6... "
+                f"({chunk_label})"
             )
+
+            response_text = await self._call_opus(prompt)
+
+            # Parse this chunk's response
+            raw_components = self._parse_component_json(
+                response_text, chunk_label
+            )
+            all_raw_components.extend(raw_components)
+
+            logger.info(
+                f"Chunk {chunk_idx + 1}/{len(chunks)} yielded "
+                f"{len(raw_components)} components"
+            )
+
+        raw_components = all_raw_components
+
+        # JSON parsing is now handled per-chunk in _parse_component_json()
 
         components: List[ComponentRequirement] = []
         for raw in raw_components:
@@ -916,6 +938,61 @@ class SymbolAssembler:
             f"{len(artifacts)} ideation artifacts"
         )
         return deduped
+
+    # ------------------------------------------------------------------
+    # JSON parsing helper for component extraction
+    # ------------------------------------------------------------------
+
+    def _parse_component_json(
+        self, response_text: str, context_label: str
+    ) -> List[dict]:
+        """Parse LLM response text into a list of component dicts.
+
+        Handles markdown code fences, preamble text, and raw JSON arrays.
+
+        Args:
+            response_text: Raw LLM response string.
+            context_label: Label for error messages (e.g., "chunk 1/3").
+
+        Returns:
+            List of raw component dicts.
+
+        Raises:
+            RuntimeError: If the response cannot be parsed as a JSON array.
+        """
+        try:
+            cleaned = response_text.strip()
+
+            # Extract content from markdown code fences anywhere in response
+            fence_match = re.search(
+                r'```(?:json)?\s*\n(.*?)```', cleaned, re.DOTALL
+            )
+            if fence_match:
+                cleaned = fence_match.group(1).strip()
+            else:
+                # No fences — try to find raw JSON array
+                bracket_start = cleaned.find('[')
+                bracket_end = cleaned.rfind(']')
+                if bracket_start != -1 and bracket_end > bracket_start:
+                    cleaned = cleaned[bracket_start:bracket_end + 1]
+
+            parsed = json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError) as parse_err:
+            raise RuntimeError(
+                f"Failed to parse Opus 4.6 component extraction response "
+                f"({context_label}) as JSON. Parse error: {parse_err}. "
+                f"Response (first 2000 chars): {response_text[:2000]}"
+            ) from parse_err
+
+        if not isinstance(parsed, list):
+            raise RuntimeError(
+                f"Opus 4.6 returned non-array type "
+                f"({type(parsed).__name__}) for component extraction "
+                f"({context_label}). "
+                f"Response: {response_text[:2000]}"
+            )
+
+        return parsed
 
     # ------------------------------------------------------------------
     # Phase 2-7: Gather symbol + datasheet for a single component
