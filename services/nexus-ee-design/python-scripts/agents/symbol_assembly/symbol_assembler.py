@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -76,6 +77,17 @@ OPENROUTER_TO_ANTHROPIC_MODEL_ID: dict[str, str] = {
 
 NEXUS_API_KEY: str = os.environ.get("NEXUS_API_KEY", "")
 NEXUS_API_URL: str = os.environ.get("NEXUS_API_URL", "https://api.adverant.ai")
+
+# Internal GraphRAG service (direct cluster communication, no auth required)
+GRAPHRAG_INTERNAL_URL: str = os.environ.get(
+    "GRAPHRAG_INTERNAL_URL",
+    os.environ.get(
+        "NEXUS_GRAPHRAG_URL",
+        "http://nexus-graphrag.nexus.svc.cluster.local:8090",
+    ),
+)
+GRAPHRAG_COMPANY_ID: str = os.environ.get("GRAPHRAG_COMPANY_ID", "adverant")
+GRAPHRAG_APP_ID: str = os.environ.get("GRAPHRAG_APP_ID", "ee-design")
 
 KICAD_WORKER_URL: str = os.environ.get(
     "KICAD_WORKER_URL", "http://mapos-kicad-worker:8080"
@@ -1180,87 +1192,131 @@ class SymbolAssembler:
     # Public source search methods
     # ------------------------------------------------------------------
 
+    def _graphrag_internal_headers(self) -> Dict[str, str]:
+        """Standard headers for internal GraphRAG requests (no auth required)."""
+        return {
+            "Content-Type": "application/json",
+            "X-Company-ID": GRAPHRAG_COMPANY_ID,
+            "X-App-ID": GRAPHRAG_APP_ID,
+            "X-Service-Name": "nexus-ee-design",
+            "X-Internal-Request": "true",
+        }
+
     async def search_graphrag(
         self,
         component: ComponentRequirement,
     ) -> Optional[Dict[str, Any]]:
         """
-        Search Nexus Memory / GraphRAG for previously ingested component data.
+        Search GraphRAG for previously ingested component resolution data.
 
-        ``POST https://api.adverant.ai/api/memory/recall``
-        ``Authorization: Bearer {NEXUS_API_KEY}``
+        Uses the internal cluster API (no auth required):
+        ``POST {GRAPHRAG_INTERNAL_URL}/internal/search``
 
-        Query: ``"{part_number} {manufacturer} schematic symbol datasheet"``
+        Searches for entities with matching part_number in domain 'technical'.
+        Results are filtered by relevance score (>0.5) and content matching.
 
         Args:
             component: The component requirement to search for.
 
         Returns:
-            A dict containing ``symbol_content``, ``datasheet_url``,
+            A dict with ``symbol_content``, ``datasheet_url``,
             ``last_success``, ``confidence`` if found.  ``None`` otherwise.
         """
-        if not NEXUS_API_KEY:
-            logger.debug("No NEXUS_API_KEY, skipping GraphRAG search")
-            return None
-
         http = await self._get_http()
 
-        query = (
+        search_text = (
             f"{component.part_number} {component.manufacturer} "
-            f"schematic symbol datasheet"
+            f"{component.package} schematic symbol KiCad"
         )
 
-        response = await http.post(
-            f"{NEXUS_API_URL}/api/memory/recall",
-            headers={
-                "Authorization": f"Bearer {NEXUS_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "query": query,
-                "limit": 5,
-                "filters": {
-                    "event_type": "component_resolution",
+        search_url = f"{GRAPHRAG_INTERNAL_URL}/internal/search"
+        try:
+            response = await http.post(
+                search_url,
+                headers=self._graphrag_internal_headers(),
+                json={
+                    "text": search_text,
+                    "domain": "technical",
+                    "limit": 10,
+                    "minScore": 0.4,
                 },
-            },
-        )
+                timeout=15.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"GraphRAG search request failed for {component.part_number}: "
+                f"{type(exc).__name__}: {exc}. URL: {search_url}"
+            )
+            return None
 
         if response.status_code != 200:
             logger.warning(
-                f"GraphRAG recall returned HTTP {response.status_code} "
-                f"for {component.part_number}. Body: {response.text[:500]}"
+                f"GraphRAG search returned HTTP {response.status_code} "
+                f"for {component.part_number}. URL: {search_url}. "
+                f"Body: {response.text[:500]}"
             )
             return None
 
         data = response.json()
-        memories = data.get("memories", [])
+        if not data.get("success"):
+            logger.warning(
+                f"GraphRAG search unsuccessful for {component.part_number}: "
+                f"{data.get('error', {}).get('message', 'unknown error')}"
+            )
+            return None
 
-        for memory in memories:
-            content = memory.get("content", "")
-            if isinstance(content, str):
+        results = data.get("data", {}).get("results", [])
+
+        # Search through results for component_resolution entities
+        pn_lower = component.part_number.lower()
+        for result in results:
+            content_str = result.get("content", "")
+            metadata = result.get("metadata", {})
+            score = result.get("score", 0)
+
+            # Check metadata first (structured match)
+            if metadata.get("part_number", "").lower() == pn_lower:
+                return self._extract_component_from_result(
+                    content_str, metadata, score
+                )
+
+            # Check content for embedded JSON with part_number
+            if isinstance(content_str, str) and pn_lower in content_str.lower():
                 try:
-                    parsed = json.loads(content)
+                    parsed = json.loads(content_str)
+                    if isinstance(parsed, dict):
+                        mem_pn = str(parsed.get("part_number", "")).lower()
+                        if mem_pn == pn_lower or pn_lower in mem_pn:
+                            return self._extract_component_from_result(
+                                content_str, metadata, score, parsed
+                            )
                 except json.JSONDecodeError:
-                    continue
-            else:
-                parsed = content
-
-            # Check if this matches our component
-            mem_pn = str(parsed.get("part_number", "")).lower()
-            if (
-                mem_pn == component.part_number.lower()
-                or component.part_number.lower() in mem_pn
-            ):
-                resolution = parsed.get("resolution", parsed)
-                return {
-                    "symbol_content": resolution.get("symbol_content", ""),
-                    "source": resolution.get("source", "graphrag"),
-                    "datasheet_url": resolution.get("datasheet_url", ""),
-                    "last_success": resolution.get("last_success", ""),
-                    "confidence": resolution.get("confidence", 0.8),
-                }
+                    pass
 
         return None
+
+    def _extract_component_from_result(
+        self,
+        content_str: str,
+        metadata: Dict[str, Any],
+        score: float,
+        parsed: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Extract symbol data from a GraphRAG search result."""
+        if parsed is None:
+            try:
+                parsed = json.loads(content_str)
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+
+        resolution = parsed.get("resolution", parsed)
+        return {
+            "symbol_content": resolution.get("symbol_content", ""),
+            "source": resolution.get("source", "graphrag"),
+            "datasheet_url": resolution.get("datasheet_url", ""),
+            "last_success": resolution.get("last_success", ""),
+            "confidence": resolution.get("confidence", score),
+        }
 
     async def search_kicad(
         self,
@@ -1868,17 +1924,17 @@ class SymbolAssembler:
         results: List[ComponentGatherResult],
     ) -> None:
         """
-        Store all gathered data into GraphRAG via
-        ``POST https://api.adverant.ai/api/memory/store`` so future sessions
+        Store all gathered component data into GraphRAG via the internal API
+        ``POST {GRAPHRAG_INTERNAL_URL}/internal/entities`` so future sessions
         can find these components via GraphRAG-first search.
+
+        Each component is stored as a 'technical' domain entity with
+        structured metadata for exact part_number matching and vector
+        similarity search.
 
         Args:
             results: List of component gather results to ingest.
         """
-        if not NEXUS_API_KEY:
-            logger.warning("No NEXUS_API_KEY, skipping GraphRAG ingestion")
-            return
-
         successful = [r for r in results if r.symbol_found]
         if not successful:
             logger.info("No successful results to ingest into GraphRAG")
@@ -1891,12 +1947,14 @@ class SymbolAssembler:
         )
 
         http = await self._get_http()
+        store_url = f"{GRAPHRAG_INTERNAL_URL}/internal/entities"
         stored = 0
         errors = 0
 
         for idx, result in enumerate(successful):
             try:
-                memory_content = json.dumps(
+                # Build structured content for vector search and exact match
+                entity_content = json.dumps(
                     {
                         "type": "component_resolution",
                         "part_number": result.part_number,
@@ -1928,38 +1986,52 @@ class SymbolAssembler:
                     }
                 )
 
+                entity_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    f"component:{result.part_number}:{result.manufacturer}",
+                ))
+
                 response = await http.post(
-                    f"{NEXUS_API_URL}/api/memory/store",
-                    headers={
-                        "Authorization": f"Bearer {NEXUS_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
+                    store_url,
+                    headers=self._graphrag_internal_headers(),
                     json={
-                        "content": memory_content,
-                        "event_type": "component_resolution",
+                        "id": entity_id,
+                        "domain": "technical",
+                        "entityType": "component_resolution",
+                        "content": entity_content,
                         "metadata": {
                             "part_number": result.part_number,
                             "manufacturer": result.manufacturer,
                             "category": result.category,
+                            "package": result.package,
                             "source": result.symbol_source,
                             "project_id": self.project_id,
+                            "pin_count": result.pin_count,
+                            "event_type": "component_resolution",
                         },
                     },
+                    timeout=30.0,
                 )
 
-                if response.status_code == 200:
+                if response.status_code in (200, 201):
                     stored += 1
+                    logger.debug(
+                        f"Stored {result.part_number} to GraphRAG "
+                        f"(entity: {entity_id})"
+                    )
                 else:
                     errors += 1
                     logger.warning(
                         f"GraphRAG store returned HTTP "
                         f"{response.status_code} for {result.part_number}. "
+                        f"URL: {store_url}. "
                         f"Body: {response.text[:500]}"
                     )
             except Exception as exc:
                 errors += 1
                 logger.warning(
-                    f"GraphRAG store failed for {result.part_number}: {exc}"
+                    f"GraphRAG store failed for {result.part_number}: "
+                    f"{type(exc).__name__}: {exc}. URL: {store_url}"
                 )
 
             # Update progress
