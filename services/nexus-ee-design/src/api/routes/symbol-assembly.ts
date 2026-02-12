@@ -171,16 +171,28 @@ export function createSymbolAssemblyRoutes(): Router {
 
       python.stderr.on('data', (data) => {
         const stderr = data.toString().trim();
-        log.error('Symbol assembler error', { operation: operationId, stderr } as any);
-        // Forward stderr to client so errors are visible
-        wsManager.emitProgress(operationId, {
-          type: SchematicEventType.ERROR,
-          operationId,
-          timestamp: new Date().toISOString(),
-          progress_percentage: 0,
-          current_step: `Python error: ${stderr.slice(0, 200)}`,
-          error_message: stderr,
-        });
+        if (!stderr) return;
+
+        // Python logging writes all levels to stderr by default.
+        // Only forward WARNING/ERROR/CRITICAL as error events to the UI.
+        const isActualError = /\[(ERROR|CRITICAL|WARNING)\]/.test(stderr)
+          || /Traceback \(most recent call last\)/.test(stderr)
+          || /^(Error|Exception|RuntimeError|ConnectionError|TimeoutError)/i.test(stderr);
+
+        if (isActualError) {
+          log.error('Symbol assembler error', { operation: operationId, stderr } as any);
+          wsManager.emitProgress(operationId, {
+            type: SchematicEventType.ERROR,
+            operationId,
+            timestamp: new Date().toISOString(),
+            progress_percentage: 0,
+            current_step: `Python error: ${stderr.slice(0, 200)}`,
+            error_message: stderr,
+          });
+        } else {
+          // INFO/DEBUG logs - just log server-side, don't spam the UI
+          log.debug('Symbol assembler log', { operation: operationId, stderr } as any);
+        }
       });
 
       python.on('close', (code) => {
