@@ -2017,13 +2017,19 @@ class SymbolAssembler:
         return await self._call_via_openrouter(prompt)
 
     async def _call_via_proxy(self, prompt: str) -> str:
-        """Route an Anthropic model call through Claude Code Max proxy."""
+        """Route an Anthropic model call through Claude Code Max proxy.
+
+        Uses SSE streaming (stream=true) so the proxy sends HTTP headers
+        immediately with keepalive pings. This prevents read timeouts on
+        large prompts where the CLI takes 5-15 minutes to respond.
+        """
         proxy_model = self._get_proxy_model_id()
         endpoint = f"{LLM_CLAUDE_CODE_PROXY_URL}/v1/chat/completions"
 
         logger.info(
-            "Routing Anthropic model through Claude Code Max proxy: "
-            f"model={proxy_model}, endpoint={endpoint}"
+            "Routing Anthropic model through Claude Code Max proxy (streaming): "
+            f"model={proxy_model}, endpoint={endpoint}, "
+            f"prompt_length={len(prompt)}"
         )
 
         http = await self._get_http()
@@ -2035,10 +2041,11 @@ class SymbolAssembler:
             ],
             "max_tokens": 8192,
             "temperature": 0.1,
+            "stream": True,  # SSE streaming: headers arrive immediately
         }
 
-        # Use separate timeouts: connect should be fast, read can be slow
-        # for large prompts (22 artifacts → long Opus response time).
+        # With streaming, headers arrive instantly and keepalive pings flow
+        # every 15s. Read timeout only needs to cover gaps between SSE events.
         proxy_timeout = httpx.Timeout(
             connect=30.0,
             read=float(LLM_CLAUDE_CODE_PROXY_TIMEOUT),
@@ -2047,52 +2054,92 @@ class SymbolAssembler:
         )
 
         try:
-            response = await http.post(
+            content_parts: list[str] = []
+            async with http.stream(
+                "POST",
                 endpoint,
                 headers={"Content-Type": "application/json"},
                 json=payload,
                 timeout=proxy_timeout,
+            ) as response:
+                if response.status_code != 200:
+                    error_body = (await response.aread()).decode()[:2000]
+                    raise RuntimeError(
+                        f"Claude Code Max proxy returned HTTP {response.status_code}. "
+                        f"Model: {proxy_model}. "
+                        f"Proxy URL: {endpoint}. "
+                        f"Response body: {error_body}. "
+                        f"Hint: Check proxy OAuth status via "
+                        f"GET {LLM_CLAUDE_CODE_PROXY_URL}/auth/status"
+                    )
+
+                # Parse SSE events from the stream
+                async for line in response.aiter_lines():
+                    if not line or line.startswith(": keepalive"):
+                        continue  # Skip keepalive pings and empty lines
+
+                    if line.startswith("data: "):
+                        data_str = line[6:]  # Strip "data: " prefix
+
+                        if data_str == "[DONE]":
+                            break
+
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Check for error events
+                        if "error" in chunk:
+                            error_msg = chunk["error"].get("message", str(chunk["error"]))
+                            raise RuntimeError(
+                                f"Claude Code Max proxy error: {error_msg}"
+                            )
+
+                        # Extract content delta from streaming chunks
+                        choices = chunk.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                content_parts.append(content)
+
+            result = "".join(content_parts)
+            if not result:
+                raise RuntimeError(
+                    f"Claude Code Max proxy returned empty content via streaming. "
+                    f"Model: {proxy_model}. "
+                    f"Proxy URL: {endpoint}"
+                )
+
+            logger.info(
+                f"Proxy streaming response received: "
+                f"{len(result)} chars in {len(content_parts)} chunks"
             )
+            return result
+
         except httpx.ReadTimeout as exc:
             raise RuntimeError(
                 f"Claude Code Max proxy read timeout after {LLM_CLAUDE_CODE_PROXY_TIMEOUT}s. "
                 f"The prompt may be too large for a single LLM call. "
                 f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
-                f"Consider increasing LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS (current: {LLM_CLAUDE_CODE_PROXY_TIMEOUT})"
+                f"Consider increasing LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS "
+                f"(current: {LLM_CLAUDE_CODE_PROXY_TIMEOUT})"
             ) from exc
         except httpx.ConnectError as exc:
             raise RuntimeError(
                 f"Claude Code Max proxy connection refused. "
                 f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
-                f"Check proxy pod status: kubectl get pods -n nexus -l app=claude-code-proxy"
+                f"Check proxy pod: kubectl get pods -n nexus -l app=claude-code-proxy"
             ) from exc
+        except RuntimeError:
+            raise  # Re-raise our own RuntimeErrors
         except Exception as exc:
             raise RuntimeError(
                 f"Claude Code Max proxy request failed: {exc}. "
                 f"Proxy URL: {LLM_CLAUDE_CODE_PROXY_URL}. "
-                f"Check proxy pod status: kubectl get pods -n nexus -l app=claude-code-proxy"
+                f"Check proxy pod: kubectl get pods -n nexus -l app=claude-code-proxy"
             ) from exc
-
-        if response.status_code != 200:
-            error_body = response.text[:2000]
-            raise RuntimeError(
-                f"Claude Code Max proxy returned HTTP {response.status_code}. "
-                f"Model: {proxy_model}. "
-                f"Proxy URL: {endpoint}. "
-                f"Response body: {error_body}. "
-                f"Hint: Check proxy OAuth status via GET {LLM_CLAUDE_CODE_PROXY_URL}/auth/status"
-            )
-
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError(
-                f"Claude Code Max proxy returned empty choices. "
-                f"Model: {proxy_model}. "
-                f"Full response: {json.dumps(data)[:2000]}"
-            )
-
-        return choices[0].get("message", {}).get("content", "")
 
     async def _call_via_openrouter(self, prompt: str) -> str:
         """Route an LLM call through OpenRouter."""
