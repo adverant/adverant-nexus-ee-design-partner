@@ -92,6 +92,8 @@ spec:
             # NFS-backed artifact storage (accessible from terminal-computer)
             - name: ARTIFACT_STORAGE_PATH
               value: "/data/artifacts"
+            - name: ARTIFACTS_BASE_PATH
+              value: "/data/artifacts"
             - name: KICAD_WORKER_URL
               value: "http://mapos-kicad-worker.nexus.svc.cluster.local:8080"
 

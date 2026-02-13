@@ -24,6 +24,7 @@ import { createHILRoutes } from './hil-routes.js';
 import { getSchematicWsManager } from './schematic-ws.js';
 import { createSymbolAssemblyRoutes } from './routes/symbol-assembly.js';
 import { createComplianceRoutes } from './routes/compliance.js';
+import { createArtifactBrowserRoutes } from './routes/artifact-browser.js';
 
 // Repository imports
 import {
@@ -4023,6 +4024,13 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.use('/projects/:projectId/symbol-assembly', createSymbolAssemblyRoutes());
   log.info('Symbol assembly routes mounted');
+
+  // ============================================================================
+  // Artifact Browser Routes (NFS + DB unified browsing)
+  // ============================================================================
+
+  router.use('/projects/:projectId/artifact-browser', createArtifactBrowserRoutes());
+  log.info('Artifact browser routes mounted');
 
   // ============================================================================
   // Compliance Validation Routes (MAPO v3.0)
