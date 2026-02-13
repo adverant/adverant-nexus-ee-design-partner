@@ -1645,8 +1645,12 @@ class SymbolAssembler:
         try:
             snapeda_data = await self.search_snapeda(comp)
             if snapeda_data:
+                found_parts = ["symbol"]
+                if snapeda_data.get("datasheet_url"):
+                    found_parts.append("datasheet")
                 self._progress.log_snapeda(
-                    f"Searching SnapEDA for {comp.part_number}... FOUND",
+                    f"Searching SnapEDA for {comp.part_number}... "
+                    f"FOUND ({' + '.join(found_parts)})",
                     phase_progress=phase_pct(),
                 )
                 result.symbol_found = True
@@ -1680,8 +1684,12 @@ class SymbolAssembler:
         try:
             ul_data = await self.search_ultralibrarian(comp)
             if ul_data:
+                found_parts = ["symbol"]
+                if ul_data.get("datasheet_url"):
+                    found_parts.append("datasheet")
                 self._progress.log_ultralibrarian(
-                    f"Searching UltraLibrarian for {comp.part_number}... FOUND",
+                    f"Searching UltraLibrarian for {comp.part_number}... "
+                    f"FOUND ({' + '.join(found_parts)})",
                     phase_progress=phase_pct(),
                 )
                 result.symbol_found = True
@@ -1737,11 +1745,7 @@ class SymbolAssembler:
                         )
                         logger.warning(error_detail)
                         result.errors.append(error_detail)
-            else:
-                logger.info(
-                    f"No datasheet found for {comp.part_number} from "
-                    f"DigiKey/Mouser/LCSC/manufacturer sites"
-                )
+            # _search_datasheets already emits NOT FOUND progress logs
         except Exception as exc:
             error_detail = (
                 f"Datasheet search failed for {comp.part_number}: {exc}"
@@ -2426,8 +2430,13 @@ class SymbolAssembler:
 
                 ds_url = products[0].get("DatasheetUrl", "")
                 if ds_url:
+                    match_note = (
+                        f" (matched via truncated variant '{variant}')"
+                        if variant != mpn else ""
+                    )
                     logger.info(
-                        f"DigiKey API found datasheet for '{variant}': {ds_url}"
+                        f"DigiKey API found datasheet for '{mpn}'"
+                        f"{match_note}: {ds_url}"
                     )
                     return {"source": "digikey", "url": ds_url}
             except Exception as exc:
@@ -2490,8 +2499,13 @@ class SymbolAssembler:
 
                 ds_url = parts[0].get("DataSheetUrl", "")
                 if ds_url:
+                    match_note = (
+                        f" (matched via truncated variant '{variant}')"
+                        if variant != mpn else ""
+                    )
                     logger.info(
-                        f"Mouser API found datasheet for '{variant}': {ds_url}"
+                        f"Mouser API found datasheet for '{mpn}'"
+                        f"{match_note}: {ds_url}"
                     )
                     return {"source": "mouser", "url": ds_url}
             except Exception as exc:
@@ -2840,8 +2854,14 @@ class SymbolAssembler:
         """
         http = await self._get_http()
 
+        pn = comp.part_number
+
         # ---- Strategy 1: Manufacturer direct URLs ----
         candidates = self._build_manufacturer_datasheet_urls(comp)
+        if candidates:
+            self._progress.log_datasheet(
+                f"Searching manufacturer URLs for {pn}...",
+            )
         for source, ds_url in candidates:
             try:
                 head_resp = await http.head(ds_url, timeout=10.0)
@@ -2857,37 +2877,106 @@ class SymbolAssembler:
                         or content_len > 10_000
                     ):
                         logger.info(
-                            f"Datasheet found for {comp.part_number} "
+                            f"Datasheet found for {pn} "
                             f"from {source}: {ds_url}"
+                        )
+                        self._progress.log_datasheet(
+                            f"Searching manufacturer URLs for {pn}... "
+                            f"FOUND via {source}",
                         )
                         return {"source": source, "url": ds_url}
             except Exception as exc:
                 logger.debug(
                     f"Manufacturer URL check failed for "
-                    f"{comp.part_number} ({source}): {exc}"
+                    f"{pn} ({source}): {exc}"
                 )
+        if candidates:
+            self._progress.log_datasheet(
+                f"Searching manufacturer URLs for {pn}... NOT FOUND",
+            )
 
         # ---- Strategy 2: Nexar (Octopart) GraphQL API ----
-        nexar_result = await self.search_nexar_datasheet(comp)
-        if nexar_result:
-            return nexar_result
+        has_nexar = bool(NEXAR_CLIENT_ID and NEXAR_CLIENT_SECRET)
+        if has_nexar:
+            self._progress.log_datasheet(
+                f"Searching Nexar/Octopart for {pn}...",
+            )
+            nexar_result = await self.search_nexar_datasheet(comp)
+            if nexar_result:
+                self._progress.log_datasheet(
+                    f"Searching Nexar/Octopart for {pn}... "
+                    f"FOUND ({nexar_result['url'][:80]})",
+                )
+                return nexar_result
+            self._progress.log_datasheet(
+                f"Searching Nexar/Octopart for {pn}... NOT FOUND",
+            )
+        else:
+            self._progress.log_datasheet(
+                f"Nexar/Octopart: skipped (no credentials configured)",
+            )
 
         # ---- Strategy 3: DigiKey API (proper OAuth) ----
-        digikey_result = await self.search_digikey_api(comp.part_number)
-        if digikey_result:
-            return digikey_result
+        has_digikey = bool(DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET)
+        if has_digikey:
+            self._progress.log_datasheet(
+                f"Searching DigiKey API for {pn}...",
+            )
+            digikey_result = await self.search_digikey_api(pn)
+            if digikey_result:
+                self._progress.log_datasheet(
+                    f"Searching DigiKey API for {pn}... "
+                    f"FOUND ({digikey_result['url'][:80]})",
+                )
+                return digikey_result
+            self._progress.log_datasheet(
+                f"Searching DigiKey API for {pn}... NOT FOUND",
+            )
+        else:
+            self._progress.log_datasheet(
+                f"DigiKey API: skipped (no credentials configured)",
+            )
 
         # ---- Strategy 4: Mouser API (proper API key) ----
-        mouser_result = await self.search_mouser_api(comp.part_number)
-        if mouser_result:
-            return mouser_result
+        has_mouser = bool(MOUSER_API_KEY)
+        if has_mouser:
+            self._progress.log_datasheet(
+                f"Searching Mouser API for {pn}...",
+            )
+            mouser_result = await self.search_mouser_api(pn)
+            if mouser_result:
+                self._progress.log_datasheet(
+                    f"Searching Mouser API for {pn}... "
+                    f"FOUND ({mouser_result['url'][:80]})",
+                )
+                return mouser_result
+            self._progress.log_datasheet(
+                f"Searching Mouser API for {pn}... NOT FOUND",
+            )
+        else:
+            self._progress.log_datasheet(
+                f"Mouser API: skipped (no credentials configured)",
+            )
 
         # ---- Strategy 5: LCSC API (if LCSC ID available) ----
         if lcsc_id:
+            self._progress.log_datasheet(
+                f"Searching LCSC API for {lcsc_id}...",
+            )
             lcsc_result = await self.search_lcsc_api(lcsc_id)
             if lcsc_result:
+                self._progress.log_datasheet(
+                    f"Searching LCSC API for {lcsc_id}... "
+                    f"FOUND ({lcsc_result['url'][:80]})",
+                )
                 return lcsc_result
+            self._progress.log_datasheet(
+                f"Searching LCSC API for {lcsc_id}... NOT FOUND",
+            )
 
+        self._progress.log_datasheet(
+            f"No datasheet found for {pn} from any source",
+        )
         return None
 
     async def _create_characterization(
