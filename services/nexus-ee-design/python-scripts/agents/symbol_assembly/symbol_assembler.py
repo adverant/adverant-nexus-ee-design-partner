@@ -1019,9 +1019,10 @@ class SymbolAssembler:
             assistant_prefill="[",
         )
 
-        # Try parsing with prefill prepended (model continues from '['),
-        # then without (model may have ignored the prefill)
-        for candidate in (f"[{response_text}", response_text):
+        # Try raw response first (model may have ignored prefill and
+        # returned complete JSON), then with prefill prepended (model
+        # continued from '[' so we reconstruct the full array).
+        for candidate in (response_text, f"[{response_text}"):
             components = self._parse_component_json(candidate, chunk_label)
             if components:
                 return components
@@ -1050,7 +1051,7 @@ class SymbolAssembler:
                 assistant_prefill="[",
             )
 
-            for candidate in (f"[{response_text}", response_text):
+            for candidate in (response_text, f"[{response_text}"):
                 components = self._parse_component_json(
                     candidate, chunk_label
                 )
@@ -1220,6 +1221,8 @@ class SymbolAssembler:
                         start = next_start
                         i = next_start
                         depth = 0
+                        in_string = False
+                        escape_next = False
                         continue
 
             i += 1

@@ -220,6 +220,16 @@ class TestExtractBalancedArray:
         result = assembler._extract_balanced_array("[not valid json")
         assert result is None
 
+    def test_continues_after_failed_balanced_segment(self, assembler):
+        """After a balanced-but-unparseable segment, walker finds next array."""
+        # First segment has balanced brackets but invalid JSON content,
+        # second segment is valid. Walker must jump to next '['.
+        text = '[{invalid json}] [{"a": 1}]'
+        result = assembler._extract_balanced_array(text)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["a"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Test _extract_largest_valid_array
@@ -364,6 +374,21 @@ class TestExtractComponentsWithRetry:
         call_kwargs = assembler._call_opus.call_args
         assert call_kwargs.kwargs["system_message"] is not None
         assert call_kwargs.kwargs["assistant_prefill"] == "["
+
+    @patch("symbol_assembler.asyncio.sleep", new_callable=AsyncMock)
+    def test_full_json_not_nested_by_prefill(self, mock_sleep, assembler):
+        """When model ignores prefill and returns complete JSON array,
+        raw response should be tried first to avoid [[...]] nesting."""
+        assembler._call_opus = AsyncMock(return_value=SAMPLE_JSON)
+
+        result = asyncio.run(
+            assembler._extract_components_with_retry("test prompt", "chunk 1/1")
+        )
+
+        # Should get the actual components, not a nested array
+        assert len(result) == 2
+        assert all(isinstance(r, dict) for r in result)
+        assert result[0]["part_number"] == "STM32G474RET6"
 
 
 # ---------------------------------------------------------------------------
