@@ -2251,15 +2251,156 @@ class SymbolAssembler:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _build_manufacturer_datasheet_urls(
+        self, comp: ComponentRequirement
+    ) -> List[Tuple[str, str]]:
+        """Build a list of (source_name, url) candidate datasheet URLs.
+
+        Generates manufacturer-specific URL patterns for direct PDF lookup.
+        These are the most reliable source -- no scraping/anti-bot issues.
+        """
+        pn = comp.part_number
+        pn_lower = pn.lower()
+        pn_upper = pn.upper()
+
+        candidates: List[Tuple[str, str]] = []
+
+        # ---- STMicroelectronics ----
+        candidates.append((
+            "ST",
+            f"https://www.st.com/resource/en/datasheet/{pn_lower}.pdf",
+        ))
+
+        # ---- Texas Instruments ----
+        candidates.append((
+            "TI",
+            f"https://www.ti.com/lit/ds/symlink/{pn_lower}.pdf",
+        ))
+
+        # ---- Infineon (incl. former Cypress, IR) ----
+        candidates.append((
+            "Infineon",
+            f"https://www.infineon.com/dgdl/{pn}+-DS-v01_00-EN.pdf",
+        ))
+
+        # ---- NXP ----
+        candidates.append((
+            "NXP",
+            f"https://www.nxp.com/docs/en/data-sheet/{pn}.pdf",
+        ))
+
+        # ---- Microchip (incl. former Atmel, Microsemi) ----
+        candidates.append((
+            "Microchip",
+            f"https://ww1.microchip.com/downloads/en/DeviceDoc/{pn}.pdf",
+        ))
+
+        # ---- ON Semiconductor (onsemi) ----
+        candidates.append((
+            "onsemi",
+            f"https://www.onsemi.com/download/data-sheet/pdf/{pn_upper}-D.PDF",
+        ))
+
+        # ---- Analog Devices (incl. former Maxim) ----
+        candidates.append((
+            "ADI",
+            f"https://www.analog.com/media/en/technical-documentation/"
+            f"data-sheets/{pn}.pdf",
+        ))
+
+        # ---- Vishay ----
+        candidates.append((
+            "Vishay",
+            f"https://www.vishay.com/docs/{pn_lower}/{pn_lower}.pdf",
+        ))
+
+        # ---- Yageo (resistors, capacitors) ----
+        candidates.append((
+            "Yageo",
+            f"https://www.yageo.com/upload/media/product/productsearch/"
+            f"datasheet/rchip/{pn_upper}.pdf",
+        ))
+
+        # ---- TDK ----
+        candidates.append((
+            "TDK",
+            f"https://product.tdk.com/system/files/dam/doc/product/"
+            f"capacitor/ceramic/mlcc/catalog/{pn_lower}.pdf",
+        ))
+
+        # ---- Murata ----
+        candidates.append((
+            "Murata",
+            f"https://www.murata.com/products/productdata/8796740665374/"
+            f"{pn_upper}.pdf",
+        ))
+
+        # ---- Samsung Electro-Mechanics ----
+        candidates.append((
+            "Samsung",
+            f"https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?"
+            f"partNumber={pn_upper}",
+        ))
+
+        # ---- Rohm ----
+        candidates.append((
+            "Rohm",
+            f"https://fscdn.rohm.com/en/products/databook/datasheet/"
+            f"ic/{pn_lower}-e.pdf",
+        ))
+
+        # ---- Diodes Incorporated ----
+        candidates.append((
+            "Diodes",
+            f"https://www.diodes.com/assets/Datasheets/{pn_upper}.pdf",
+        ))
+
+        # ---- Nexperia ----
+        candidates.append((
+            "Nexperia",
+            f"https://assets.nexperia.com/documents/data-sheet/{pn_upper}.pdf",
+        ))
+
+        # ---- Renesas (incl. former IDT, Intersil) ----
+        candidates.append((
+            "Renesas",
+            f"https://www.renesas.com/document/{pn_lower}-datasheet",
+        ))
+
+        # ---- Wurth Elektronik ----
+        candidates.append((
+            "Wurth",
+            f"https://www.we-online.com/components/media/pdf/"
+            f"{pn_upper}.pdf",
+        ))
+
+        # Filter: if manufacturer is known, prioritise that manufacturer's
+        # URLs by moving them to the front.
+        mfr = comp.manufacturer.upper() if comp.manufacturer else ""
+        if mfr:
+            prioritised = [
+                (src, url) for src, url in candidates
+                if src.upper() in mfr or mfr in src.upper()
+            ]
+            rest = [
+                (src, url) for src, url in candidates
+                if not (src.upper() in mfr or mfr in src.upper())
+            ]
+            candidates = prioritised + rest
+
+        return candidates
+
     async def _search_datasheets(
         self,
         comp: ComponentRequirement,
     ) -> Optional[Dict[str, Any]]:
         """
-        Search for datasheets from DigiKey, Mouser, and LCSC.
+        Search for datasheets using manufacturer direct URLs, then
+        distributor sites as fallback.
 
-        Uses Opus 4.6 to extract the best datasheet URL from search results
-        rather than relying on fragile HTML parsing.
+        Strategy order:
+        1. Manufacturer direct URLs (most reliable, no anti-bot)
+        2. DigiKey/Mouser/LCSC HTML scrape (unreliable, often blocked)
 
         Args:
             comp: The component requirement.
@@ -2269,103 +2410,83 @@ class SymbolAssembler:
         """
         http = await self._get_http()
 
-        # Try known datasheet URL patterns for common manufacturers
-        manufacturer_ds_patterns: Dict[str, str] = {
-            "ST": (
-                f"https://www.st.com/resource/en/datasheet/"
-                f"{comp.part_number.lower()}.pdf"
-            ),
-            "TI": (
-                f"https://www.ti.com/lit/ds/symlink/"
-                f"{comp.part_number.lower()}.pdf"
-            ),
-            "Infineon": (
-                f"https://www.infineon.com/dgdl/"
-                f"{comp.part_number}+-DS-v01_00-EN.pdf"
-            ),
-            "NXP": (
-                f"https://www.nxp.com/docs/en/data-sheet/"
-                f"{comp.part_number}.pdf"
-            ),
-        }
-
-        # Check manufacturer-specific URL first
-        mfr = comp.manufacturer.upper() if comp.manufacturer else ""
-        for mfr_key, ds_url in manufacturer_ds_patterns.items():
-            if mfr_key.upper() in mfr or mfr in mfr_key.upper():
-                try:
-                    head_resp = await http.head(ds_url, timeout=10.0)
-                    if head_resp.status_code == 200:
-                        content_type = head_resp.headers.get(
-                            "content-type", ""
+        # ---- Strategy 1: Manufacturer direct URLs ----
+        candidates = self._build_manufacturer_datasheet_urls(comp)
+        for source, ds_url in candidates:
+            try:
+                head_resp = await http.head(ds_url, timeout=10.0)
+                if head_resp.status_code == 200:
+                    content_type = head_resp.headers.get("content-type", "")
+                    content_len = int(
+                        head_resp.headers.get("content-length", "0")
+                    )
+                    # Accept PDF, octet-stream, or files > 10KB
+                    if (
+                        "pdf" in content_type
+                        or "octet" in content_type
+                        or content_len > 10_000
+                    ):
+                        logger.info(
+                            f"Datasheet found for {comp.part_number} "
+                            f"from {source}: {ds_url}"
                         )
-                        if "pdf" in content_type or "octet" in content_type:
-                            return {"source": mfr_key, "url": ds_url}
-                except Exception:
-                    pass
+                        return {"source": source, "url": ds_url}
+            except Exception as exc:
+                logger.debug(
+                    f"Manufacturer URL check failed for "
+                    f"{comp.part_number} ({source}): {exc}"
+                )
 
-        # Try DigiKey search
-        try:
-            digikey_url = (
+        # ---- Strategy 2: Distributor site scrape (unreliable) ----
+        # Note: DigiKey/Mouser/LCSC heavily use JavaScript rendering and
+        # anti-bot protections.  Simple HTTP GET often returns captcha pages
+        # or empty results.  These are best-effort fallbacks.
+
+        distributor_searches = [
+            (
+                "DigiKey",
                 f"https://www.digikey.com/en/products/filter?"
-                f"keywords={quote_plus(comp.part_number)}"
-            )
-            digi_resp = await http.get(digikey_url, timeout=15.0)
-            if (
-                digi_resp.status_code == 200
-                and "datasheet" in digi_resp.text.lower()
-            ):
-                ds_url = await self._extract_datasheet_url_with_llm(
-                    comp.part_number, digi_resp.text[:5000], "DigiKey"
-                )
-                if ds_url:
-                    return {"source": "DigiKey", "url": ds_url}
-        except Exception as exc:
-            logger.debug(
-                f"DigiKey search failed for {comp.part_number}: {exc}"
-            )
-
-        # Try Mouser search
-        try:
-            mouser_url = (
+                f"keywords={quote_plus(comp.part_number)}",
+            ),
+            (
+                "Mouser",
                 f"https://www.mouser.com/c/?q="
-                f"{quote_plus(comp.part_number)}"
-            )
-            mouser_resp = await http.get(mouser_url, timeout=15.0)
-            if (
-                mouser_resp.status_code == 200
-                and "datasheet" in mouser_resp.text.lower()
-            ):
-                ds_url = await self._extract_datasheet_url_with_llm(
-                    comp.part_number, mouser_resp.text[:5000], "Mouser"
-                )
-                if ds_url:
-                    return {"source": "Mouser", "url": ds_url}
-        except Exception as exc:
-            logger.debug(
-                f"Mouser search failed for {comp.part_number}: {exc}"
-            )
-
-        # Try LCSC search
-        try:
-            lcsc_url = (
+                f"{quote_plus(comp.part_number)}",
+            ),
+            (
+                "LCSC",
                 f"https://www.lcsc.com/search?q="
-                f"{quote_plus(comp.part_number)}"
-            )
-            lcsc_resp = await http.get(lcsc_url, timeout=15.0)
-            if (
-                lcsc_resp.status_code == 200
-                and "datasheet" in lcsc_resp.text.lower()
-            ):
-                ds_url = await self._extract_datasheet_url_with_llm(
-                    comp.part_number, lcsc_resp.text[:5000], "LCSC"
+                f"{quote_plus(comp.part_number)}",
+            ),
+        ]
+
+        for dist_name, dist_url in distributor_searches:
+            try:
+                dist_resp = await http.get(dist_url, timeout=15.0)
+                if (
+                    dist_resp.status_code == 200
+                    and "datasheet" in dist_resp.text.lower()
+                ):
+                    ds_url = await self._extract_datasheet_url_with_llm(
+                        comp.part_number, dist_resp.text[:5000], dist_name
+                    )
+                    if ds_url:
+                        logger.info(
+                            f"Datasheet found for {comp.part_number} "
+                            f"via {dist_name} scrape: {ds_url}"
+                        )
+                        return {"source": dist_name, "url": ds_url}
+                else:
+                    logger.warning(
+                        f"{dist_name} search returned HTTP "
+                        f"{dist_resp.status_code} for {comp.part_number} "
+                        f"(likely anti-bot block)"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"{dist_name} search failed for "
+                    f"{comp.part_number}: {exc}"
                 )
-                if ds_url:
-                    return {"source": "LCSC", "url": ds_url}
-        except Exception as exc:
-            logger.debug(
-                f"LCSC search failed for {comp.part_number}: {exc}"
-            )
 
         return None
 
