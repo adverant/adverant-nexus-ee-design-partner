@@ -141,69 +141,148 @@ export function createSymbolAssemblyRoutes(): Router {
       if (orgId && authToken) {
         try {
           const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:3001';
-          const keysRes = await fetch(`${authBaseUrl}/auth/external-keys/organizations/${orgId}/decrypt`, {
-            method: 'POST',
-            headers: {
-              'Authorization': authToken,
-              'Content-Type': 'application/json',
-              'X-Service-Name': 'nexus-ee-design',
-              'X-Internal-Request': 'true',
+          const wantedProviders = ['nexar', 'snapeda', 'ultralibrarian', 'digikey', 'mouser'];
+
+          // Step 1: List organization keys to get key IDs and provider mappings
+          const listRes = await fetch(
+            `${authBaseUrl}/auth/external-keys/organizations/${orgId}`,
+            {
+              headers: {
+                'Authorization': authToken,
+                'X-Service-Name': 'nexus-ee-design',
+                'X-Internal-Request': 'true',
+              },
             },
-            body: JSON.stringify({
-              providerKeys: ['nexar', 'snapeda', 'ultralibrarian', 'digikey', 'mouser'],
-            }),
-          });
+          );
 
-          if (keysRes.ok) {
-            const keysData = await keysRes.json() as { keys?: Record<string, { value: string; type?: string }> };
-            const keys = keysData.keys || {};
+          if (listRes.ok) {
+            const listData = await listRes.json() as {
+              organization_keys?: Record<string, {
+                id: string;
+                provider_key: string;
+                masked_key?: string;
+              }>;
+            };
+            const orgKeys = listData.organization_keys || {};
 
-            // Map provider keys to environment variables the Python script expects
-            if (keys.nexar?.value) {
-              // Nexar uses OAuth (client_id:client_secret format)
-              const nexarValue = keys.nexar.value;
-              if (nexarValue.includes(':')) {
-                const [clientId, clientSecret] = nexarValue.split(':', 2);
-                externalKeyEnv.NEXAR_CLIENT_ID = clientId;
-                externalKeyEnv.NEXAR_CLIENT_SECRET = clientSecret;
-              } else {
-                // Single value -- treat as client ID (secret from system env)
-                externalKeyEnv.NEXAR_CLIENT_ID = nexarValue;
+            // Step 2: Decrypt each relevant key individually
+            for (const providerKey of wantedProviders) {
+              const keyEntry = orgKeys[providerKey];
+              if (!keyEntry?.id) continue;
+
+              try {
+                const decryptRes = await fetch(
+                  `${authBaseUrl}/auth/external-keys/${keyEntry.id}/decrypt`,
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Authorization': authToken,
+                      'Content-Type': 'application/json',
+                      'X-Service-Name': 'nexus-ee-design',
+                      'X-Internal-Request': 'true',
+                    },
+                    body: JSON.stringify({ organization_id: orgId }),
+                  },
+                );
+
+                if (!decryptRes.ok) {
+                  log.warn('Failed to decrypt external key', {
+                    operationId,
+                    providerKey,
+                    status: decryptRes.status,
+                  });
+                  continue;
+                }
+
+                const decryptData = await decryptRes.json() as {
+                  api_key?: string;
+                  provider_key?: string;
+                };
+                const rawValue = decryptData.api_key || '';
+                if (!rawValue) continue;
+
+                // Map provider keys to environment variables the Python script expects
+                switch (providerKey) {
+                  case 'nexar': {
+                    // Nexar stores OAuth credentials as JSON: {"client_id":"...","client_secret":"..."}
+                    try {
+                      const parsed = JSON.parse(rawValue);
+                      if (parsed.client_id) externalKeyEnv.NEXAR_CLIENT_ID = parsed.client_id;
+                      if (parsed.client_secret) externalKeyEnv.NEXAR_CLIENT_SECRET = parsed.client_secret;
+                    } catch {
+                      // Fallback: colon-separated format  client_id:client_secret
+                      if (rawValue.includes(':')) {
+                        const [cid, csec] = rawValue.split(':', 2);
+                        externalKeyEnv.NEXAR_CLIENT_ID = cid;
+                        externalKeyEnv.NEXAR_CLIENT_SECRET = csec;
+                      } else {
+                        externalKeyEnv.NEXAR_CLIENT_ID = rawValue;
+                      }
+                    }
+                    break;
+                  }
+                  case 'snapeda':
+                    externalKeyEnv.SNAPEDA_API_KEY = rawValue;
+                    break;
+                  case 'ultralibrarian':
+                    externalKeyEnv.ULTRALIBRARIAN_API_KEY = rawValue;
+                    break;
+                  case 'digikey': {
+                    // DigiKey stores OAuth credentials as JSON: {"client_id":"...","client_secret":"..."}
+                    try {
+                      const parsed = JSON.parse(rawValue);
+                      if (parsed.client_id) externalKeyEnv.DIGIKEY_CLIENT_ID = parsed.client_id;
+                      if (parsed.client_secret) externalKeyEnv.DIGIKEY_CLIENT_SECRET = parsed.client_secret;
+                    } catch {
+                      if (rawValue.includes(':')) {
+                        const [cid, csec] = rawValue.split(':', 2);
+                        externalKeyEnv.DIGIKEY_CLIENT_ID = cid;
+                        externalKeyEnv.DIGIKEY_CLIENT_SECRET = csec;
+                      }
+                    }
+                    break;
+                  }
+                  case 'mouser':
+                    externalKeyEnv.MOUSER_API_KEY = rawValue;
+                    break;
+                }
+
+                log.info('Decrypted external key for symbol assembly', {
+                  operationId,
+                  providerKey,
+                });
+              } catch (decryptErr) {
+                log.warn('Error decrypting external key', {
+                  operationId,
+                  providerKey,
+                  error: (decryptErr as Error).message,
+                });
               }
             }
-            if (keys.snapeda?.value) {
-              externalKeyEnv.SNAPEDA_API_KEY = keys.snapeda.value;
-            }
-            if (keys.ultralibrarian?.value) {
-              externalKeyEnv.ULTRALIBRARIAN_API_KEY = keys.ultralibrarian.value;
-            }
-            if (keys.digikey?.value) {
-              // DigiKey uses OAuth (client_id:client_secret format)
-              const digikeyValue = keys.digikey.value;
-              if (digikeyValue.includes(':')) {
-                const [clientId, clientSecret] = digikeyValue.split(':', 2);
-                externalKeyEnv.DIGIKEY_CLIENT_ID = clientId;
-                externalKeyEnv.DIGIKEY_CLIENT_SECRET = clientSecret;
-              }
-            }
-            if (keys.mouser?.value) {
-              externalKeyEnv.MOUSER_API_KEY = keys.mouser.value;
-            }
 
-            log.info('Loaded user external keys for symbol assembly', {
-              operationId,
-              userId,
-              keys: Object.keys(externalKeyEnv),
-            });
+            if (Object.keys(externalKeyEnv).length > 0) {
+              log.info('Loaded user external keys for symbol assembly', {
+                operationId,
+                userId,
+                keys: Object.keys(externalKeyEnv),
+              });
+            } else {
+              log.info('No matching external keys found for symbol assembly providers', {
+                operationId,
+                userId,
+                availableProviders: Object.keys(orgKeys),
+                wantedProviders,
+              });
+            }
           } else {
-            log.debug('No external keys available from nexus-auth', {
+            log.warn('Failed to list organization external keys', {
               operationId,
-              status: keysRes.status,
+              status: listRes.status,
             });
           }
         } catch (err) {
           // Non-fatal: fall back to system env vars
-          log.debug('Could not fetch external keys from nexus-auth (using system defaults)', {
+          log.warn('Could not fetch external keys from nexus-auth (using system defaults)', {
             operationId,
             error: (err as Error).message,
           });
