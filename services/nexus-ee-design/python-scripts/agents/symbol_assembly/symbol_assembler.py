@@ -2246,14 +2246,19 @@ class SymbolAssembler:
                 timeout=15.0,
             )
             if resp.status_code != 200:
+                cid_hint = NEXAR_CLIENT_ID[:6] if len(NEXAR_CLIENT_ID) > 6 else "***"
                 logger.warning(
                     f"Nexar OAuth token request failed: HTTP {resp.status_code} "
-                    f"- {resp.text[:300]}"
+                    f"- {resp.text[:300]} "
+                    f"[client_id starts with '{cid_hint}', "
+                    f"client_id len={len(NEXAR_CLIENT_ID)}, "
+                    f"client_secret len={len(NEXAR_CLIENT_SECRET)}]"
                 )
                 return None
             token = resp.json().get("access_token")
             if token:
                 self._nexar_token: str = token  # type: ignore[attr-defined]
+                logger.info("Nexar OAuth token acquired successfully")
             return token
         except Exception as exc:
             logger.warning(f"Nexar OAuth token request error: {exc}")
@@ -2345,6 +2350,7 @@ class SymbolAssembler:
     async def _digikey_get_token(self) -> Optional[str]:
         """Fetch an OAuth2 token from DigiKey using client_credentials grant.
 
+        Uses the DigiKey US (api.digikey.com) production endpoint.
         Returns the access token string, or ``None`` on failure.
         Caches the token on the instance for the lifetime of the run.
         """
@@ -2368,14 +2374,19 @@ class SymbolAssembler:
                 timeout=15.0,
             )
             if resp.status_code != 200:
+                cid_hint = DIGIKEY_CLIENT_ID[:6] if len(DIGIKEY_CLIENT_ID) > 6 else "***"
                 logger.warning(
                     f"DigiKey OAuth token request failed: HTTP {resp.status_code} "
-                    f"- {resp.text[:300]}"
+                    f"- {resp.text[:300]} "
+                    f"[client_id starts with '{cid_hint}', "
+                    f"client_id len={len(DIGIKEY_CLIENT_ID)}, "
+                    f"client_secret len={len(DIGIKEY_CLIENT_SECRET)}]"
                 )
                 return None
             token = resp.json().get("access_token")
             if token:
                 self._digikey_token: str = token  # type: ignore[attr-defined]
+                logger.info("DigiKey OAuth token acquired successfully")
             return token
         except Exception as exc:
             logger.warning(f"DigiKey OAuth token request error: {exc}")
@@ -2412,6 +2423,9 @@ class SymbolAssembler:
                     headers={
                         "Authorization": f"Bearer {token}",
                         "X-DIGIKEY-Client-Id": DIGIKEY_CLIENT_ID,
+                        "X-DIGIKEY-Locale-Site": "US",
+                        "X-DIGIKEY-Locale-Language": "en",
+                        "X-DIGIKEY-Locale-Currency": "USD",
                         "Content-Type": "application/json",
                     },
                     timeout=20.0,
@@ -2490,6 +2504,22 @@ class SymbolAssembler:
                     continue
 
                 data = resp.json()
+
+                # Mouser returns HTTP 200 even for auth errors — check Errors array
+                errors = data.get("Errors", [])
+                if errors:
+                    error_msgs = "; ".join(
+                        e.get("Message", str(e)) if isinstance(e, dict) else str(e)
+                        for e in errors
+                    )
+                    key_hint = MOUSER_API_KEY[:6] if len(MOUSER_API_KEY) > 6 else "***"
+                    logger.warning(
+                        f"Mouser API returned errors for '{variant}': {error_msgs} "
+                        f"[apiKey starts with '{key_hint}', "
+                        f"apiKey len={len(MOUSER_API_KEY)}]"
+                    )
+                    break  # Auth errors affect all variants, stop retrying
+
                 parts = (
                     data.get("SearchResults", {})
                     .get("Parts", [])
@@ -3666,6 +3696,25 @@ if __name__ == "__main__":
     logger.info(
         f"Starting symbol assembly: project={args.project_id}, "
         f"operation={args.operation_id}, artifacts={len(artifacts)}"
+    )
+
+    # Log which external API credentials are available (masked for security)
+    def _mask(val: str) -> str:
+        if not val:
+            return "<NOT SET>"
+        if len(val) <= 6:
+            return f"{val[:2]}***({len(val)} chars)"
+        return f"{val[:4]}...{val[-2:]}({len(val)} chars)"
+
+    logger.info(
+        f"External API credentials: "
+        f"NEXAR_CLIENT_ID={_mask(NEXAR_CLIENT_ID)}, "
+        f"NEXAR_CLIENT_SECRET={_mask(NEXAR_CLIENT_SECRET)}, "
+        f"DIGIKEY_CLIENT_ID={_mask(DIGIKEY_CLIENT_ID)}, "
+        f"DIGIKEY_CLIENT_SECRET={_mask(DIGIKEY_CLIENT_SECRET)}, "
+        f"MOUSER_API_KEY={_mask(MOUSER_API_KEY)}, "
+        f"SNAPEDA_API_KEY={_mask(SNAPEDA_API_KEY)}, "
+        f"ULTRALIBRARIAN_API_KEY={_mask(ULTRALIBRARIAN_API_KEY)}"
     )
 
     async def _main() -> None:

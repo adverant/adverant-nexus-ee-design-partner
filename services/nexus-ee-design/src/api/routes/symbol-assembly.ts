@@ -249,6 +249,9 @@ export function createSymbolAssemblyRoutes(): Router {
                 if (!rawValue) continue;
 
                 // Map provider keys to environment variables the Python script expects
+                const mask = (v: string) => v.length > 6 ? `${v.slice(0, 4)}...${v.slice(-2)}(${v.length}c)` : `***`;
+                let parseMethod = 'direct';
+
                 switch (providerKey) {
                   case 'nexar': {
                     // Nexar stores OAuth credentials as JSON: {"client_id":"...","client_secret":"..."}
@@ -256,14 +259,17 @@ export function createSymbolAssemblyRoutes(): Router {
                       const parsed = JSON.parse(rawValue);
                       if (parsed.client_id) externalKeyEnv.NEXAR_CLIENT_ID = parsed.client_id;
                       if (parsed.client_secret) externalKeyEnv.NEXAR_CLIENT_SECRET = parsed.client_secret;
+                      parseMethod = 'json';
                     } catch {
                       // Fallback: colon-separated format  client_id:client_secret
                       if (rawValue.includes(':')) {
                         const [cid, csec] = rawValue.split(':', 2);
                         externalKeyEnv.NEXAR_CLIENT_ID = cid;
                         externalKeyEnv.NEXAR_CLIENT_SECRET = csec;
+                        parseMethod = 'colon-split';
                       } else {
                         externalKeyEnv.NEXAR_CLIENT_ID = rawValue;
+                        parseMethod = 'raw-as-client-id';
                       }
                     }
                     break;
@@ -280,11 +286,15 @@ export function createSymbolAssemblyRoutes(): Router {
                       const parsed = JSON.parse(rawValue);
                       if (parsed.client_id) externalKeyEnv.DIGIKEY_CLIENT_ID = parsed.client_id;
                       if (parsed.client_secret) externalKeyEnv.DIGIKEY_CLIENT_SECRET = parsed.client_secret;
+                      parseMethod = 'json';
                     } catch {
                       if (rawValue.includes(':')) {
                         const [cid, csec] = rawValue.split(':', 2);
                         externalKeyEnv.DIGIKEY_CLIENT_ID = cid;
                         externalKeyEnv.DIGIKEY_CLIENT_SECRET = csec;
+                        parseMethod = 'colon-split';
+                      } else {
+                        parseMethod = 'parse-failed-no-colon';
                       }
                     }
                     break;
@@ -294,9 +304,16 @@ export function createSymbolAssemblyRoutes(): Router {
                     break;
                 }
 
+                // Diagnostic: log parse result with masked values for debugging credential issues
+                const envKeys = Object.entries(externalKeyEnv)
+                  .filter(([, v]) => v)
+                  .map(([k, v]) => `${k}=${mask(v)}`);
                 log.info('Decrypted external key for symbol assembly', {
                   operationId,
                   providerKey,
+                  parseMethod,
+                  rawValueLength: rawValue.length,
+                  extractedKeys: envKeys.slice(-2), // last 2 are the ones just set
                 });
               } catch (decryptErr) {
                 log.warn('Error decrypting external key', {
