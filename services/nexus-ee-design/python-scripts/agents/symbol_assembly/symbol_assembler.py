@@ -95,6 +95,11 @@ KICAD_WORKER_URL: str = os.environ.get(
 
 ARTIFACT_STORAGE_PATH: str = os.environ.get("ARTIFACT_STORAGE_PATH", "/data/artifacts")
 
+# JSON parsing retry/repair constants
+MAX_JSON_PARSE_RETRIES: int = 2        # Repair retries per chunk (3 total attempts)
+JSON_RETRY_BASE_DELAY: float = 2.0     # Exponential backoff base (seconds)
+JSON_REPAIR_CONTEXT_CHARS: int = 2000  # Failed response chars to include in repair prompt
+
 SNAPEDA_API_KEY: str = os.environ.get("SNAPEDA_API_KEY", "")
 ULTRALIBRARIAN_API_KEY: str = os.environ.get("ULTRALIBRARIAN_API_KEY", "")
 
@@ -858,24 +863,40 @@ class SymbolAssembler:
             "- alternatives (array of strings): Alternative part numbers if "
             "mentioned. Empty array if none.\n"
             "\n"
-            "IMPORTANT:\n"
+            "IMPORTANT RULES:\n"
             "- Include ALL components, even power symbols (VCC, GND) and "
             "passive components.\n"
             "- Do NOT skip any component mentioned anywhere in the artifacts.\n"
             "- If a component appears in multiple artifacts, include it only "
             "once with the most complete data.\n"
-            "- Return ONLY the JSON array, no markdown formatting, no "
-            "explanation.\n"
+            "- Return ONLY the JSON array. Nothing else.\n"
+            "- Do NOT include markdown formatting (no ```, no ```json).\n"
+            "- Do NOT include any explanation, summary, or commentary.\n"
+            "- Do NOT say things like 'The JSON array above contains...' "
+            "or 'Here are the components...'.\n"
+            "- Your entire response must be valid JSON starting with [ and "
+            "ending with ].\n"
+            "\n"
+            "BAD (will cause a pipeline failure):\n"
+            "  Here is the JSON array of components:\n"
+            "  ```json\n"
+            "  [{...}]\n"
+            "  ```\n"
+            "  The array above contains 32 entries...\n"
+            "\n"
+            "GOOD (correct format):\n"
+            "  [{\"part_number\": \"STM32G474\", ...}]\n"
             "\n"
             "ARTIFACTS:\n"
         )
 
-        # Process each chunk and collect raw component dicts
+        # Process each chunk with retry/repair and collect raw component dicts
         all_raw_components: List[dict] = []
+        failed_chunks: List[Tuple[int, str]] = []  # (index, prompt)
+
         for chunk_idx, chunk_parts in enumerate(chunks):
             chunk_text = "\n".join(chunk_parts)
             chunk_label = f"chunk {chunk_idx + 1}/{len(chunks)}"
-
             prompt = extraction_prompt_template + chunk_text
 
             logger.info(
@@ -889,22 +910,51 @@ class SymbolAssembler:
                 phase_progress=int((chunk_idx / len(chunks)) * 90),
             )
 
-            response_text = await self._call_opus(prompt)
-
-            # Parse this chunk's response
-            raw_components = self._parse_component_json(
-                response_text, chunk_label
+            raw_components = await self._extract_components_with_retry(
+                prompt, chunk_label
             )
-            all_raw_components.extend(raw_components)
 
+            if raw_components:
+                all_raw_components.extend(raw_components)
+                logger.info(
+                    f"{chunk_label} yielded {len(raw_components)} components"
+                )
+            else:
+                failed_chunks.append((chunk_idx, prompt))
+                logger.warning(
+                    f"{chunk_label} yielded 0 components after all retries"
+                )
+
+        # Second-pass retry for any chunks that failed completely
+        if failed_chunks:
             logger.info(
-                f"Chunk {chunk_idx + 1}/{len(chunks)} yielded "
-                f"{len(raw_components)} components"
+                f"Retrying {len(failed_chunks)} failed chunk(s) "
+                f"(second pass)"
+            )
+            for chunk_idx, prompt in failed_chunks:
+                chunk_label = f"chunk {chunk_idx + 1}/{len(chunks)} (retry)"
+                self._progress.log_analyze(
+                    f"Retrying failed {chunk_label}...",
+                    phase_progress=92,
+                )
+                raw_components = await self._extract_components_with_retry(
+                    prompt, chunk_label
+                )
+                if raw_components:
+                    all_raw_components.extend(raw_components)
+                    logger.info(
+                        f"{chunk_label} yielded {len(raw_components)} "
+                        f"components on second pass"
+                    )
+
+        if not all_raw_components:
+            raise RuntimeError(
+                f"ALL {len(chunks)} chunk(s) failed component extraction "
+                f"after retries. Zero components extracted from "
+                f"{len(artifacts)} artifacts."
             )
 
         raw_components = all_raw_components
-
-        # JSON parsing is now handled per-chunk in _parse_component_json()
 
         components: List[ComponentRequirement] = []
         for raw in raw_components:
@@ -941,7 +991,104 @@ class SymbolAssembler:
         return deduped
 
     # ------------------------------------------------------------------
-    # JSON parsing helper for component extraction
+    # Component extraction with retry + repair
+    # ------------------------------------------------------------------
+
+    _COMPONENT_SYSTEM_MESSAGE = (
+        "You are a structured data extraction engine. You ONLY output valid "
+        "JSON arrays. You never output prose, markdown, explanations, or "
+        "commentary. Your entire response is always a single JSON array."
+    )
+
+    async def _extract_components_with_retry(
+        self, prompt: str, chunk_label: str
+    ) -> List[dict]:
+        """Call Opus with system message + prefill, parse, retry on failure.
+
+        Orchestrates:
+        1. Initial call with system message + assistant prefill '['
+        2. Parse response (try with prefill prepended, then without)
+        3. On failure: up to MAX_JSON_PARSE_RETRIES repair retries
+           with exponential backoff
+        4. Returns [] only if all attempts exhausted
+        """
+        # --- Attempt 1: initial call with system + prefill ---
+        response_text = await self._call_opus(
+            prompt,
+            system_message=self._COMPONENT_SYSTEM_MESSAGE,
+            assistant_prefill="[",
+        )
+
+        # Try parsing with prefill prepended (model continues from '['),
+        # then without (model may have ignored the prefill)
+        for candidate in (f"[{response_text}", response_text):
+            components = self._parse_component_json(candidate, chunk_label)
+            if components:
+                return components
+
+        # --- Repair retries ---
+        last_response = response_text
+        for retry_idx in range(MAX_JSON_PARSE_RETRIES):
+            delay = JSON_RETRY_BASE_DELAY * (2 ** retry_idx)
+            logger.warning(
+                f"JSON parse failed for {chunk_label}. "
+                f"Repair retry {retry_idx + 1}/{MAX_JSON_PARSE_RETRIES} "
+                f"after {delay}s backoff"
+            )
+            await asyncio.sleep(delay)
+
+            repair_prompt = self._build_repair_prompt(prompt, last_response)
+
+            self._progress.log_analyze(
+                f"Repair retry {retry_idx + 1} for {chunk_label}...",
+                phase_progress=91,
+            )
+
+            response_text = await self._call_opus(
+                repair_prompt,
+                system_message=self._COMPONENT_SYSTEM_MESSAGE,
+                assistant_prefill="[",
+            )
+
+            for candidate in (f"[{response_text}", response_text):
+                components = self._parse_component_json(
+                    candidate, chunk_label
+                )
+                if components:
+                    logger.info(
+                        f"Repair retry {retry_idx + 1} succeeded for "
+                        f"{chunk_label}: {len(components)} components"
+                    )
+                    return components
+
+            last_response = response_text
+
+        logger.error(
+            f"All {1 + MAX_JSON_PARSE_RETRIES} attempts failed for "
+            f"{chunk_label}"
+        )
+        return []
+
+    def _build_repair_prompt(
+        self, original_prompt: str, failed_response: str
+    ) -> str:
+        """Construct a repair prompt showing what went wrong."""
+        truncated = failed_response[:JSON_REPAIR_CONTEXT_CHARS]
+        return (
+            "Your previous response could NOT be parsed as a JSON array. "
+            "This is what you returned (first "
+            f"{JSON_REPAIR_CONTEXT_CHARS} chars):\n\n"
+            f"---\n{truncated}\n---\n\n"
+            "That is WRONG. You must return ONLY a valid JSON array, "
+            "starting with [ and ending with ]. No prose, no markdown "
+            "fences, no explanation before or after.\n\n"
+            "Here is the original request again. Respond with ONLY the "
+            "JSON array:\n\n"
+            f"{original_prompt}"
+        )
+
+    # ------------------------------------------------------------------
+    # JSON parsing helpers for component extraction (multi-strategy)
     # ------------------------------------------------------------------
 
     def _parse_component_json(
@@ -949,51 +1096,168 @@ class SymbolAssembler:
     ) -> List[dict]:
         """Parse LLM response text into a list of component dicts.
 
-        Handles markdown code fences, preamble text, and raw JSON arrays.
+        Tries multiple extraction strategies in order of reliability.
+        Returns an empty list on failure instead of raising, so the
+        retry loop in _extract_components_with_retry can handle escalation.
 
         Args:
             response_text: Raw LLM response string.
             context_label: Label for error messages (e.g., "chunk 1/3").
 
         Returns:
-            List of raw component dicts.
-
-        Raises:
-            RuntimeError: If the response cannot be parsed as a JSON array.
+            List of raw component dicts (empty on parse failure).
         """
+        result, strategy = self._extract_json_array(response_text)
+        if result is not None:
+            logger.info(
+                f"Parsed {len(result)} components from {context_label} "
+                f"using strategy: {strategy}"
+            )
+            return result
+
+        logger.warning(
+            f"All JSON extraction strategies failed for {context_label}. "
+            f"Response (first 2000 chars): {response_text[:2000]}"
+        )
+        return []
+
+    def _extract_json_array(
+        self, text: str
+    ) -> Tuple[Optional[List[dict]], str]:
+        """Try multiple strategies to extract a JSON array from text.
+
+        Strategies tried in order:
+        1. direct_parse - json.loads on stripped text
+        2. markdown_fence - extract from ```json ... ``` fences
+        3. bracket_balanced - walk brackets respecting string escapes
+        4. greedy_largest - brute-force all bracket ranges
+
+        Returns:
+            (list_of_dicts, strategy_name) on success, (None, "") on failure.
+        """
+        stripped = text.strip()
+
+        # Strategy 1: Direct parse
         try:
-            cleaned = response_text.strip()
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return parsed, "direct_parse"
+        except (json.JSONDecodeError, ValueError):
+            pass
 
-            # Extract content from markdown code fences anywhere in response
-            fence_match = re.search(
-                r'```(?:json)?\s*\n(.*?)```', cleaned, re.DOTALL
-            )
-            if fence_match:
-                cleaned = fence_match.group(1).strip()
-            else:
-                # No fences — try to find raw JSON array
-                bracket_start = cleaned.find('[')
-                bracket_end = cleaned.rfind(']')
-                if bracket_start != -1 and bracket_end > bracket_start:
-                    cleaned = cleaned[bracket_start:bracket_end + 1]
+        # Strategy 2: Markdown fence extraction (case-insensitive)
+        fence_match = re.search(
+            r'```(?:json|JSON)?\s*\n(.*?)```', stripped, re.DOTALL
+        )
+        if fence_match:
+            try:
+                parsed = json.loads(fence_match.group(1).strip())
+                if isinstance(parsed, list):
+                    return parsed, "markdown_fence"
+            except (json.JSONDecodeError, ValueError):
+                pass
 
-            parsed = json.loads(cleaned)
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            raise RuntimeError(
-                f"Failed to parse Opus 4.6 component extraction response "
-                f"({context_label}) as JSON. Parse error: {parse_err}. "
-                f"Response (first 2000 chars): {response_text[:2000]}"
-            ) from parse_err
+        # Strategy 3: Bracket-balanced extraction
+        balanced = self._extract_balanced_array(stripped)
+        if balanced is not None:
+            return balanced, "bracket_balanced"
 
-        if not isinstance(parsed, list):
-            raise RuntimeError(
-                f"Opus 4.6 returned non-array type "
-                f"({type(parsed).__name__}) for component extraction "
-                f"({context_label}). "
-                f"Response: {response_text[:2000]}"
-            )
+        # Strategy 4: Greedy largest valid array
+        largest = self._extract_largest_valid_array(stripped)
+        if largest is not None:
+            return largest, "greedy_largest"
 
-        return parsed
+        return None, ""
+
+    def _extract_balanced_array(self, text: str) -> Optional[List[dict]]:
+        """Extract a JSON array using bracket-depth walking.
+
+        Walks from the first '[' tracking depth while respecting string
+        literals and escape sequences. Returns the parsed array or None.
+        """
+        start = text.find('[')
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        i = start
+
+        while i < len(text):
+            ch = text[i]
+
+            if escape_next:
+                escape_next = False
+                i += 1
+                continue
+
+            if ch == '\\' and in_string:
+                escape_next = True
+                i += 1
+                continue
+
+            if ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == '[':
+                    depth += 1
+                elif ch == ']':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:i + 1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, list):
+                                return parsed
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        # This balanced segment didn't parse; keep looking
+                        # for the next '[' after this position
+                        next_start = text.find('[', i + 1)
+                        if next_start == -1:
+                            return None
+                        start = next_start
+                        i = next_start
+                        depth = 0
+                        continue
+
+            i += 1
+
+        return None
+
+    def _extract_largest_valid_array(
+        self, text: str
+    ) -> Optional[List[dict]]:
+        """Brute-force fallback: find all [ and ] positions, try parsing
+        each range from outermost to innermost, keep the largest valid list.
+        """
+        open_positions = [i for i, c in enumerate(text) if c == '[']
+        close_positions = [i for i, c in enumerate(text) if c == ']']
+
+        if not open_positions or not close_positions:
+            return None
+
+        best: Optional[List[dict]] = None
+        best_len = 0
+
+        for op in open_positions:
+            for cp in reversed(close_positions):
+                if cp <= op:
+                    continue
+                candidate = text[op:cp + 1]
+                # Skip very short candidates unlikely to be component arrays
+                if len(candidate) < 10:
+                    continue
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, list) and len(parsed) > best_len:
+                        best = parsed
+                        best_len = len(parsed)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+        return best
 
     # ------------------------------------------------------------------
     # Phase 2-7: Gather symbol + datasheet for a single component
@@ -2152,7 +2416,13 @@ class SymbolAssembler:
     # Opus 4.6 LLM call (routes via proxy or OpenRouter)
     # ------------------------------------------------------------------
 
-    async def _call_opus(self, prompt: str) -> str:
+    async def _call_opus(
+        self,
+        prompt: str,
+        *,
+        system_message: Optional[str] = None,
+        assistant_prefill: Optional[str] = None,
+    ) -> str:
         """
         Call Opus 4.6 via Claude Code Max proxy (preferred for Anthropic models)
         or OpenRouter (for non-Anthropic models / when proxy is not configured).
@@ -2163,6 +2433,9 @@ class SymbolAssembler:
 
         Args:
             prompt: The user prompt to send.
+            system_message: Optional system message for output enforcement.
+            assistant_prefill: Optional assistant message prefix to steer
+                the model's response format (e.g., "[" to force JSON array).
 
         Returns:
             The assistant response text.
@@ -2171,10 +2444,24 @@ class SymbolAssembler:
             RuntimeError: If the LLM call fails for any reason.
         """
         if self._should_use_proxy():
-            return await self._call_via_proxy(prompt)
-        return await self._call_via_openrouter(prompt)
+            return await self._call_via_proxy(
+                prompt,
+                system_message=system_message,
+                assistant_prefill=assistant_prefill,
+            )
+        return await self._call_via_openrouter(
+            prompt,
+            system_message=system_message,
+            assistant_prefill=assistant_prefill,
+        )
 
-    async def _call_via_proxy(self, prompt: str) -> str:
+    async def _call_via_proxy(
+        self,
+        prompt: str,
+        *,
+        system_message: Optional[str] = None,
+        assistant_prefill: Optional[str] = None,
+    ) -> str:
         """Route an Anthropic model call through Claude Code Max proxy.
 
         Uses SSE streaming (stream=true) so the proxy sends HTTP headers
@@ -2192,11 +2479,16 @@ class SymbolAssembler:
 
         http = await self._get_http()
 
+        messages: list[dict[str, str]] = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": prompt})
+        if assistant_prefill:
+            messages.append({"role": "assistant", "content": assistant_prefill})
+
         payload = {
             "model": proxy_model,
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "max_tokens": 8192,
             "temperature": 0.1,
             "stream": True,  # SSE streaming: headers arrive immediately
@@ -2299,7 +2591,13 @@ class SymbolAssembler:
                 f"Check proxy pod: kubectl get pods -n nexus -l app=claude-code-proxy"
             ) from exc
 
-    async def _call_via_openrouter(self, prompt: str) -> str:
+    async def _call_via_openrouter(
+        self,
+        prompt: str,
+        *,
+        system_message: Optional[str] = None,
+        assistant_prefill: Optional[str] = None,
+    ) -> str:
         """Route an LLM call through OpenRouter."""
         if not OPENROUTER_API_KEY:
             raise RuntimeError(
@@ -2316,11 +2614,16 @@ class SymbolAssembler:
 
         http = await self._get_http()
 
+        messages: list[dict[str, str]] = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": prompt})
+        if assistant_prefill:
+            messages.append({"role": "assistant", "content": assistant_prefill})
+
         payload = {
             "model": OPENROUTER_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "max_tokens": 8192,
             "temperature": 0.1,
         }
