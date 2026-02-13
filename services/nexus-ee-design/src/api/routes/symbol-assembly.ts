@@ -143,7 +143,7 @@ export function createSymbolAssemblyRoutes(): Router {
       // query the organizations endpoint to get the user's org for BYOK key isolation.
       if (!orgId && authToken) {
         try {
-          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:3001';
+          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:9101';
           const orgsRes = await fetch(`${authBaseUrl}/organizations`, {
             headers: {
               'Authorization': authToken,
@@ -187,7 +187,7 @@ export function createSymbolAssemblyRoutes(): Router {
 
       if (orgId && authToken) {
         try {
-          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:3001';
+          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:9101';
           const wantedProviders = ['nexar', 'snapeda', 'ultralibrarian', 'digikey', 'mouser'];
 
           // Step 1: List organization keys to get key IDs and provider mappings
