@@ -10,7 +10,7 @@ Search order (GraphRAG FIRST):
     2. KiCad Worker (kicad-worker API)
     3. SnapEDA API
     4. UltraLibrarian API
-    5. Datasheet sources (DigiKey, Mouser, LCSC)
+    5. Datasheet sources (Manufacturer URLs, Nexar/Octopart, distributors)
     6. Opus 4.6 LLM Generation (last resort)
 
 All content extraction uses Opus 4.6 via OpenRouter - NEVER regex.
@@ -103,6 +103,10 @@ JSON_REPAIR_CONTEXT_CHARS: int = 2000  # Failed response chars to include in rep
 
 SNAPEDA_API_KEY: str = os.environ.get("SNAPEDA_API_KEY", "")
 ULTRALIBRARIAN_API_KEY: str = os.environ.get("ULTRALIBRARIAN_API_KEY", "")
+
+# Nexar (Octopart) API credentials -- optional, for datasheet search
+NEXAR_CLIENT_ID: str = os.environ.get("NEXAR_CLIENT_ID", "")
+NEXAR_CLIENT_SECRET: str = os.environ.get("NEXAR_CLIENT_SECRET", "")
 
 
 # ---------------------------------------------------------------------------
@@ -2122,6 +2126,122 @@ class SymbolAssembler:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Nexar (Octopart) API -- optional datasheet search
+    # ------------------------------------------------------------------
+
+    async def _nexar_get_token(self) -> Optional[str]:
+        """Fetch an OAuth2 token from Nexar using client_credentials grant.
+
+        Returns the access token string, or ``None`` on failure.
+        Caches the token on the instance for the lifetime of the run.
+        """
+        cached = getattr(self, "_nexar_token", None)
+        if cached:
+            return cached
+
+        if not NEXAR_CLIENT_ID or not NEXAR_CLIENT_SECRET:
+            return None
+
+        http = await self._get_http()
+        try:
+            resp = await http.post(
+                "https://identity.nexar.com/connect/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": NEXAR_CLIENT_ID,
+                    "client_secret": NEXAR_CLIENT_SECRET,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Nexar OAuth token request failed: HTTP {resp.status_code} "
+                    f"- {resp.text[:300]}"
+                )
+                return None
+            token = resp.json().get("access_token")
+            if token:
+                self._nexar_token: str = token  # type: ignore[attr-defined]
+            return token
+        except Exception as exc:
+            logger.warning(f"Nexar OAuth token request error: {exc}")
+            return None
+
+    async def search_nexar_datasheet(
+        self,
+        comp: ComponentRequirement,
+    ) -> Optional[Dict[str, Any]]:
+        """Search Nexar (Octopart) GraphQL API for a datasheet URL.
+
+        Requires ``NEXAR_CLIENT_ID`` and ``NEXAR_CLIENT_SECRET`` env vars.
+        Returns ``{"source": "nexar", "url": "<pdf_url>"}`` or ``None``.
+        """
+        token = await self._nexar_get_token()
+        if not token:
+            return None
+
+        http = await self._get_http()
+
+        query = """
+        query SearchDatasheet($q: String!) {
+          supSearch(q: $q, limit: 1) {
+            results {
+              part {
+                mpn
+                manufacturer { name }
+                bestDatasheet { url }
+                descriptions { text }
+              }
+            }
+          }
+        }
+        """
+
+        try:
+            resp = await http.post(
+                "https://api.nexar.com/graphql/",
+                json={"query": query, "variables": {"q": comp.part_number}},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=20.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Nexar GraphQL query failed for {comp.part_number}: "
+                    f"HTTP {resp.status_code}"
+                )
+                return None
+
+            data = resp.json()
+            results = (
+                data.get("data", {})
+                .get("supSearch", {})
+                .get("results", [])
+            )
+            if not results:
+                return None
+
+            part = results[0].get("part", {})
+            ds = part.get("bestDatasheet", {})
+            ds_url = ds.get("url", "") if ds else ""
+
+            if ds_url:
+                logger.info(
+                    f"Nexar found datasheet for {comp.part_number}: {ds_url}"
+                )
+                return {"source": "nexar", "url": ds_url}
+
+            return None
+        except Exception as exc:
+            logger.warning(
+                f"Nexar search failed for {comp.part_number}: {exc}"
+            )
+            return None
+
     async def download_datasheet(
         self,
         part_number: str,
@@ -2400,7 +2520,8 @@ class SymbolAssembler:
 
         Strategy order:
         1. Manufacturer direct URLs (most reliable, no anti-bot)
-        2. DigiKey/Mouser/LCSC HTML scrape (unreliable, often blocked)
+        2. Nexar/Octopart GraphQL API (optional, needs credentials)
+        3. DigiKey/Mouser/LCSC HTML scrape (unreliable, often blocked)
 
         Args:
             comp: The component requirement.
@@ -2437,7 +2558,12 @@ class SymbolAssembler:
                     f"{comp.part_number} ({source}): {exc}"
                 )
 
-        # ---- Strategy 2: Distributor site scrape (unreliable) ----
+        # ---- Strategy 2: Nexar (Octopart) GraphQL API ----
+        nexar_result = await self.search_nexar_datasheet(comp)
+        if nexar_result:
+            return nexar_result
+
+        # ---- Strategy 3: Distributor site scrape (unreliable) ----
         # Note: DigiKey/Mouser/LCSC heavily use JavaScript rendering and
         # anti-bot protections.  Simple HTTP GET often returns captcha pages
         # or empty results.  These are best-effort fallbacks.

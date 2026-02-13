@@ -131,13 +131,85 @@ export function createSymbolAssemblyRoutes(): Router {
         );
       }
 
+      // Fetch user's external API keys from nexus-auth (BYOK) and merge
+      // with system env vars. User keys take precedence over system defaults.
+      const externalKeyEnv: Record<string, string> = {};
+      const userId = (req.headers['x-user-id'] as string) || '';
+      const orgId = (req.headers['x-organization-id'] as string) || '';
+      const authToken = req.headers['authorization'] as string || '';
+
+      if (orgId && authToken) {
+        try {
+          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:3001';
+          const keysRes = await fetch(`${authBaseUrl}/auth/external-keys/organizations/${orgId}/decrypt`, {
+            method: 'POST',
+            headers: {
+              'Authorization': authToken,
+              'Content-Type': 'application/json',
+              'X-Service-Name': 'nexus-ee-design',
+              'X-Internal-Request': 'true',
+            },
+            body: JSON.stringify({
+              providerKeys: ['nexar', 'snapeda', 'ultralibrarian'],
+            }),
+          });
+
+          if (keysRes.ok) {
+            const keysData = await keysRes.json() as { keys?: Record<string, { value: string; type?: string }> };
+            const keys = keysData.keys || {};
+
+            // Map provider keys to environment variables the Python script expects
+            if (keys.nexar?.value) {
+              // Nexar uses OAuth (client_id:client_secret format)
+              const nexarValue = keys.nexar.value;
+              if (nexarValue.includes(':')) {
+                const [clientId, clientSecret] = nexarValue.split(':', 2);
+                externalKeyEnv.NEXAR_CLIENT_ID = clientId;
+                externalKeyEnv.NEXAR_CLIENT_SECRET = clientSecret;
+              } else {
+                // Single value -- treat as client ID (secret from system env)
+                externalKeyEnv.NEXAR_CLIENT_ID = nexarValue;
+              }
+            }
+            if (keys.snapeda?.value) {
+              externalKeyEnv.SNAPEDA_API_KEY = keys.snapeda.value;
+            }
+            if (keys.ultralibrarian?.value) {
+              externalKeyEnv.ULTRALIBRARIAN_API_KEY = keys.ultralibrarian.value;
+            }
+
+            log.info('Loaded user external keys for symbol assembly', {
+              operationId,
+              userId,
+              keys: Object.keys(externalKeyEnv),
+            });
+          } else {
+            log.debug('No external keys available from nexus-auth', {
+              operationId,
+              status: keysRes.status,
+            });
+          }
+        } catch (err) {
+          // Non-fatal: fall back to system env vars
+          log.debug('Could not fetch external keys from nexus-auth (using system defaults)', {
+            operationId,
+            error: (err as Error).message,
+          });
+        }
+      }
+
       const python = spawn(pythonPath, [
         scriptPath,
         '--project-id', projectId,
         '--operation-id', operationId,
         '--artifacts-json', artifactsPath,
         '--output-dir', outputDir,
-      ]);
+      ], {
+        env: {
+          ...process.env,
+          ...externalKeyEnv,  // User BYOK keys override system defaults
+        },
+      });
 
       // Emit initial start event so frontend leaves "Initializing..."
       wsManager.emitProgress(operationId, {

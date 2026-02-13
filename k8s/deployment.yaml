@@ -147,6 +147,32 @@ spec:
                   key: openrouter-api-key
                   optional: true
 
+            # EE Design external API keys (global fallback; user BYOK overrides)
+            - name: NEXAR_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: nexar-client-id
+                  optional: true
+            - name: NEXAR_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: nexar-client-secret
+                  optional: true
+            - name: SNAPEDA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: snapeda-api-key
+                  optional: true
+            - name: ULTRALIBRARIAN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-api-keys
+                  key: ultralibrarian-api-key
+                  optional: true
+
           resources:
             requests:
               cpu: "500m"
