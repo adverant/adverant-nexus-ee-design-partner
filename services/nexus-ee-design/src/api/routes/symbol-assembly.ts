@@ -135,8 +135,55 @@ export function createSymbolAssemblyRoutes(): Router {
       // with system env vars. User keys take precedence over system defaults.
       const externalKeyEnv: Record<string, string> = {};
       const userId = (req.headers['x-user-id'] as string) || '';
-      const orgId = (req.headers['x-organization-id'] as string) || '';
+      let orgId = (req.headers['x-organization-id'] as string) || '';
       const authToken = req.headers['authorization'] as string || '';
+
+      // Multi-tenant: resolve organization ID from nexus-auth when not provided
+      // in request headers. The JWT token doesn't include org_id, so we must
+      // query the organizations endpoint to get the user's org for BYOK key isolation.
+      if (!orgId && authToken) {
+        try {
+          const authBaseUrl = process.env.NEXUS_AUTH_URL || 'http://nexus-auth.nexus.svc.cluster.local:3001';
+          const orgsRes = await fetch(`${authBaseUrl}/organizations`, {
+            headers: {
+              'Authorization': authToken,
+              'X-Service-Name': 'nexus-ee-design',
+              'X-Internal-Request': 'true',
+            },
+            signal: AbortSignal.timeout(5000),
+          });
+
+          if (orgsRes.ok) {
+            const orgsData = await orgsRes.json() as {
+              organizations?: Array<{ id?: string; ID?: string; name?: string; Name?: string }>;
+            };
+            const organizations = orgsData.organizations || [];
+
+            if (organizations.length > 0) {
+              const org = organizations[0];
+              orgId = org.id || org.ID || '';
+              log.info('Resolved organization from auth token for BYOK', {
+                operationId,
+                organizationId: orgId,
+                organizationName: org.name || org.Name,
+                organizationCount: organizations.length,
+              });
+            } else {
+              log.warn('User has no organizations — BYOK keys unavailable', { operationId });
+            }
+          } else {
+            log.warn('Failed to query organizations endpoint', {
+              operationId,
+              status: orgsRes.status,
+            });
+          }
+        } catch (orgErr) {
+          log.warn('Error resolving organization from auth token', {
+            operationId,
+            error: (orgErr as Error).message,
+          });
+        }
+      }
 
       if (orgId && authToken) {
         try {
@@ -287,6 +334,12 @@ export function createSymbolAssemblyRoutes(): Router {
             error: (err as Error).message,
           });
         }
+      } else if (!orgId) {
+        log.warn('No organization ID available — BYOK keys will not be loaded', {
+          operationId,
+          hasAuthToken: !!authToken,
+          hasOrgHeader: !!(req.headers['x-organization-id']),
+        });
       }
 
       const python = spawn(pythonPath, [
