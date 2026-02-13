@@ -72,13 +72,20 @@ function getProjectNfsPath(projectId: string): string {
 
 /**
  * Validate that a resolved path stays within the artifacts base directory.
- * Prevents path traversal attacks.
+ * Defense-in-depth: rejects '..' segments AND checks resolved path prefix.
  */
 function validatePath(resolvedPath: string): boolean {
+  // Reject any path containing traversal sequences before resolution
+  if (resolvedPath.includes('..')) {
+    return false;
+  }
   const basePath = path.resolve(config.artifacts.basePath);
   const normalized = path.resolve(resolvedPath);
-  return normalized.startsWith(basePath);
+  return normalized.startsWith(basePath + path.sep) || normalized === basePath;
 }
+
+/** Max files to scan in a single request to prevent OOM */
+const MAX_FILES_PER_SCAN = 2000;
 
 /**
  * Infer a tag from the NFS subdirectory path
@@ -191,9 +198,13 @@ export function createArtifactBrowserRoutes(): Router {
             totalFiles,
           });
         }
-      } catch {
-        // Project NFS directory doesn't exist yet - that's fine
-        log.debug('NFS project directory not found (expected for new projects)', { projectPath });
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          log.debug('NFS project directory not found (expected for new projects)', { projectPath });
+        } else {
+          log.error('NFS project directory read failed', err as Error, { projectPath });
+        }
       }
 
       // 3. Build folder tree
@@ -369,9 +380,12 @@ export function createArtifactBrowserRoutes(): Router {
 
         if (validatePath(nfsDirPath)) {
           try {
+            let fileCount = 0;
             const collectFiles = async (dirPath: string, relBase: string) => {
+              if (fileCount >= MAX_FILES_PER_SCAN) return;
               const entries = await fs.readdir(dirPath, { withFileTypes: true });
               for (const entry of entries) {
+                if (fileCount >= MAX_FILES_PER_SCAN) break;
                 const entryPath = path.join(dirPath, entry.name);
                 const entryRel = relBase ? `${relBase}/${entry.name}` : entry.name;
 
@@ -383,7 +397,6 @@ export function createArtifactBrowserRoutes(): Router {
                 } else {
                   try {
                     const stats = await fs.stat(entryPath);
-                    const ext = path.extname(entry.name);
                     const artifactId = `nfs:${nfsRelPath ? nfsRelPath + '/' : ''}${entryRel}`;
                     const tag = inferTag(nfsRelPath || entryRel);
 
@@ -403,6 +416,7 @@ export function createArtifactBrowserRoutes(): Router {
                       updatedAt: stats.mtime.toISOString(),
                       metadata: { source: 'nfs', nfsPath: entryPath },
                     });
+                    fileCount++;
                   } catch {
                     // Skip unreadable files
                   }
@@ -411,9 +425,13 @@ export function createArtifactBrowserRoutes(): Router {
             };
 
             await collectFiles(nfsDirPath, '');
-          } catch {
-            // NFS directory doesn't exist - return empty
-            log.debug('NFS directory not found for artifacts listing', { nfsDirPath });
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT') {
+              log.debug('NFS directory not found for artifacts listing', { nfsDirPath });
+            } else {
+              log.error('NFS directory read failed', err as Error, { nfsDirPath });
+            }
           }
         }
       }
@@ -762,6 +780,7 @@ export function createArtifactBrowserRoutes(): Router {
       }
 
       if (force) {
+        log.warn('Force deleting folder (recursive)', { projectId, folderId: decodedId, folderPath });
         await fs.rm(folderPath, { recursive: true });
       } else {
         // Only delete empty folders
