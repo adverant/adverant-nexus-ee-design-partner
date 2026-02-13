@@ -8,6 +8,9 @@ Covers:
 4. _parse_component_json returns [] on failure (not raises)
 5. Retry loop (_extract_components_with_retry) with mocked _call_opus
 6. Backward compatibility of _call_opus signature
+7. Checkpoint round-trip (write/load, components, gathering)
+8. _tally_result counter correctness
+9. _result_from_dict field mapping
 
 Run: python -m pytest test_symbol_assembler_json.py -v
 """
@@ -17,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 from typing import List
 from unittest.mock import AsyncMock, patch
 
@@ -27,7 +31,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 # Parent dir for progress_emitter
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from symbol_assembler import SymbolAssembler
+from symbol_assembler import (
+    AssemblyReport,
+    ComponentGatherResult,
+    ComponentRequirement,
+    SymbolAssembler,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -500,3 +509,280 @@ class TestMessageBuilding:
 
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# Helper: build sample ComponentRequirement list
+# ---------------------------------------------------------------------------
+
+def _make_components() -> List[ComponentRequirement]:
+    return [
+        ComponentRequirement(
+            part_number="STM32G474RET6",
+            manufacturer="ST",
+            package="LQFP-64",
+            category="MCU",
+            value="",
+            description="Main microcontroller",
+            quantity=1,
+            subsystem="MCU Core",
+            alternatives=["STM32G431CBT6"],
+        ),
+        ComponentRequirement(
+            part_number="C3216X7R1H104K",
+            manufacturer="TDK",
+            package="0603",
+            category="Capacitor",
+            value="100nF",
+            description="Decoupling cap",
+            quantity=10,
+            subsystem="Power",
+            alternatives=[],
+        ),
+    ]
+
+
+def _make_gather_result(**overrides) -> ComponentGatherResult:
+    defaults = dict(
+        part_number="STM32G474RET6",
+        manufacturer="ST",
+        category="MCU",
+        symbol_found=True,
+        symbol_source="graphrag",
+        symbol_content="(kicad_symbol ...)",
+        symbol_path="/data/symbols/STM32G474RET6.kicad_sym",
+        datasheet_found=True,
+        datasheet_source="graphrag",
+        datasheet_url="https://example.com/ds.pdf",
+        datasheet_path="/data/datasheets/STM32G474RET6_datasheet.pdf",
+        characterization_created=False,
+        characterization_path=None,
+        llm_generated=False,
+        pin_count=0,
+        errors=[],
+    )
+    defaults.update(overrides)
+    return ComponentGatherResult(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Test _write_checkpoint_atomic + _load_checkpoint round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointAtomicRoundTrip:
+    """Test atomic write and load of checkpoint files."""
+
+    def test_write_and_load(self, assembler, tmp_path):
+        ckpt_path = tmp_path / "test-project" / "symbol-assembly" / "test.json"
+        data = {"key": "value", "count": 42}
+        assembler._write_checkpoint_atomic(ckpt_path, data)
+
+        loaded = assembler._load_checkpoint(ckpt_path)
+        assert loaded == data
+
+    def test_load_missing_returns_none(self, assembler, tmp_path):
+        missing = tmp_path / "does_not_exist.json"
+        assert assembler._load_checkpoint(missing) is None
+
+    def test_load_corrupt_returns_none(self, assembler, tmp_path):
+        corrupt = tmp_path / "corrupt.json"
+        corrupt.write_text("{ not valid json !!!")
+        assert assembler._load_checkpoint(corrupt) is None
+
+    def test_overwrite_existing(self, assembler, tmp_path):
+        ckpt_path = tmp_path / "test-project" / "symbol-assembly" / "over.json"
+        assembler._write_checkpoint_atomic(ckpt_path, {"v": 1})
+        assembler._write_checkpoint_atomic(ckpt_path, {"v": 2})
+        loaded = assembler._load_checkpoint(ckpt_path)
+        assert loaded["v"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Test _save_components_checkpoint + _load_components_checkpoint
+# ---------------------------------------------------------------------------
+
+
+class TestComponentsCheckpointRoundTrip:
+    """Test component extraction checkpoint save/load cycle."""
+
+    def test_round_trip(self, assembler):
+        # Ensure output dir exists
+        assembler._output_dir.mkdir(parents=True, exist_ok=True)
+
+        comps = _make_components()
+        assembler._save_components_checkpoint(comps)
+
+        loaded = assembler._load_components_checkpoint()
+        assert loaded is not None
+        assert len(loaded) == 2
+        assert loaded[0].part_number == "STM32G474RET6"
+        assert loaded[0].alternatives == ["STM32G431CBT6"]
+        assert loaded[1].part_number == "C3216X7R1H104K"
+        assert loaded[1].quantity == 10
+
+    def test_load_absent_returns_none(self, assembler):
+        assert assembler._load_components_checkpoint() is None
+
+
+# ---------------------------------------------------------------------------
+# Test _tally_result
+# ---------------------------------------------------------------------------
+
+
+class TestTallyResult:
+    """Test that _tally_result correctly increments report counters."""
+
+    def test_graphrag_symbol_with_datasheet(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(symbol_source="graphrag", datasheet_found=True)
+        SymbolAssembler._tally_result(report, r)
+
+        assert report.symbols_found == 1
+        assert report.symbols_from_graphrag == 1
+        assert report.datasheets_downloaded == 1
+        assert report.symbols_from_kicad == 0
+        assert report.errors_count == 0
+        assert len(report.components) == 1
+
+    def test_kicad_symbol(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(symbol_source="kicad", datasheet_found=False)
+        SymbolAssembler._tally_result(report, r)
+
+        assert report.symbols_from_kicad == 1
+        assert report.datasheets_downloaded == 0
+
+    def test_snapeda_symbol(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(symbol_source="snapeda")
+        SymbolAssembler._tally_result(report, r)
+        assert report.symbols_from_snapeda == 1
+
+    def test_ultralibrarian_symbol(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(symbol_source="ultralibrarian")
+        SymbolAssembler._tally_result(report, r)
+        assert report.symbols_from_ultralibrarian == 1
+
+    def test_llm_generated(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(
+            symbol_source="llm_generated", llm_generated=True, pin_count=48
+        )
+        SymbolAssembler._tally_result(report, r)
+        assert report.symbols_llm_generated == 1
+
+    def test_characterization_created(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(characterization_created=True)
+        SymbolAssembler._tally_result(report, r)
+        assert report.characterizations_created == 1
+
+    def test_errors_tallied(self):
+        report = AssemblyReport(project_id="test")
+        r = _make_gather_result(errors=["timeout", "bad response"])
+        SymbolAssembler._tally_result(report, r)
+        assert report.errors_count == 1
+        assert len(report.errors) == 2
+        assert "STM32G474RET6: timeout" in report.errors
+
+    def test_multiple_results_accumulate(self):
+        report = AssemblyReport(project_id="test")
+        r1 = _make_gather_result(
+            part_number="A", symbol_source="graphrag", datasheet_found=True
+        )
+        r2 = _make_gather_result(
+            part_number="B", symbol_source="kicad", datasheet_found=True
+        )
+        SymbolAssembler._tally_result(report, r1)
+        SymbolAssembler._tally_result(report, r2)
+
+        assert report.symbols_found == 2
+        assert report.symbols_from_graphrag == 1
+        assert report.symbols_from_kicad == 1
+        assert report.datasheets_downloaded == 2
+        assert len(report.components) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test _result_from_dict
+# ---------------------------------------------------------------------------
+
+
+class TestResultFromDict:
+    """Test reconstruction of ComponentGatherResult from a serialized dict."""
+
+    def test_full_round_trip(self):
+        original = _make_gather_result()
+        d = original.to_dict()
+        reconstructed = SymbolAssembler._result_from_dict(d)
+
+        assert reconstructed.part_number == original.part_number
+        assert reconstructed.manufacturer == original.manufacturer
+        assert reconstructed.category == original.category
+        assert reconstructed.symbol_found == original.symbol_found
+        assert reconstructed.symbol_source == original.symbol_source
+        # symbol_content intentionally NOT restored
+        assert reconstructed.symbol_content == ""
+        assert reconstructed.symbol_path == original.symbol_path
+        assert reconstructed.datasheet_found == original.datasheet_found
+        assert reconstructed.datasheet_source == original.datasheet_source
+        assert reconstructed.datasheet_url == original.datasheet_url
+        assert reconstructed.datasheet_path == original.datasheet_path
+        assert reconstructed.characterization_created == original.characterization_created
+        assert reconstructed.llm_generated == original.llm_generated
+        assert reconstructed.pin_count == original.pin_count
+        assert reconstructed.errors == original.errors
+
+    def test_missing_fields_default_gracefully(self):
+        """Partial dict should not crash, uses defaults."""
+        d = {"part_number": "X", "manufacturer": "Y", "category": "IC"}
+        r = SymbolAssembler._result_from_dict(d)
+        assert r.part_number == "X"
+        assert r.symbol_found is False
+        assert r.errors == []
+
+    def test_success_property_preserved(self):
+        d = _make_gather_result(symbol_found=True).to_dict()
+        r = SymbolAssembler._result_from_dict(d)
+        assert r.success is True
+
+        d2 = _make_gather_result(symbol_found=False).to_dict()
+        r2 = SymbolAssembler._result_from_dict(d2)
+        assert r2.success is False
+
+
+# ---------------------------------------------------------------------------
+# Integration: gathering checkpoint resume
+# ---------------------------------------------------------------------------
+
+
+class TestGatheringCheckpointResume:
+    """Test that gathering checkpoint enables skipping already-completed components."""
+
+    def test_gathering_checkpoint_round_trip(self, assembler):
+        """Write a gathering checkpoint and verify it loads correctly."""
+        assembler._output_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = assembler._output_dir / "gathering_checkpoint.json"
+
+        r = _make_gather_result()
+        data = {
+            "timestamp": "2026-02-13T10:00:00Z",
+            "completed": 1,
+            "total": 2,
+            "components": {r.part_number: r.to_dict()},
+        }
+        assembler._write_checkpoint_atomic(ckpt_path, data)
+
+        loaded = assembler._load_checkpoint(ckpt_path)
+        assert loaded is not None
+        assert loaded["completed"] == 1
+        assert "STM32G474RET6" in loaded["components"]
+
+        # Reconstruct result
+        result = SymbolAssembler._result_from_dict(
+            loaded["components"]["STM32G474RET6"]
+        )
+        assert result.symbol_found is True
+        assert result.symbol_source == "graphrag"

@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -607,6 +608,146 @@ class SymbolAssembler:
             self._http = None
 
     # ------------------------------------------------------------------
+    # Checkpoint helpers for crash-resume
+    # ------------------------------------------------------------------
+
+    def _write_checkpoint_atomic(self, path: Path, data: Dict[str, Any]) -> None:
+        """Write JSON data to *path* atomically via temp file + os.replace()."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=path.stem
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, str(path))
+        except BaseException:
+            # Clean up temp file on any failure
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _load_checkpoint(self, path: Path) -> Optional[Dict[str, Any]]:
+        """Load a JSON checkpoint file.  Returns None if missing or corrupt."""
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(f"Corrupt checkpoint {path}, ignoring: {exc}")
+            return None
+
+    def _save_components_checkpoint(
+        self, components: List[ComponentRequirement]
+    ) -> None:
+        """Persist extracted components so the LLM analysis can be skipped on resume."""
+        ckpt_path = self._output_dir / "components_checkpoint.json"
+        data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "count": len(components),
+            "components": [
+                {
+                    "part_number": c.part_number,
+                    "manufacturer": c.manufacturer,
+                    "package": c.package,
+                    "category": c.category,
+                    "value": c.value,
+                    "description": c.description,
+                    "quantity": c.quantity,
+                    "subsystem": c.subsystem,
+                    "alternatives": c.alternatives,
+                }
+                for c in components
+            ],
+        }
+        self._write_checkpoint_atomic(ckpt_path, data)
+        logger.info(
+            f"Components checkpoint saved: {len(components)} components -> {ckpt_path}"
+        )
+
+    def _load_components_checkpoint(self) -> Optional[List[ComponentRequirement]]:
+        """Load a previously saved components checkpoint.  Returns None if absent/corrupt."""
+        ckpt_path = self._output_dir / "components_checkpoint.json"
+        data = self._load_checkpoint(ckpt_path)
+        if data is None:
+            return None
+        try:
+            return [
+                ComponentRequirement(
+                    part_number=str(raw.get("part_number", "")).strip(),
+                    manufacturer=str(raw.get("manufacturer", "")).strip(),
+                    package=str(raw.get("package", "")).strip(),
+                    category=str(raw.get("category", "Other")).strip(),
+                    value=str(raw.get("value", "")).strip(),
+                    description=str(raw.get("description", "")).strip(),
+                    quantity=int(raw.get("quantity", 1)),
+                    subsystem=str(raw.get("subsystem", "")).strip(),
+                    alternatives=list(raw.get("alternatives", [])),
+                )
+                for raw in data.get("components", [])
+                if isinstance(raw, dict)
+            ]
+        except Exception as exc:
+            logger.warning(f"Failed to deserialize components checkpoint: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Report tally helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tally_result(report: AssemblyReport, r: ComponentGatherResult) -> None:
+        """Update *report* counters from a single gather result."""
+        report.components.append(r.to_dict())
+        if r.symbol_found:
+            report.symbols_found += 1
+        if r.symbol_source == "graphrag":
+            report.symbols_from_graphrag += 1
+        elif r.symbol_source == "kicad":
+            report.symbols_from_kicad += 1
+        elif r.symbol_source == "snapeda":
+            report.symbols_from_snapeda += 1
+        elif r.symbol_source == "ultralibrarian":
+            report.symbols_from_ultralibrarian += 1
+        if r.llm_generated:
+            report.symbols_llm_generated += 1
+        if r.datasheet_found:
+            report.datasheets_downloaded += 1
+        if r.characterization_created:
+            report.characterizations_created += 1
+        if r.errors:
+            report.errors_count += 1
+            for err in r.errors:
+                report.errors.append(f"{r.part_number}: {err}")
+
+    @staticmethod
+    def _result_from_dict(comp_dict: Dict[str, Any]) -> ComponentGatherResult:
+        """Reconstruct a ComponentGatherResult from a serialized dict (checkpoint).
+
+        Does NOT restore ``symbol_content`` (large; already on disk as .kicad_sym).
+        """
+        return ComponentGatherResult(
+            part_number=comp_dict.get("part_number", ""),
+            manufacturer=comp_dict.get("manufacturer", ""),
+            category=comp_dict.get("category", ""),
+            symbol_found=comp_dict.get("symbol_found", False),
+            symbol_source=comp_dict.get("symbol_source", ""),
+            symbol_content="",  # intentionally omitted -- already on disk
+            symbol_path=comp_dict.get("symbol_path"),
+            datasheet_found=comp_dict.get("datasheet_found", False),
+            datasheet_source=comp_dict.get("datasheet_source", ""),
+            datasheet_url=comp_dict.get("datasheet_url", ""),
+            datasheet_path=comp_dict.get("datasheet_path"),
+            characterization_created=comp_dict.get("characterization_created", False),
+            characterization_path=comp_dict.get("characterization_path"),
+            llm_generated=comp_dict.get("llm_generated", False),
+            pin_count=comp_dict.get("pin_count", 0),
+            errors=list(comp_dict.get("errors", [])),
+        )
+
+    # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
@@ -656,18 +797,32 @@ class SymbolAssembler:
             self._datasheets_dir.mkdir(parents=True, exist_ok=True)
             self._characterizations_dir.mkdir(parents=True, exist_ok=True)
 
-            # ---- Phase 1: Analyze components ----
-            self._progress.log_analyze(
-                "Parsing ideation artifacts with Opus 4.6...",
-                phase_progress=0,
-            )
-            components = await self.analyze_components(artifacts)
+            # ---- Phase 1: Analyze components (with checkpoint resume) ----
+            components = self._load_components_checkpoint()
+            if components:
+                logger.info(
+                    f"Resuming from checkpoint: {len(components)} components "
+                    f"already extracted (skipping LLM analysis)"
+                )
+                self._progress.log_analyze(
+                    f"Resumed from checkpoint — {len(components)} components",
+                    phase_progress=100,
+                )
+            else:
+                self._progress.log_analyze(
+                    "Parsing ideation artifacts with Opus 4.6...",
+                    phase_progress=0,
+                )
+                components = await self.analyze_components(artifacts)
+                if components:
+                    self._save_components_checkpoint(components)
+                self._progress.log_analyze(
+                    f"Parsing ideation artifacts with Opus 4.6... "
+                    f"Found {len(components)} components",
+                    phase_progress=100,
+                )
+
             report.total_components = len(components)
-            self._progress.log_analyze(
-                f"Parsing ideation artifacts with Opus 4.6... "
-                f"Found {len(components)} components",
-                phase_progress=100,
-            )
 
             if not components:
                 self._progress.log_error(
@@ -682,45 +837,91 @@ class SymbolAssembler:
                 report.completed_at = datetime.now(timezone.utc).isoformat()
                 return report
 
-            # ---- Phases 2-7: Gather symbols / datasheets ----
+            # ---- Phases 2-7: Gather symbols / datasheets (with checkpoint resume) ----
+            gathering_ckpt_path = self._output_dir / "gathering_checkpoint.json"
+            report_path = self._output_dir / "assembly_report.json"
+            gathering_ckpt = self._load_checkpoint(gathering_ckpt_path) or {}
+            completed_results: Dict[str, Any] = gathering_ckpt.get("components", {})
+
             results: List[ComponentGatherResult] = []
+            # Track parallel GraphRAG ingestion tasks
+            ingestion_tasks: List[asyncio.Task] = []
+            already_ingested: set = set()
+
             for idx, comp in enumerate(components):
+                if comp.part_number in completed_results:
+                    # Resume: reconstruct result from checkpoint, skip gathering
+                    result = self._result_from_dict(
+                        completed_results[comp.part_number]
+                    )
+                    results.append(result)
+                    self._tally_result(report, result)
+                    # Resumed components were already ingested in a prior run
+                    already_ingested.add(comp.part_number)
+                    logger.info(
+                        f"Resumed {comp.part_number} from gathering checkpoint "
+                        f"({idx + 1}/{len(components)})"
+                    )
+                    continue
+
+                # Normal path: gather component
                 result = await self._gather_component(comp, idx, len(components))
                 results.append(result)
+                self._tally_result(report, result)
 
-            # Tally results
-            for r in results:
-                report.components.append(r.to_dict())
-                if r.symbol_found:
-                    report.symbols_found += 1
-                if r.symbol_source == "graphrag":
-                    report.symbols_from_graphrag += 1
-                elif r.symbol_source == "kicad":
-                    report.symbols_from_kicad += 1
-                elif r.symbol_source == "snapeda":
-                    report.symbols_from_snapeda += 1
-                elif r.symbol_source == "ultralibrarian":
-                    report.symbols_from_ultralibrarian += 1
-                if r.llm_generated:
-                    report.symbols_llm_generated += 1
-                if r.datasheet_found:
-                    report.datasheets_downloaded += 1
-                if r.characterization_created:
-                    report.characterizations_created += 1
-                if r.errors:
-                    report.errors_count += 1
-                    for err in r.errors:
-                        report.errors.append(f"{r.part_number}: {err}")
+                # Fire-and-forget: ingest to GraphRAG in parallel
+                if result.symbol_found:
+                    task = asyncio.create_task(
+                        self._ingest_single_to_graphrag(result, comp),
+                        name=f"ingest-{comp.part_number}",
+                    )
+                    ingestion_tasks.append(task)
+                    already_ingested.add(comp.part_number)
 
-            # ---- Phase 8: Ingest into GraphRAG ----
-            await self._ingest_to_graphrag(results)
+                # Save gathering checkpoint (atomic)
+                completed_results[comp.part_number] = result.to_dict()
+                self._write_checkpoint_atomic(gathering_ckpt_path, {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "completed": len(completed_results),
+                    "total": len(components),
+                    "components": completed_results,
+                })
 
-            # Write assembly_report.json
+                # Write incremental assembly_report.json (status="running")
+                self._write_checkpoint_atomic(report_path, report.to_dict())
+
+            # Await all parallel ingestion tasks before proceeding
+            if ingestion_tasks:
+                ingestion_results = await asyncio.gather(
+                    *ingestion_tasks, return_exceptions=True
+                )
+                ingested_ok = sum(
+                    1 for r in ingestion_results
+                    if r is True
+                )
+                ingested_err = sum(
+                    1 for r in ingestion_results
+                    if r is not True
+                )
+                logger.info(
+                    f"Parallel GraphRAG ingestion complete: "
+                    f"{ingested_ok} stored, {ingested_err} failed/skipped"
+                )
+
+            # ---- Phase 8: Ingest any remaining into GraphRAG ----
+            await self._ingest_to_graphrag(results, already_ingested)
+
+            # Write final assembly_report.json (atomic)
             report.status = "complete"
             report.completed_at = datetime.now(timezone.utc).isoformat()
-            report_path = self._output_dir / "assembly_report.json"
-            report_path.write_text(json.dumps(report.to_dict(), indent=2))
+            self._write_checkpoint_atomic(report_path, report.to_dict())
             logger.info(f"Assembly report written to {report_path}")
+
+            # Clean up checkpoint files (no longer needed after success)
+            components_ckpt_path = self._output_dir / "components_checkpoint.json"
+            components_ckpt_path.unlink(missing_ok=True)
+            gathering_ckpt_path.unlink(missing_ok=True)
+            logger.info("Checkpoint files cleaned up after successful completion")
 
             # Emit completion
             self._progress.complete(
@@ -746,12 +947,14 @@ class SymbolAssembler:
             report.errors_count += 1
             report.status = "error"
             report.completed_at = datetime.now(timezone.utc).isoformat()
-            # Write error report to disk so GET endpoint returns error instead of 404
+            # Write error report atomically so GET endpoint returns error
+            # instead of 404.  Do NOT delete checkpoints -- they enable
+            # resume on the next attempt.
             try:
-                report_path = self._output_dir / "assembly_report.json"
-                report_path.parent.mkdir(parents=True, exist_ok=True)
-                report_path.write_text(json.dumps(report.to_dict(), indent=2))
-                logger.info(f"Error report written to {report_path}")
+                err_report_path = self._output_dir / "assembly_report.json"
+                err_report_path.parent.mkdir(parents=True, exist_ok=True)
+                self._write_checkpoint_atomic(err_report_path, report.to_dict())
+                logger.info(f"Error report written to {err_report_path}")
             except Exception as write_exc:
                 logger.error(f"Failed to write error report: {write_exc}")
                 print(f"ASSEMBLY_ERROR: Failed to write error report: {write_exc}", file=sys.stderr)
@@ -1463,6 +1666,18 @@ class SymbolAssembler:
                     )
                     if dl_path:
                         result.datasheet_path = dl_path
+                    else:
+                        error_detail = (
+                            f"Datasheet download failed for "
+                            f"{comp.part_number} from {result.datasheet_url}"
+                        )
+                        logger.warning(error_detail)
+                        result.errors.append(error_detail)
+            else:
+                logger.info(
+                    f"No datasheet found for {comp.part_number} from "
+                    f"DigiKey/Mouser/LCSC/manufacturer sites"
+                )
         except Exception as exc:
             error_detail = (
                 f"Datasheet search failed for {comp.part_number}: {exc}"
@@ -2264,30 +2479,140 @@ class SymbolAssembler:
     # GraphRAG ingestion
     # ------------------------------------------------------------------
 
+    async def _ingest_single_to_graphrag(
+        self,
+        result: ComponentGatherResult,
+        comp: ComponentRequirement,
+    ) -> bool:
+        """Immediately ingest a single gathered component into GraphRAG.
+
+        Called as a fire-and-forget task right after each component is
+        gathered so the data is available to future runs without waiting
+        for the entire pipeline to finish.
+
+        Args:
+            result: The gather result for this component.
+            comp: The original component requirement (provides ``package``).
+
+        Returns:
+            ``True`` if the entity was stored successfully, ``False`` otherwise.
+        """
+        if not result.symbol_found:
+            return False
+
+        http = await self._get_http()
+        store_url = f"{GRAPHRAG_INTERNAL_URL}/internal/entities"
+
+        try:
+            entity_content = json.dumps(
+                {
+                    "type": "component_resolution",
+                    "part_number": result.part_number,
+                    "manufacturer": result.manufacturer,
+                    "category": result.category,
+                    "resolution": {
+                        "source": result.symbol_source,
+                        "format": "kicad_sym",
+                        "symbol_content": (
+                            result.symbol_content[:10000]
+                            if result.symbol_content
+                            else ""
+                        ),
+                        "datasheet_url": result.datasheet_url,
+                        "verified": result.symbol_source
+                        in ("kicad", "snapeda", "ultralibrarian"),
+                        "success_count": 1,
+                        "last_success": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                        "confidence": (
+                            0.9
+                            if result.symbol_source != "llm_generated"
+                            else 0.7
+                        ),
+                        "llm_generated": result.llm_generated,
+                        "pin_count": result.pin_count,
+                    },
+                }
+            )
+
+            entity_id = str(uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                f"component:{result.part_number}:{result.manufacturer}",
+            ))
+
+            response = await http.post(
+                store_url,
+                headers=self._graphrag_internal_headers(),
+                json={
+                    "id": entity_id,
+                    "domain": "technical",
+                    "entityType": "component_resolution",
+                    "content": entity_content,
+                    "metadata": {
+                        "part_number": result.part_number,
+                        "manufacturer": result.manufacturer,
+                        "category": result.category,
+                        "package": comp.package,
+                        "source": result.symbol_source,
+                        "project_id": self.project_id,
+                        "pin_count": result.pin_count,
+                        "event_type": "component_resolution",
+                    },
+                },
+                timeout=30.0,
+            )
+
+            if response.status_code in (200, 201):
+                logger.info(
+                    f"Ingested {result.part_number} to GraphRAG immediately "
+                    f"(entity: {entity_id})"
+                )
+                return True
+            else:
+                logger.warning(
+                    f"GraphRAG store returned HTTP "
+                    f"{response.status_code} for {result.part_number}. "
+                    f"URL: {store_url}. "
+                    f"Body: {response.text[:500]}"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Immediate GraphRAG ingest failed for "
+                f"{result.part_number}: {type(exc).__name__}: {exc}. "
+                f"URL: {store_url}"
+            )
+        return False
+
     async def _ingest_to_graphrag(
         self,
         results: List[ComponentGatherResult],
+        already_ingested: Optional[set] = None,
     ) -> None:
         """
-        Store all gathered component data into GraphRAG via the internal API
-        ``POST {GRAPHRAG_INTERNAL_URL}/internal/entities`` so future sessions
-        can find these components via GraphRAG-first search.
+        Store gathered component data into GraphRAG via the internal API.
 
-        Each component is stored as a 'technical' domain entity with
-        structured metadata for exact part_number matching and vector
-        similarity search.
+        Skips components that were already ingested in parallel during
+        gathering (tracked by *already_ingested* set of part numbers).
 
         Args:
             results: List of component gather results to ingest.
+            already_ingested: Set of part numbers already stored.
         """
-        successful = [r for r in results if r.symbol_found]
+        already_ingested = already_ingested or set()
+        successful = [
+            r for r in results
+            if r.symbol_found and r.part_number not in already_ingested
+        ]
         if not successful:
-            logger.info("No successful results to ingest into GraphRAG")
+            logger.info(
+                "No remaining results to ingest into GraphRAG "
+                f"({len(already_ingested)} already ingested in parallel)"
+            )
             return
 
         self._progress.log_ingest(
-            f"Storing {len(successful)} symbols to GraphRAG for future "
-            f"sessions...",
+            f"Storing {len(successful)} remaining symbols to GraphRAG...",
             phase_progress=0,
         )
 
@@ -2298,7 +2623,6 @@ class SymbolAssembler:
 
         for idx, result in enumerate(successful):
             try:
-                # Build structured content for vector search and exact match
                 entity_content = json.dumps(
                     {
                         "type": "component_resolution",
@@ -2348,7 +2672,7 @@ class SymbolAssembler:
                             "part_number": result.part_number,
                             "manufacturer": result.manufacturer,
                             "category": result.category,
-                            "package": result.package,
+                            "package": "",
                             "source": result.symbol_source,
                             "project_id": self.project_id,
                             "pin_count": result.pin_count,
@@ -2379,7 +2703,6 @@ class SymbolAssembler:
                     f"{type(exc).__name__}: {exc}. URL: {store_url}"
                 )
 
-            # Update progress
             pct = int(((idx + 1) / len(successful)) * 100)
             self._progress.log_ingest(
                 f"Storing to GraphRAG... {idx + 1}/{len(successful)}",
