@@ -150,7 +150,7 @@ export function createSymbolAssemblyRoutes(): Router {
               'X-Internal-Request': 'true',
             },
             body: JSON.stringify({
-              providerKeys: ['nexar', 'snapeda', 'ultralibrarian'],
+              providerKeys: ['nexar', 'snapeda', 'ultralibrarian', 'digikey', 'mouser'],
             }),
           });
 
@@ -176,6 +176,18 @@ export function createSymbolAssemblyRoutes(): Router {
             }
             if (keys.ultralibrarian?.value) {
               externalKeyEnv.ULTRALIBRARIAN_API_KEY = keys.ultralibrarian.value;
+            }
+            if (keys.digikey?.value) {
+              // DigiKey uses OAuth (client_id:client_secret format)
+              const digikeyValue = keys.digikey.value;
+              if (digikeyValue.includes(':')) {
+                const [clientId, clientSecret] = digikeyValue.split(':', 2);
+                externalKeyEnv.DIGIKEY_CLIENT_ID = clientId;
+                externalKeyEnv.DIGIKEY_CLIENT_SECRET = clientSecret;
+              }
+            }
+            if (keys.mouser?.value) {
+              externalKeyEnv.MOUSER_API_KEY = keys.mouser.value;
             }
 
             log.info('Loaded user external keys for symbol assembly', {

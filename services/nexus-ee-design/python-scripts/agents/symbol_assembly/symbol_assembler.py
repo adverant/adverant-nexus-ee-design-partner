@@ -108,6 +108,56 @@ ULTRALIBRARIAN_API_KEY: str = os.environ.get("ULTRALIBRARIAN_API_KEY", "")
 NEXAR_CLIENT_ID: str = os.environ.get("NEXAR_CLIENT_ID", "")
 NEXAR_CLIENT_SECRET: str = os.environ.get("NEXAR_CLIENT_SECRET", "")
 
+# DigiKey Product Information API v4 -- optional, for datasheet search
+DIGIKEY_CLIENT_ID: str = os.environ.get("DIGIKEY_CLIENT_ID", "")
+DIGIKEY_CLIENT_SECRET: str = os.environ.get("DIGIKEY_CLIENT_SECRET", "")
+
+# Mouser Search API -- optional, for datasheet search
+MOUSER_API_KEY: str = os.environ.get("MOUSER_API_KEY", "")
+
+
+# ---------------------------------------------------------------------------
+# Part number normalization
+# ---------------------------------------------------------------------------
+
+# Matches "MPN_CNNNNNN" where the suffix is an LCSC stock number (C + 1-7 digits)
+_LCSC_SUFFIX_RE = re.compile(r'^(.+?)_(C\d{1,7})$')
+
+
+def normalize_part_number(raw: str) -> Tuple[str, Optional[str]]:
+    """Split a concatenated ``MPN_LCSCID`` string into ``(mpn, lcsc_id)``.
+
+    Many BOM sources emit part numbers in ``{MPN}_{LCSC_ID}`` format, e.g.
+    ``C1005X7R1H104K_C523``.  No external API recognises this concatenated
+    form, so we split it before querying.
+
+    Returns ``(raw, None)`` if the string does not match the pattern.
+    """
+    m = _LCSC_SUFFIX_RE.match(raw)
+    if m:
+        return m.group(1), m.group(2)
+    return raw, None
+
+
+def generate_mpn_search_variants(mpn: str) -> List[str]:
+    """Generate progressively truncated search variants of a part number.
+
+    Some BOM sources append suffixes that distributor/library APIs don't
+    recognise (e.g. ``RC0402FR-0710KL_RST`` vs ``RC0402FR-0710KL``).
+    This function produces variants by stripping at ``_`` boundaries,
+    ordered from most specific to least specific.
+
+    The original MPN is always first.  Only variants with at least 4
+    characters are included (to avoid meaningless fragments).
+    """
+    variants: List[str] = [mpn]
+    current = mpn
+    while '_' in current:
+        current = current.rsplit('_', 1)[0]
+        if len(current) >= 4:
+            variants.append(current)
+    return variants
+
 
 # ---------------------------------------------------------------------------
 # Assembly phases for progress streaming
@@ -1494,6 +1544,16 @@ class SymbolAssembler:
         Returns:
             ``ComponentGatherResult`` with gathered data or errors.
         """
+        # Normalize part number: split MPN_LCSCID format before any searches
+        original_pn = comp.part_number
+        mpn, lcsc_id = normalize_part_number(comp.part_number)
+        if mpn != comp.part_number:
+            logger.info(
+                f"Normalized part number: {comp.part_number} -> "
+                f"MPN={mpn}, LCSC={lcsc_id}"
+            )
+            comp.part_number = mpn  # All downstream searches use normalized MPN
+
         result = ComponentGatherResult(
             part_number=comp.part_number,
             manufacturer=comp.manufacturer,
@@ -1653,7 +1713,7 @@ class SymbolAssembler:
 
         # ---- Source 5: Datasheet search (DigiKey, Mouser, LCSC) ----
         try:
-            ds_data = await self._search_datasheets(comp)
+            ds_data = await self._search_datasheets(comp, lcsc_id=lcsc_id)
             if ds_data:
                 result.datasheet_found = True
                 result.datasheet_source = ds_data.get("source", "web")
@@ -1890,7 +1950,8 @@ class SymbolAssembler:
         Search KiCad symbol libraries via the kicad-worker API.
 
         Queries the internal KiCad worker service to find symbols in
-        official KiCad libraries.
+        official KiCad libraries.  Tries progressively truncated MPN
+        variants until a match is found.
 
         Args:
             component: The component requirement to search for.
@@ -1900,54 +1961,66 @@ class SymbolAssembler:
             if found.  ``None`` otherwise.
         """
         http = await self._get_http()
-
         search_url = f"{KICAD_WORKER_URL}/v1/symbols/search"
-        response = await http.get(
-            search_url,
-            params={"query": component.part_number, "limit": 5},
-            timeout=15.0,
-        )
 
-        if response.status_code != 200:
-            logger.debug(
-                f"KiCad Worker search returned HTTP {response.status_code} "
-                f"for {component.part_number}. Body: {response.text[:500]}"
-            )
-            return None
+        variants = generate_mpn_search_variants(component.part_number)
+        for variant in variants:
+            try:
+                response = await http.get(
+                    search_url,
+                    params={"query": variant, "limit": 5},
+                    timeout=15.0,
+                )
 
-        data = response.json()
-        results = data.get("results", [])
+                if response.status_code != 200:
+                    logger.debug(
+                        f"KiCad Worker search returned HTTP {response.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
 
-        if not results:
-            return None
+                data = response.json()
+                results = data.get("results", [])
 
-        # Use first (best) result
-        best = results[0]
-        lib_name = best.get("library", "")
-        symbol_name = best.get("name", component.part_number)
+                if not results:
+                    continue
 
-        # Fetch full symbol content
-        lib_url = (
-            f"{KICAD_WORKER_URL}/v1/symbols/"
-            f"{quote_plus(lib_name)}/{quote_plus(symbol_name)}"
-        )
-        sym_response = await http.get(lib_url, timeout=15.0)
+                # Use first (best) result
+                best = results[0]
+                lib_name = best.get("library", "")
+                symbol_name = best.get("name", variant)
 
-        if sym_response.status_code != 200:
-            logger.debug(
-                f"KiCad Worker fetch returned HTTP {sym_response.status_code} "
-                f"for {lib_name}:{symbol_name}"
-            )
-            return None
+                # Fetch full symbol content
+                lib_url = (
+                    f"{KICAD_WORKER_URL}/v1/symbols/"
+                    f"{quote_plus(lib_name)}/{quote_plus(symbol_name)}"
+                )
+                sym_response = await http.get(lib_url, timeout=15.0)
 
-        sym_data = sym_response.json()
-        return {
-            "symbol_content": sym_data.get("content", ""),
-            "library": lib_name,
-            "datasheet_url": sym_data.get(
-                "datasheet_url", best.get("datasheet", "")
-            ),
-        }
+                if sym_response.status_code != 200:
+                    logger.debug(
+                        f"KiCad Worker fetch returned HTTP {sym_response.status_code} "
+                        f"for {lib_name}:{symbol_name}"
+                    )
+                    continue
+
+                sym_data = sym_response.json()
+                if variant != component.part_number:
+                    logger.info(
+                        f"KiCad found match via truncated variant: "
+                        f"'{component.part_number}' -> '{variant}'"
+                    )
+                return {
+                    "symbol_content": sym_data.get("content", ""),
+                    "library": lib_name,
+                    "datasheet_url": sym_data.get(
+                        "datasheet_url", best.get("datasheet", "")
+                    ),
+                }
+            except Exception as exc:
+                logger.debug(f"KiCad search error for '{variant}': {exc}")
+
+        return None
 
     async def search_snapeda(
         self,
@@ -1955,6 +2028,8 @@ class SymbolAssembler:
     ) -> Optional[Dict[str, Any]]:
         """
         Search SnapEDA API for KiCad symbols.
+
+        Tries progressively truncated MPN variants until a match is found.
 
         Args:
             component: The component requirement to search for.
@@ -1970,72 +2045,77 @@ class SymbolAssembler:
             headers["Authorization"] = f"Bearer {SNAPEDA_API_KEY}"
 
         search_url = "https://www.snapeda.com/api/v1/parts/search"
-        response = await http.get(
-            search_url,
-            params={"q": component.part_number, "limit": 5},
-            headers=headers,
-            timeout=20.0,
-        )
 
-        if response.status_code != 200:
-            logger.debug(
-                f"SnapEDA search returned HTTP {response.status_code} "
-                f"for {component.part_number}. Body: {response.text[:500]}"
-            )
-            return None
-
-        data = response.json()
-        results = data.get("results", data.get("parts", []))
-
-        if not results:
-            return None
-
-        # Find best match
-        best = results[0]
-        part_url = best.get("url", "")
-        has_kicad = best.get("has_kicad_symbol", False) or best.get(
-            "has_symbol", False
-        )
-
-        if not has_kicad:
-            logger.debug(
-                f"SnapEDA found {component.part_number} but no KiCad symbol "
-                f"available"
-            )
-            return None
-
-        # Try to download KiCad symbol
-        download_url = best.get("kicad_symbol_url", "")
-        if not download_url and part_url:
-            download_url = f"{part_url.rstrip('/')}/kicad/"
-
-        if download_url:
+        variants = generate_mpn_search_variants(component.part_number)
+        for variant in variants:
             try:
-                dl_response = await http.get(
-                    download_url,
+                response = await http.get(
+                    search_url,
+                    params={"q": variant, "limit": 5},
                     headers=headers,
-                    timeout=30.0,
+                    timeout=20.0,
                 )
-                if dl_response.status_code == 200:
-                    content_type = dl_response.headers.get("content-type", "")
-                    if "json" in content_type:
-                        sym_data = dl_response.json()
-                        return {
-                            "symbol_content": sym_data.get(
-                                "symbol", sym_data.get("content", "")
-                            ),
-                            "datasheet_url": best.get("datasheet_url", ""),
-                        }
-                    else:
-                        return {
-                            "symbol_content": dl_response.text,
-                            "datasheet_url": best.get("datasheet_url", ""),
-                        }
-            except Exception as dl_exc:
-                logger.warning(
-                    f"SnapEDA symbol download failed for "
-                    f"{component.part_number}: {dl_exc}"
+
+                if response.status_code != 200:
+                    logger.debug(
+                        f"SnapEDA search returned HTTP {response.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
+
+                data = response.json()
+                results = data.get("results", data.get("parts", []))
+
+                if not results:
+                    continue
+
+                # Find best match
+                best = results[0]
+                part_url = best.get("url", "")
+                has_kicad = best.get("has_kicad_symbol", False) or best.get(
+                    "has_symbol", False
                 )
+
+                if not has_kicad:
+                    logger.debug(
+                        f"SnapEDA found '{variant}' but no KiCad symbol "
+                        f"available"
+                    )
+                    continue
+
+                # Try to download KiCad symbol
+                download_url = best.get("kicad_symbol_url", "")
+                if not download_url and part_url:
+                    download_url = f"{part_url.rstrip('/')}/kicad/"
+
+                if download_url:
+                    dl_response = await http.get(
+                        download_url,
+                        headers=headers,
+                        timeout=30.0,
+                    )
+                    if dl_response.status_code == 200:
+                        if variant != component.part_number:
+                            logger.info(
+                                f"SnapEDA found match via truncated variant: "
+                                f"'{component.part_number}' -> '{variant}'"
+                            )
+                        content_type = dl_response.headers.get("content-type", "")
+                        if "json" in content_type:
+                            sym_data = dl_response.json()
+                            return {
+                                "symbol_content": sym_data.get(
+                                    "symbol", sym_data.get("content", "")
+                                ),
+                                "datasheet_url": best.get("datasheet_url", ""),
+                            }
+                        else:
+                            return {
+                                "symbol_content": dl_response.text,
+                                "datasheet_url": best.get("datasheet_url", ""),
+                            }
+            except Exception as exc:
+                logger.debug(f"SnapEDA search error for '{variant}': {exc}")
 
         return None
 
@@ -2045,6 +2125,8 @@ class SymbolAssembler:
     ) -> Optional[Dict[str, Any]]:
         """
         Search UltraLibrarian API for KiCad symbols.
+
+        Tries progressively truncated MPN variants until a match is found.
 
         Args:
             component: The component requirement to search for.
@@ -2060,69 +2142,73 @@ class SymbolAssembler:
             return None
 
         http = await self._get_http()
-
         search_url = "https://app.ultralibrarian.com/api/v1/search"
-        response = await http.get(
-            search_url,
-            params={
-                "keyword": component.part_number,
-                "format": "kicad",
-                "limit": 5,
-            },
-            headers={
-                "Authorization": f"Bearer {ULTRALIBRARIAN_API_KEY}",
-                "Accept": "application/json",
-            },
-            timeout=20.0,
-        )
 
-        if response.status_code != 200:
-            logger.debug(
-                f"UltraLibrarian search returned HTTP {response.status_code} "
-                f"for {component.part_number}. Body: {response.text[:500]}"
-            )
-            return None
+        variants = generate_mpn_search_variants(component.part_number)
+        for variant in variants:
+            try:
+                response = await http.get(
+                    search_url,
+                    params={
+                        "keyword": variant,
+                        "format": "kicad",
+                        "limit": 5,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {ULTRALIBRARIAN_API_KEY}",
+                        "Accept": "application/json",
+                    },
+                    timeout=20.0,
+                )
 
-        data = response.json()
-        results = data.get("results", data.get("parts", []))
+                if response.status_code != 200:
+                    logger.debug(
+                        f"UltraLibrarian search returned HTTP {response.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
 
-        if not results:
-            return None
+                data = response.json()
+                results = data.get("results", data.get("parts", []))
 
-        best = results[0]
-        download_url = best.get("download_url", best.get("kicad_url", ""))
+                if not results:
+                    continue
 
-        if not download_url:
-            return None
+                best = results[0]
+                download_url = best.get("download_url", best.get("kicad_url", ""))
 
-        try:
-            dl_response = await http.get(
-                download_url,
-                headers={
-                    "Authorization": f"Bearer {ULTRALIBRARIAN_API_KEY}"
-                },
-                timeout=30.0,
-            )
-            if dl_response.status_code == 200:
-                content_type = dl_response.headers.get("content-type", "")
-                if "json" in content_type:
-                    sym_data = dl_response.json()
-                    return {
-                        "symbol_content": sym_data.get(
-                            "symbol", sym_data.get("content", "")
-                        ),
-                        "datasheet_url": best.get("datasheet_url", ""),
-                    }
-                else:
-                    return {
-                        "symbol_content": dl_response.text,
-                        "datasheet_url": best.get("datasheet_url", ""),
-                    }
-        except Exception as dl_exc:
-            logger.warning(
-                f"UltraLibrarian download failed for "
-                f"{component.part_number}: {dl_exc}"
-            )
+                if not download_url:
+                    continue
+
+                dl_response = await http.get(
+                    download_url,
+                    headers={
+                        "Authorization": f"Bearer {ULTRALIBRARIAN_API_KEY}"
+                    },
+                    timeout=30.0,
+                )
+                if dl_response.status_code == 200:
+                    if variant != component.part_number:
+                        logger.info(
+                            f"UltraLibrarian found match via truncated variant: "
+                            f"'{component.part_number}' -> '{variant}'"
+                        )
+                    content_type = dl_response.headers.get("content-type", "")
+                    if "json" in content_type:
+                        sym_data = dl_response.json()
+                        return {
+                            "symbol_content": sym_data.get(
+                                "symbol", sym_data.get("content", "")
+                            ),
+                            "datasheet_url": best.get("datasheet_url", ""),
+                        }
+                    else:
+                        return {
+                            "symbol_content": dl_response.text,
+                            "datasheet_url": best.get("datasheet_url", ""),
+                        }
+            except Exception as exc:
+                logger.debug(f"UltraLibrarian search error for '{variant}': {exc}")
 
         return None
 
@@ -2176,6 +2262,8 @@ class SymbolAssembler:
         """Search Nexar (Octopart) GraphQL API for a datasheet URL.
 
         Requires ``NEXAR_CLIENT_ID`` and ``NEXAR_CLIENT_SECRET`` env vars.
+        Tries progressively truncated MPN variants until a match is found.
+
         Returns ``{"source": "nexar", "url": "<pdf_url>"}`` or ``None``.
         """
         token = await self._nexar_get_token()
@@ -2199,47 +2287,263 @@ class SymbolAssembler:
         }
         """
 
+        variants = generate_mpn_search_variants(comp.part_number)
+        for variant in variants:
+            try:
+                resp = await http.post(
+                    "https://api.nexar.com/graphql/",
+                    json={"query": query, "variables": {"q": variant}},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=20.0,
+                )
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"Nexar GraphQL query returned HTTP {resp.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
+
+                data = resp.json()
+                results = (
+                    data.get("data", {})
+                    .get("supSearch", {})
+                    .get("results", [])
+                )
+                if not results:
+                    continue
+
+                part = results[0].get("part", {})
+                ds = part.get("bestDatasheet", {})
+                ds_url = ds.get("url", "") if ds else ""
+
+                if ds_url:
+                    if variant != comp.part_number:
+                        logger.info(
+                            f"Nexar found datasheet via truncated variant: "
+                            f"'{comp.part_number}' -> '{variant}'"
+                        )
+                    logger.info(
+                        f"Nexar found datasheet for '{variant}': {ds_url}"
+                    )
+                    return {"source": "nexar", "url": ds_url}
+            except Exception as exc:
+                logger.debug(f"Nexar search error for '{variant}': {exc}")
+
+        return None
+
+    # ------------------------------------------------------------------
+    # DigiKey Product Information API v4
+    # ------------------------------------------------------------------
+
+    async def _digikey_get_token(self) -> Optional[str]:
+        """Fetch an OAuth2 token from DigiKey using client_credentials grant.
+
+        Returns the access token string, or ``None`` on failure.
+        Caches the token on the instance for the lifetime of the run.
+        """
+        cached = getattr(self, "_digikey_token", None)
+        if cached:
+            return cached
+
+        if not DIGIKEY_CLIENT_ID or not DIGIKEY_CLIENT_SECRET:
+            return None
+
+        http = await self._get_http()
         try:
             resp = await http.post(
-                "https://api.nexar.com/graphql/",
-                json={"query": query, "variables": {"q": comp.part_number}},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
+                "https://api.digikey.com/v1/oauth2/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": DIGIKEY_CLIENT_ID,
+                    "client_secret": DIGIKEY_CLIENT_SECRET,
                 },
-                timeout=20.0,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15.0,
             )
             if resp.status_code != 200:
                 logger.warning(
-                    f"Nexar GraphQL query failed for {comp.part_number}: "
-                    f"HTTP {resp.status_code}"
+                    f"DigiKey OAuth token request failed: HTTP {resp.status_code} "
+                    f"- {resp.text[:300]}"
+                )
+                return None
+            token = resp.json().get("access_token")
+            if token:
+                self._digikey_token: str = token  # type: ignore[attr-defined]
+            return token
+        except Exception as exc:
+            logger.warning(f"DigiKey OAuth token request error: {exc}")
+            return None
+
+    async def search_digikey_api(
+        self,
+        mpn: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Search DigiKey Product Information API v4 for a datasheet URL.
+
+        Uses OAuth2 client_credentials grant. Requires ``DIGIKEY_CLIENT_ID``
+        and ``DIGIKEY_CLIENT_SECRET`` env vars.
+
+        Returns ``{"source": "digikey", "url": "<pdf_url>"}`` or ``None``.
+        """
+        token = await self._digikey_get_token()
+        if not token:
+            return None
+
+        http = await self._get_http()
+
+        # Try each search variant (progressively truncated)
+        variants = generate_mpn_search_variants(mpn)
+        for variant in variants:
+            try:
+                resp = await http.post(
+                    "https://api.digikey.com/products/v4/search/keyword",
+                    json={
+                        "Keywords": variant,
+                        "RecordCount": 5,
+                        "RecordStartPosition": 0,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "X-DIGIKEY-Client-Id": DIGIKEY_CLIENT_ID,
+                        "Content-Type": "application/json",
+                    },
+                    timeout=20.0,
+                )
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"DigiKey API search returned HTTP {resp.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
+
+                data = resp.json()
+                products = data.get("Products", [])
+                if not products:
+                    continue
+
+                ds_url = products[0].get("DatasheetUrl", "")
+                if ds_url:
+                    logger.info(
+                        f"DigiKey API found datasheet for '{variant}': {ds_url}"
+                    )
+                    return {"source": "digikey", "url": ds_url}
+            except Exception as exc:
+                logger.debug(f"DigiKey API search error for '{variant}': {exc}")
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Mouser Search API v2
+    # ------------------------------------------------------------------
+
+    async def search_mouser_api(
+        self,
+        mpn: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Search Mouser Search API v2 for a datasheet URL.
+
+        Requires ``MOUSER_API_KEY`` env var.
+        Rate limit: 30 requests/minute.
+
+        Returns ``{"source": "mouser", "url": "<pdf_url>"}`` or ``None``.
+        """
+        if not MOUSER_API_KEY:
+            return None
+
+        http = await self._get_http()
+
+        # Try each search variant (progressively truncated)
+        variants = generate_mpn_search_variants(mpn)
+        for variant in variants:
+            try:
+                resp = await http.post(
+                    f"https://api.mouser.com/api/v2/search/keyword?apiKey={MOUSER_API_KEY}",
+                    json={
+                        "SearchByKeywordRequest": {
+                            "keyword": variant,
+                            "records": 5,
+                            "startingRecord": 0,
+                            "searchOptions": "",
+                            "searchWithYourSignUpLanguage": "",
+                        }
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=20.0,
+                )
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"Mouser API search returned HTTP {resp.status_code} "
+                        f"for '{variant}'"
+                    )
+                    continue
+
+                data = resp.json()
+                parts = (
+                    data.get("SearchResults", {})
+                    .get("Parts", [])
+                )
+                if not parts:
+                    continue
+
+                ds_url = parts[0].get("DataSheetUrl", "")
+                if ds_url:
+                    logger.info(
+                        f"Mouser API found datasheet for '{variant}': {ds_url}"
+                    )
+                    return {"source": "mouser", "url": ds_url}
+            except Exception as exc:
+                logger.debug(f"Mouser API search error for '{variant}': {exc}")
+
+        return None
+
+    # ------------------------------------------------------------------
+    # LCSC Direct Product Lookup API
+    # ------------------------------------------------------------------
+
+    async def search_lcsc_api(
+        self,
+        lcsc_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Look up a component by LCSC stock number (e.g. ``C523``).
+
+        Uses the public LCSC product detail API (no auth required).
+
+        Returns ``{"source": "lcsc", "url": "<pdf_url>"}`` or ``None``.
+        """
+        if not lcsc_id:
+            return None
+
+        http = await self._get_http()
+
+        try:
+            resp = await http.get(
+                "https://wmsc.lcsc.com/ftps/wm/product/detail",
+                params={"productCode": lcsc_id},
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                logger.debug(
+                    f"LCSC API returned HTTP {resp.status_code} "
+                    f"for {lcsc_id}"
                 )
                 return None
 
             data = resp.json()
-            results = (
-                data.get("data", {})
-                .get("supSearch", {})
-                .get("results", [])
-            )
-            if not results:
-                return None
+            result_data = data.get("result", data)
 
-            part = results[0].get("part", {})
-            ds = part.get("bestDatasheet", {})
-            ds_url = ds.get("url", "") if ds else ""
-
+            ds_url = result_data.get("dataManualUrl", "")
             if ds_url:
                 logger.info(
-                    f"Nexar found datasheet for {comp.part_number}: {ds_url}"
+                    f"LCSC API found datasheet for {lcsc_id}: {ds_url}"
                 )
-                return {"source": "nexar", "url": ds_url}
+                return {"source": "lcsc", "url": ds_url}
 
             return None
         except Exception as exc:
-            logger.warning(
-                f"Nexar search failed for {comp.part_number}: {exc}"
-            )
+            logger.debug(f"LCSC API search error for {lcsc_id}: {exc}")
             return None
 
     async def download_datasheet(
@@ -2513,18 +2817,23 @@ class SymbolAssembler:
     async def _search_datasheets(
         self,
         comp: ComponentRequirement,
+        lcsc_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Search for datasheets using manufacturer direct URLs, then
-        distributor sites as fallback.
+        distributor APIs.
 
         Strategy order:
         1. Manufacturer direct URLs (most reliable, no anti-bot)
         2. Nexar/Octopart GraphQL API (optional, needs credentials)
-        3. DigiKey/Mouser/LCSC HTML scrape (unreliable, often blocked)
+        3. DigiKey Product Information API v4 (proper OAuth)
+        4. Mouser Search API v2 (proper API key)
+        5. LCSC Direct Lookup (if LCSC ID available, no auth)
 
         Args:
             comp: The component requirement.
+            lcsc_id: Optional LCSC stock number (e.g. ``C523``) extracted
+                during part number normalization.
 
         Returns:
             Dict with ``source`` and ``url`` if found.  ``None`` otherwise.
@@ -2563,56 +2872,21 @@ class SymbolAssembler:
         if nexar_result:
             return nexar_result
 
-        # ---- Strategy 3: Distributor site scrape (unreliable) ----
-        # Note: DigiKey/Mouser/LCSC heavily use JavaScript rendering and
-        # anti-bot protections.  Simple HTTP GET often returns captcha pages
-        # or empty results.  These are best-effort fallbacks.
+        # ---- Strategy 3: DigiKey API (proper OAuth) ----
+        digikey_result = await self.search_digikey_api(comp.part_number)
+        if digikey_result:
+            return digikey_result
 
-        distributor_searches = [
-            (
-                "DigiKey",
-                f"https://www.digikey.com/en/products/filter?"
-                f"keywords={quote_plus(comp.part_number)}",
-            ),
-            (
-                "Mouser",
-                f"https://www.mouser.com/c/?q="
-                f"{quote_plus(comp.part_number)}",
-            ),
-            (
-                "LCSC",
-                f"https://www.lcsc.com/search?q="
-                f"{quote_plus(comp.part_number)}",
-            ),
-        ]
+        # ---- Strategy 4: Mouser API (proper API key) ----
+        mouser_result = await self.search_mouser_api(comp.part_number)
+        if mouser_result:
+            return mouser_result
 
-        for dist_name, dist_url in distributor_searches:
-            try:
-                dist_resp = await http.get(dist_url, timeout=15.0)
-                if (
-                    dist_resp.status_code == 200
-                    and "datasheet" in dist_resp.text.lower()
-                ):
-                    ds_url = await self._extract_datasheet_url_with_llm(
-                        comp.part_number, dist_resp.text[:5000], dist_name
-                    )
-                    if ds_url:
-                        logger.info(
-                            f"Datasheet found for {comp.part_number} "
-                            f"via {dist_name} scrape: {ds_url}"
-                        )
-                        return {"source": dist_name, "url": ds_url}
-                else:
-                    logger.warning(
-                        f"{dist_name} search returned HTTP "
-                        f"{dist_resp.status_code} for {comp.part_number} "
-                        f"(likely anti-bot block)"
-                    )
-            except Exception as exc:
-                logger.warning(
-                    f"{dist_name} search failed for "
-                    f"{comp.part_number}: {exc}"
-                )
+        # ---- Strategy 5: LCSC API (if LCSC ID available) ----
+        if lcsc_id:
+            lcsc_result = await self.search_lcsc_api(lcsc_id)
+            if lcsc_result:
+                return lcsc_result
 
         return None
 
