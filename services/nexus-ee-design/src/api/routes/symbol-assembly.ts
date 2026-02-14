@@ -369,46 +369,143 @@ export function createSymbolAssemblyRoutes(): Router {
       }
 
       // Check for existing completed symbols from a prior run (cross-operation reuse).
-      // If a previous assembly_report.json exists with status=complete, skip re-gathering.
+      // Strategy: first check assembly_report.json, then fall back to scanning
+      // the filesystem for actual gathered files (protects against a failed run
+      // overwriting a successful report).
       const existingReportPath = path.join(outputDir, 'assembly_report.json');
+      const backupReportPath = path.join(outputDir, 'assembly_report.success.json');
+
+      // Helper: send reuse response and return early
+      const sendReuseResponse = async (report: Record<string, unknown>, symbolCount: number) => {
+        const updatedReport = { ...report, operationId };
+        await fs.writeFile(existingReportPath, JSON.stringify(updatedReport, null, 2));
+
+        wsManager.emitProgress(operationId, {
+          type: SchematicEventType.SYMBOL_ASSEMBLY_COMPLETE,
+          operationId,
+          timestamp: new Date().toISOString(),
+          progress_percentage: 100,
+          current_step: `Reusing ${symbolCount} previously gathered symbols (skipped re-analysis)`,
+        });
+
+        res.json({
+          success: true,
+          data: {
+            operationId,
+            status: 'complete',
+            projectId,
+            reused: true,
+            previousSymbolsFound: symbolCount,
+          },
+        });
+      };
+
+      // Strategy 1: Check assembly_report.json for status=complete
       try {
         const existingContent = await fs.readFile(existingReportPath, 'utf-8');
-        const existingReport: AssemblyReport = JSON.parse(existingContent);
-        if (existingReport.status === 'complete' && existingReport.components?.length > 0) {
+        const existingReport = JSON.parse(existingContent) as Record<string, unknown>;
+        const components = existingReport.components as unknown[];
+        if (existingReport.status === 'complete' && components?.length > 0) {
           log.info('Found existing completed assembly report — reusing previous results', {
             operationId,
             previousOperationId: existingReport.operationId,
-            symbolsFound: existingReport.symbolsFound,
-            totalComponents: existingReport.totalComponents,
+            symbolsFound: existingReport.symbols_found,
+            totalComponents: existingReport.total_components,
           });
-
-          // Update the report with the new operationId so GET endpoint works
-          existingReport.operationId = operationId;
-          await fs.writeFile(existingReportPath, JSON.stringify(existingReport, null, 2));
-
-          // Emit completion immediately via WebSocket
-          wsManager.emitProgress(operationId, {
-            type: SchematicEventType.SYMBOL_ASSEMBLY_COMPLETE,
-            operationId,
-            timestamp: new Date().toISOString(),
-            progress_percentage: 100,
-            current_step: `Reusing ${existingReport.symbolsFound} previously gathered symbols (skipped re-analysis)`,
-          });
-
-          res.json({
-            success: true,
-            data: {
-              operationId,
-              status: 'complete',
-              projectId,
-              reused: true,
-              previousSymbolsFound: existingReport.symbolsFound,
-            },
-          });
+          await sendReuseResponse(existingReport, (existingReport.symbols_found as number) || components.length);
           return;
         }
       } catch {
-        // No existing report or it's incomplete — proceed normally
+        // No existing report or it's incomplete — try fallbacks
+      }
+
+      // Strategy 2: Check backup report saved before a failed run overwrote the main one
+      try {
+        const backupContent = await fs.readFile(backupReportPath, 'utf-8');
+        const backupReport = JSON.parse(backupContent) as Record<string, unknown>;
+        const components = backupReport.components as unknown[];
+        if (backupReport.status === 'complete' && components?.length > 0) {
+          log.info('Found backup assembly report (main was overwritten by error) — reusing', {
+            operationId,
+            previousOperationId: backupReport.operationId,
+            symbolsFound: backupReport.symbols_found,
+          });
+          await sendReuseResponse(backupReport, (backupReport.symbols_found as number) || components.length);
+          return;
+        }
+      } catch {
+        // No backup report — try filesystem scan
+      }
+
+      // Strategy 3: Scan filesystem for gathered symbols even if report is missing/error.
+      // A failed run may have overwritten the report, but the actual symbol files
+      // and characterizations from previous successful runs still exist on disk.
+      try {
+        const symbolsDir = path.join(outputDir, 'symbols');
+        const charsDir = path.join(outputDir, 'characterizations');
+        const datasheetsDir = path.join(outputDir, 'datasheets');
+
+        const symbolFiles = await fs.readdir(symbolsDir).catch(() => [] as string[]);
+        const charFiles = await fs.readdir(charsDir).catch(() => [] as string[]);
+        const datasheetFiles = await fs.readdir(datasheetsDir).catch(() => [] as string[]);
+
+        const kicadSymbols = symbolFiles.filter(f => f.endsWith('.kicad_sym'));
+
+        if (kicadSymbols.length >= 5) {
+          log.info('Filesystem scan found existing gathered symbols — building synthetic report', {
+            operationId,
+            symbolCount: kicadSymbols.length,
+            characterizationCount: charFiles.length,
+            datasheetCount: datasheetFiles.length,
+          });
+
+          // Build synthetic report from filesystem
+          const syntheticComponents = kicadSymbols.map(symFile => {
+            const baseName = symFile.replace('.kicad_sym', '');
+            const charFile = charFiles.find(f => f.startsWith(baseName) && f.endsWith('.md'));
+            const dsFile = datasheetFiles.find(f => f.startsWith(baseName) && f.endsWith('.pdf'));
+            return {
+              part_number: baseName,
+              manufacturer: '',
+              category: '',
+              symbol_found: true,
+              symbol_source: 'recovered-from-disk',
+              symbol_path: path.join(symbolsDir, symFile),
+              datasheet_found: !!dsFile,
+              datasheet_path: dsFile ? path.join(datasheetsDir, dsFile) : null,
+              characterization_created: !!charFile,
+              characterization_path: charFile ? path.join(charsDir, charFile) : null,
+              errors: [],
+              success: true,
+            };
+          });
+
+          const syntheticReport = {
+            project_id: projectId,
+            operationId,
+            status: 'complete',
+            started_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+            total_components: syntheticComponents.length,
+            symbols_found: kicadSymbols.length,
+            symbols_from_graphrag: 0,
+            symbols_from_kicad: 0,
+            symbols_from_snapeda: 0,
+            symbols_from_ultralibrarian: 0,
+            symbols_llm_generated: 0,
+            datasheets_downloaded: datasheetFiles.length,
+            characterizations_created: charFiles.filter(f => f.endsWith('.md')).length,
+            errors_count: 0,
+            components: syntheticComponents,
+            errors: [],
+            success: true,
+          };
+
+          await sendReuseResponse(syntheticReport, kicadSymbols.length);
+          return;
+        }
+      } catch {
+        // Filesystem scan failed — proceed normally
       }
 
       // Check if there's already a running operation for this project and abort it

@@ -1044,6 +1044,17 @@ class SymbolAssembler:
             try:
                 err_report_path = self._output_dir / "assembly_report.json"
                 err_report_path.parent.mkdir(parents=True, exist_ok=True)
+                # Back up existing successful report before overwriting with error.
+                # This prevents a failed run from destroying the record of a
+                # previous successful run (the Node.js route checks this backup).
+                try:
+                    existing = json.loads(err_report_path.read_text())
+                    if existing.get("status") == "complete" and existing.get("components"):
+                        backup_path = self._output_dir / "assembly_report.success.json"
+                        self._write_checkpoint_atomic(backup_path, existing)
+                        logger.info(f"Backed up successful report to {backup_path}")
+                except Exception:
+                    pass  # No existing report or unreadable — nothing to back up
                 self._write_checkpoint_atomic(err_report_path, report.to_dict())
                 logger.info(f"Error report written to {err_report_path}")
             except Exception as write_exc:
