@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import tempfile
 import traceback
@@ -36,6 +37,25 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
+
+# Global cancellation flag set by SIGTERM handler
+_cancel_requested = False
+
+
+def _sigterm_handler(signum: int, frame: object) -> None:
+    """Handle SIGTERM for graceful cancellation.
+
+    Sets a global flag so the assembler can save checkpoints and exit
+    cleanly instead of being killed mid-write.
+    """
+    global _cancel_requested
+    _cancel_requested = True
+    logger_name = logging.getLogger(__name__)
+    logger_name.warning(f"Received signal {signum} — cancellation requested, saving checkpoints...")
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT, _sigterm_handler)
 
 import httpx
 
@@ -903,6 +923,23 @@ class SymbolAssembler:
             already_ingested: set = set()
 
             for idx, comp in enumerate(components):
+                # Check for cancellation (SIGTERM from Node.js)
+                if _cancel_requested:
+                    logger.warning(
+                        f"Cancellation requested after {idx}/{len(components)} components. "
+                        f"Checkpoints saved — will resume on next run."
+                    )
+                    self._progress.log_error(
+                        f"Cancelled after gathering {idx}/{len(components)} components. "
+                        f"Progress saved — next run will resume."
+                    )
+                    report.status = "error"
+                    report.errors.append("Operation cancelled by user")
+                    report.errors_count += 1
+                    report.completed_at = datetime.now(timezone.utc).isoformat()
+                    self._write_checkpoint_atomic(report_path, report.to_dict())
+                    return report
+
                 if comp.part_number in completed_results:
                     # Resume: reconstruct result from checkpoint, skip gathering
                     result = self._result_from_dict(

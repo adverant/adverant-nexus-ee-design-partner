@@ -6,14 +6,17 @@
  *
  * Endpoints:
  * - POST /api/v1/projects/:projectId/symbol-assembly/gather - Trigger symbol assembly
+ * - GET /api/v1/projects/:projectId/symbol-assembly/active - List active operations
+ * - DELETE /api/v1/projects/:projectId/symbol-assembly/active - Cancel all active operations
  * - GET /api/v1/projects/:projectId/symbol-assembly/:operationId - Get assembly report
+ * - DELETE /api/v1/projects/:projectId/symbol-assembly/:operationId - Cancel specific operation
  * - GET /api/v1/projects/:projectId/symbol-assembly/:operationId/symbols - List gathered symbols
  * - GET /api/v1/projects/:projectId/symbol-assembly/:operationId/datasheets - List datasheets
  * - GET /api/v1/projects/:projectId/symbol-assembly/:operationId/download/:filename - Download file
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { z } from 'zod';
 import path from 'path';
 import fs from 'fs/promises';
@@ -22,6 +25,12 @@ import { log } from '../../utils/logger.js';
 import { config } from '../../config.js';
 import { getSchematicWsManager } from '../schematic-ws.js';
 import { SchematicEventType } from '../websocket-schematic.js';
+
+/**
+ * Process registry: tracks spawned Python processes by operationId
+ * so they can be cancelled via DELETE endpoint.
+ */
+const activeProcesses: Map<string, { process: ChildProcess; projectId: string; startedAt: Date }> = new Map();
 
 /**
  * Validation schemas
@@ -359,6 +368,67 @@ export function createSymbolAssemblyRoutes(): Router {
         });
       }
 
+      // Check for existing completed symbols from a prior run (cross-operation reuse).
+      // If a previous assembly_report.json exists with status=complete, skip re-gathering.
+      const existingReportPath = path.join(outputDir, 'assembly_report.json');
+      try {
+        const existingContent = await fs.readFile(existingReportPath, 'utf-8');
+        const existingReport: AssemblyReport = JSON.parse(existingContent);
+        if (existingReport.status === 'complete' && existingReport.components?.length > 0) {
+          log.info('Found existing completed assembly report — reusing previous results', {
+            operationId,
+            previousOperationId: existingReport.operationId,
+            symbolsFound: existingReport.symbolsFound,
+            totalComponents: existingReport.totalComponents,
+          });
+
+          // Update the report with the new operationId so GET endpoint works
+          existingReport.operationId = operationId;
+          await fs.writeFile(existingReportPath, JSON.stringify(existingReport, null, 2));
+
+          // Emit completion immediately via WebSocket
+          wsManager.emitProgress(operationId, {
+            type: SchematicEventType.SYMBOL_ASSEMBLY_COMPLETE,
+            operationId,
+            timestamp: new Date().toISOString(),
+            progress_percentage: 100,
+            current_step: `Reusing ${existingReport.symbolsFound} previously gathered symbols (skipped re-analysis)`,
+          });
+
+          res.json({
+            success: true,
+            data: {
+              operationId,
+              status: 'complete',
+              projectId,
+              reused: true,
+              previousSymbolsFound: existingReport.symbolsFound,
+            },
+          });
+          return;
+        }
+      } catch {
+        // No existing report or it's incomplete — proceed normally
+      }
+
+      // Check if there's already a running operation for this project and abort it
+      for (const [existingOpId, entry] of activeProcesses) {
+        if (entry.projectId === projectId) {
+          log.warn('Killing existing symbol assembly process for same project', {
+            existingOperationId: existingOpId,
+            newOperationId: operationId,
+            projectId,
+          });
+          try {
+            entry.process.kill('SIGTERM');
+            setTimeout(() => {
+              try { entry.process.kill('SIGKILL'); } catch { /* already dead */ }
+            }, 5000);
+          } catch { /* process may already be gone */ }
+          activeProcesses.delete(existingOpId);
+        }
+      }
+
       const python = spawn(pythonPath, [
         scriptPath,
         '--project-id', projectId,
@@ -371,6 +441,9 @@ export function createSymbolAssemblyRoutes(): Router {
           ...externalKeyEnv,  // User BYOK keys override system defaults
         },
       });
+
+      // Register process so it can be cancelled
+      activeProcesses.set(operationId, { process: python, projectId, startedAt: new Date() });
 
       // Emit initial start event so frontend leaves "Initializing..."
       wsManager.emitProgress(operationId, {
@@ -428,8 +501,21 @@ export function createSymbolAssemblyRoutes(): Router {
         }
       });
 
-      python.on('close', (code) => {
-        if (code !== 0) {
+      python.on('close', (code, signal) => {
+        // Unregister process
+        activeProcesses.delete(operationId);
+
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          log.info('Symbol assembler process was cancelled', { operationId, signal });
+          wsManager.emitProgress(operationId, {
+            type: SchematicEventType.ERROR,
+            operationId,
+            timestamp: new Date().toISOString(),
+            progress_percentage: 0,
+            current_step: 'Symbol assembly was cancelled',
+            error_message: 'Operation cancelled by user',
+          });
+        } else if (code !== 0) {
           log.error('Symbol assembler process failed', { operation: operationId, exitCode: code } as any);
           wsManager.emitProgress(operationId, {
             type: SchematicEventType.ERROR,
@@ -452,6 +538,9 @@ export function createSymbolAssemblyRoutes(): Router {
       });
 
       python.on('error', (err) => {
+        // Unregister process
+        activeProcesses.delete(operationId);
+
         log.error('Failed to start symbol assembler', { operation: operationId, errorMessage: err.message } as any);
         wsManager.emitProgress(operationId, {
           type: SchematicEventType.ERROR,
@@ -470,6 +559,76 @@ export function createSymbolAssemblyRoutes(): Router {
           operationId,
           status: 'running',
           projectId,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * List all active symbol assembly operations for a project
+   * GET /api/v1/projects/:projectId/symbol-assembly/active
+   *
+   * IMPORTANT: This route MUST be registered before /:operationId
+   * so Express doesn't match "active" as an operationId parameter.
+   */
+  router.get('/active', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+
+      const operations = Array.from(activeProcesses.entries())
+        .filter(([, entry]) => entry.projectId === projectId)
+        .map(([opId, entry]) => ({
+          operationId: opId,
+          projectId: entry.projectId,
+          startedAt: entry.startedAt.toISOString(),
+          pid: entry.process.pid,
+        }));
+
+      res.json({
+        success: true,
+        data: {
+          projectId,
+          activeOperations: operations,
+          count: operations.length,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Cancel ALL active operations for a project
+   * DELETE /api/v1/projects/:projectId/symbol-assembly/active
+   */
+  router.delete('/active', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId } = req.params;
+
+      const cancelled: string[] = [];
+      for (const [opId, entry] of activeProcesses) {
+        if (entry.projectId === projectId) {
+          try {
+            entry.process.kill('SIGTERM');
+            setTimeout(() => {
+              try { entry.process.kill('SIGKILL'); } catch { /* already dead */ }
+            }, 5000);
+          } catch { /* process may already be gone */ }
+          activeProcesses.delete(opId);
+          cancelled.push(opId);
+
+          log.info('Cancelled active symbol assembly operation', { operationId: opId, projectId });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          projectId,
+          cancelledOperations: cancelled,
+          count: cancelled.length,
         },
       });
     } catch (error) {
@@ -519,6 +678,87 @@ export function createSymbolAssemblyRoutes(): Router {
         }
         throw err;
       }
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Cancel a running symbol assembly operation
+   * DELETE /api/v1/projects/:projectId/symbol-assembly/:operationId
+   */
+  router.delete('/:operationId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { projectId, operationId } = req.params;
+
+      log.info('Cancel symbol assembly requested', { projectId, operationId });
+
+      const entry = activeProcesses.get(operationId);
+      if (!entry) {
+        // Check if there's any active process for this project (frontend may not know the operationId)
+        let foundEntry: { operationId: string; process: ChildProcess } | null = null;
+        for (const [opId, e] of activeProcesses) {
+          if (e.projectId === projectId) {
+            foundEntry = { operationId: opId, process: e.process };
+            break;
+          }
+        }
+
+        if (!foundEntry) {
+          res.json({
+            success: true,
+            data: { operationId, status: 'not_found', message: 'No active process found (may have already completed)' },
+          });
+          return;
+        }
+
+        // Kill the found process
+        log.info('Killing symbol assembly process by projectId match', {
+          requestedOperationId: operationId,
+          actualOperationId: foundEntry.operationId,
+          projectId,
+        });
+        try {
+          foundEntry.process.kill('SIGTERM');
+          setTimeout(() => {
+            try { foundEntry!.process.kill('SIGKILL'); } catch { /* already dead */ }
+          }, 5000);
+        } catch { /* process may already be gone */ }
+        activeProcesses.delete(foundEntry.operationId);
+
+        res.json({
+          success: true,
+          data: { operationId: foundEntry.operationId, status: 'cancelled' },
+        });
+        return;
+      }
+
+      // Kill the process: SIGTERM first, SIGKILL after 5s
+      try {
+        entry.process.kill('SIGTERM');
+        setTimeout(() => {
+          try { entry.process.kill('SIGKILL'); } catch { /* already dead */ }
+        }, 5000);
+      } catch { /* process may already be gone */ }
+      activeProcesses.delete(operationId);
+
+      log.info('Symbol assembly process cancelled', { operationId, projectId });
+
+      // Emit cancellation event via WebSocket
+      const wsManager = getSchematicWsManager();
+      wsManager.emitProgress(operationId, {
+        type: SchematicEventType.ERROR,
+        operationId,
+        timestamp: new Date().toISOString(),
+        progress_percentage: 0,
+        current_step: 'Symbol assembly was cancelled by user',
+        error_message: 'Operation cancelled',
+      });
+
+      res.json({
+        success: true,
+        data: { operationId, status: 'cancelled' },
+      });
     } catch (error) {
       next(error);
     }
