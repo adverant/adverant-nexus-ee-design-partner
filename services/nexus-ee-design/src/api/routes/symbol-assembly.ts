@@ -63,6 +63,58 @@ function computeArtifactHash(artifacts: Array<{ type?: string; content?: string 
 }
 
 /**
+ * Transform a snake_case assembly report from the Python backend
+ * into the camelCase format expected by the frontend TypeScript interfaces.
+ */
+function transformReportToCamelCase(raw: Record<string, unknown>): Record<string, unknown> {
+  // Map report-level snake_case fields to camelCase
+  const report: Record<string, unknown> = {
+    operationId: raw.operationId ?? raw.operation_id,
+    projectId: raw.projectId ?? raw.project_id,
+    startedAt: raw.startedAt ?? raw.started_at,
+    completedAt: raw.completedAt ?? raw.completed_at,
+    status: raw.status,
+    totalComponents: raw.totalComponents ?? raw.total_components ?? 0,
+    symbolsFound: raw.symbolsFound ?? raw.symbols_found ?? 0,
+    symbolsFromGraphrag: raw.symbolsFromGraphrag ?? raw.symbols_from_graphrag ?? 0,
+    symbolsFromKicad: raw.symbolsFromKicad ?? raw.symbols_from_kicad ?? 0,
+    symbolsFromSnapeda: raw.symbolsFromSnapeda ?? raw.symbols_from_snapeda ?? 0,
+    symbolsFromUltralibrarian: raw.symbolsFromUltralibrarian ?? raw.symbols_from_ultralibrarian ?? 0,
+    symbolsLlmGenerated: raw.symbolsLlmGenerated ?? raw.symbols_llm_generated ?? 0,
+    datasheetsDownloaded: raw.datasheetsDownloaded ?? raw.datasheets_downloaded ?? 0,
+    characterizationsCreated: raw.characterizationsCreated ?? raw.characterizations_created ?? 0,
+    errorsCount: raw.errorsCount ?? raw.errors_count ?? 0,
+    artifactHash: raw.artifactHash ?? raw.artifact_hash,
+    errors: raw.errors ?? [],
+    success: raw.success,
+  };
+
+  // Transform each component in the components array
+  const rawComponents = raw.components as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(rawComponents)) {
+    report.components = rawComponents.map((c) => ({
+      partNumber: c.partNumber ?? c.part_number,
+      manufacturer: c.manufacturer,
+      package: c.package,
+      category: c.category,
+      symbolFound: c.symbolFound ?? c.symbol_found,
+      symbolSource: c.symbolSource ?? c.symbol_source,
+      symbolPath: c.symbolPath ?? c.symbol_path,
+      datasheetFound: c.datasheetFound ?? c.datasheet_found,
+      datasheetPath: c.datasheetPath ?? c.datasheet_path,
+      characterizationCreated: c.characterizationCreated ?? c.characterization_created,
+      characterizationPath: c.characterizationPath ?? c.characterization_path,
+      errors: c.errors,
+      success: c.success,
+    }));
+  } else {
+    report.components = [];
+  }
+
+  return report;
+}
+
+/**
  * Assembly report structure
  */
 interface AssemblyReport {
@@ -838,15 +890,19 @@ export function createSymbolAssemblyRoutes(): Router {
 
       try {
         const reportContent = await fs.readFile(reportPath, 'utf-8');
-        const report: AssemblyReport = JSON.parse(reportContent);
+        const rawReport = JSON.parse(reportContent) as Record<string, unknown>;
 
-        // Verify operation ID matches
-        if (report.operationId !== operationId) {
+        // Verify operation ID matches (check both camelCase and snake_case)
+        const reportOpId = rawReport.operationId ?? rawReport.operation_id;
+        if (reportOpId !== operationId) {
           throw new NotFoundError('AssemblyReport', operationId, {
             operation: 'getAssemblyReport',
             message: 'Operation ID mismatch',
           } as any);
         }
+
+        // Transform snake_case fields from Python backend to camelCase for frontend
+        const report = transformReportToCamelCase(rawReport);
 
         res.json({
           success: true,
