@@ -49,9 +49,16 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 _HTTP_TIMEOUT = 120.0  # seconds -- LLM extraction can be slow on large artifacts
+
+# LLM provider: use centralized config (defaults to Claude Code Max proxy)
+try:
+    from llm_provider import get_llm_base_url, get_llm_headers, get_llm_api_key
+    OPENROUTER_URL = get_llm_base_url(chat_completions=True)
+    OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
+except ImportError:
+    OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+    OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 
 
 # ---------------------------------------------------------------------------
@@ -111,15 +118,28 @@ class ExtractionError(Exception):
 
 
 def _get_api_key() -> str:
-    """Return the OpenRouter API key or raise with a clear message."""
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
-        raise ExtractionError(
-            "OPENROUTER_API_KEY environment variable is not set. "
-            "Cannot perform LLM extraction without an API key.",
-            failed_field="OPENROUTER_API_KEY",
-        )
-    return key
+    """Return the API key for the current LLM provider."""
+    try:
+        key = get_llm_api_key()
+        # Claude Code Max proxy needs no key
+        if os.environ.get("AI_PROVIDER", "claude_code_max") == "claude_code_max":
+            return key or ""
+        if not key:
+            raise ExtractionError(
+                "No API key configured for LLM provider. "
+                "Set OPENROUTER_API_KEY or use claude_code_max provider.",
+                failed_field="API_KEY",
+            )
+        return key
+    except NameError:
+        # Fallback if llm_provider not imported
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not key:
+            raise ExtractionError(
+                "OPENROUTER_API_KEY environment variable is not set.",
+                failed_field="OPENROUTER_API_KEY",
+            )
+        return key
 
 
 async def _call_opus_extraction(
@@ -147,8 +167,6 @@ async def _call_opus_extraction(
     Raises:
         ExtractionError: On any HTTP, parsing, or validation failure.
     """
-    api_key = _get_api_key()
-
     # Build the full system prompt with the schema embedded
     full_system = (
         f"{system_prompt}\n\n"
@@ -167,12 +185,17 @@ async def _call_opus_extraction(
         "max_tokens": 32768,
     }
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://nexus.adverant.com",
-        "X-Title": "Nexus EE Design - Ideation Extractor",
-    }
+    # Use centralized headers from llm_provider
+    try:
+        headers = get_llm_headers()
+    except NameError:
+        api_key = _get_api_key()
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://nexus.adverant.com",
+            "X-Title": "Nexus EE Design - Ideation Extractor",
+        }
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         try:
@@ -1266,17 +1289,8 @@ async def build_ideation_context(
                 len(retry_tasks),
                 [label for _, label in retry_tasks],
             )
-            # Rebuild coroutines for failed tasks
-            retry_labels = []
-            retry_coros = []
-            for orig_idx, label in retry_tasks:
-                retry_labels.append(label)
-                # Re-create the coroutine from the original task definition
-                retry_coros.append(extraction_tasks[orig_idx][1].__class__(
-                    *extraction_tasks[orig_idx][1].cr_frame.f_locals.values()
-                ) if hasattr(extraction_tasks[orig_idx][1], 'cr_frame') else None)
-
-            # For retry, re-invoke the extraction functions directly
+            # Re-invoke the extraction functions directly for retry
+            retry_labels = [label for _, label in retry_tasks]
             retry_coros_2 = []
             for orig_idx, label in retry_tasks:
                 base_label = label.split("_")[0]

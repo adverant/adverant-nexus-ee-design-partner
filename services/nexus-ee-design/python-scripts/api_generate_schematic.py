@@ -535,6 +535,15 @@ def _patch_agent_providers(proxy_url: str) -> None:
     except (ImportError, AttributeError) as e:
         logger.debug(f"Could not patch connection_generator: {e}")
 
+    # Patch ideation extractors
+    try:
+        import ideation_extractors as ie_mod
+        ie_mod.OPENROUTER_URL = proxy_chat_url
+        ie_mod.OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
+        logger.info("Patched ideation_extractors -> Claude Code Max proxy")
+    except (ImportError, AttributeError) as e:
+        logger.debug(f"Could not patch ideation_extractors: {e}")
+
 
 def main():
     """CLI entry point."""
