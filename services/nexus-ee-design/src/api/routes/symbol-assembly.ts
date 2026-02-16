@@ -489,70 +489,88 @@ export function createSymbolAssemblyRoutes(): Router {
       // Strategy 3: Scan filesystem for gathered symbols even if report is missing/error.
       // A failed run may have overwritten the report, but the actual symbol files
       // and characterizations from previous successful runs still exist on disk.
-      // Skip filesystem reuse when forceRefresh is requested.
+      // Skip when forceRefresh is requested or when artifact hash changed.
       if (!forceRefresh) try {
-        const symbolsDir = path.join(outputDir, 'symbols');
-        const charsDir = path.join(outputDir, 'characterizations');
-        const datasheetsDir = path.join(outputDir, 'datasheets');
+        // Check hash marker file to verify symbols on disk match current artifacts
+        const hashMarkerPath = path.join(outputDir, '.artifact_hash');
+        let filesystemHashValid = false;
+        try {
+          const storedHash = (await fs.readFile(hashMarkerPath, 'utf-8')).trim();
+          filesystemHashValid = storedHash === artifactHash;
+          if (!filesystemHashValid) {
+            log.info('Filesystem artifact hash mismatch — skipping disk reuse', {
+              operationId, storedHash, currentHash: artifactHash,
+            });
+          }
+        } catch {
+          // No hash marker means pre-hash symbols — don't reuse
+          log.info('No filesystem artifact hash marker — skipping disk reuse', { operationId });
+        }
 
-        const symbolFiles = await fs.readdir(symbolsDir).catch(() => [] as string[]);
-        const charFiles = await fs.readdir(charsDir).catch(() => [] as string[]);
-        const datasheetFiles = await fs.readdir(datasheetsDir).catch(() => [] as string[]);
+        if (filesystemHashValid) {
+          const symbolsDir = path.join(outputDir, 'symbols');
+          const charsDir = path.join(outputDir, 'characterizations');
+          const datasheetsDir = path.join(outputDir, 'datasheets');
 
-        const kicadSymbols = symbolFiles.filter(f => f.endsWith('.kicad_sym'));
+          const symbolFiles = await fs.readdir(symbolsDir).catch(() => [] as string[]);
+          const charFiles = await fs.readdir(charsDir).catch(() => [] as string[]);
+          const datasheetFiles = await fs.readdir(datasheetsDir).catch(() => [] as string[]);
 
-        if (kicadSymbols.length >= 5) {
-          log.info('Filesystem scan found existing gathered symbols — building synthetic report', {
-            operationId,
-            symbolCount: kicadSymbols.length,
-            characterizationCount: charFiles.length,
-            datasheetCount: datasheetFiles.length,
-          });
+          const kicadSymbols = symbolFiles.filter(f => f.endsWith('.kicad_sym'));
 
-          // Build synthetic report from filesystem
-          const syntheticComponents = kicadSymbols.map(symFile => {
-            const baseName = symFile.replace('.kicad_sym', '');
-            const charFile = charFiles.find(f => f.startsWith(baseName) && f.endsWith('.md'));
-            const dsFile = datasheetFiles.find(f => f.startsWith(baseName) && f.endsWith('.pdf'));
-            return {
-              part_number: baseName,
-              manufacturer: '',
-              category: '',
-              symbol_found: true,
-              symbol_source: 'recovered-from-disk',
-              symbol_path: path.join(symbolsDir, symFile),
-              datasheet_found: !!dsFile,
-              datasheet_path: dsFile ? path.join(datasheetsDir, dsFile) : null,
-              characterization_created: !!charFile,
-              characterization_path: charFile ? path.join(charsDir, charFile) : null,
+          if (kicadSymbols.length >= 5) {
+            log.info('Filesystem scan found existing gathered symbols — building synthetic report', {
+              operationId,
+              symbolCount: kicadSymbols.length,
+              characterizationCount: charFiles.length,
+              datasheetCount: datasheetFiles.length,
+            });
+
+            // Build synthetic report from filesystem
+            const syntheticComponents = kicadSymbols.map(symFile => {
+              const baseName = symFile.replace('.kicad_sym', '');
+              const charFile = charFiles.find(f => f.startsWith(baseName) && f.endsWith('.md'));
+              const dsFile = datasheetFiles.find(f => f.startsWith(baseName) && f.endsWith('.pdf'));
+              return {
+                part_number: baseName,
+                manufacturer: '',
+                category: '',
+                symbol_found: true,
+                symbol_source: 'recovered-from-disk',
+                symbol_path: path.join(symbolsDir, symFile),
+                datasheet_found: !!dsFile,
+                datasheet_path: dsFile ? path.join(datasheetsDir, dsFile) : null,
+                characterization_created: !!charFile,
+                characterization_path: charFile ? path.join(charsDir, charFile) : null,
+                errors: [],
+                success: true,
+              };
+            });
+
+            const syntheticReport = {
+              project_id: projectId,
+              operationId,
+              status: 'complete',
+              started_at: new Date().toISOString(),
+              completed_at: new Date().toISOString(),
+              total_components: syntheticComponents.length,
+              symbols_found: kicadSymbols.length,
+              symbols_from_graphrag: 0,
+              symbols_from_kicad: 0,
+              symbols_from_snapeda: 0,
+              symbols_from_ultralibrarian: 0,
+              symbols_llm_generated: 0,
+              datasheets_downloaded: datasheetFiles.length,
+              characterizations_created: charFiles.filter(f => f.endsWith('.md')).length,
+              errors_count: 0,
+              components: syntheticComponents,
               errors: [],
               success: true,
             };
-          });
 
-          const syntheticReport = {
-            project_id: projectId,
-            operationId,
-            status: 'complete',
-            started_at: new Date().toISOString(),
-            completed_at: new Date().toISOString(),
-            total_components: syntheticComponents.length,
-            symbols_found: kicadSymbols.length,
-            symbols_from_graphrag: 0,
-            symbols_from_kicad: 0,
-            symbols_from_snapeda: 0,
-            symbols_from_ultralibrarian: 0,
-            symbols_llm_generated: 0,
-            datasheets_downloaded: datasheetFiles.length,
-            characterizations_created: charFiles.filter(f => f.endsWith('.md')).length,
-            errors_count: 0,
-            components: syntheticComponents,
-            errors: [],
-            success: true,
-          };
-
-          await sendReuseResponse(syntheticReport, kicadSymbols.length);
-          return;
+            await sendReuseResponse(syntheticReport, kicadSymbols.length);
+            return;
+          }
         }
       } catch {
         // Filesystem scan failed — proceed normally
@@ -675,7 +693,7 @@ export function createSymbolAssemblyRoutes(): Router {
         } else {
           log.info('Symbol assembly complete', { operationId });
 
-          // Stamp artifact_hash into the report for future cache validation
+          // Stamp artifact_hash into the report and filesystem for future cache validation
           try {
             const reportContent = await fs.readFile(existingReportPath, 'utf-8');
             const report = JSON.parse(reportContent);
@@ -683,6 +701,9 @@ export function createSymbolAssemblyRoutes(): Router {
               report.artifact_hash = artifactHash;
               await fs.writeFile(existingReportPath, JSON.stringify(report, null, 2));
             }
+            // Write hash marker for filesystem scan validation
+            const hashMarkerPath = path.join(outputDir, '.artifact_hash');
+            await fs.writeFile(hashMarkerPath, artifactHash);
             // Save backup of successful report
             await fs.copyFile(existingReportPath, backupReportPath);
           } catch {
