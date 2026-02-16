@@ -1880,7 +1880,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
             'api_generate_schematic.py',
             ['--stdin'],  // Use --stdin flag instead of --json to avoid E2BIG errors
             {
-              timeout: 900000, // 15 minute timeout - schematic gen includes LLM + SPICE smoke test
+              timeout: 1200000, // 20 minute timeout - schematic gen includes LLM + SPICE smoke test + proxy queue wait
               stdin: JSON.stringify(mapoInput),  // Pass JSON via stdin instead of CLI arg
               onProgress: (event: ProgressEvent) => {
                 // Relay progress event to WebSocket subscribers

@@ -597,7 +597,7 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
 
         # Initialize HTTP client if needed
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
 
         # Build request payload (OpenAI-compatible format works with both providers)
         request_payload = {
