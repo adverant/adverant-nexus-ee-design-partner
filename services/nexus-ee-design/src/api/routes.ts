@@ -1740,16 +1740,16 @@ export function createApiRoutes(io: SocketIOServer): Router {
         // Fetch ideation artifacts to provide context for schematic generation
         const ideationArtifacts = await findIdeationArtifactsByProject(projectId);
         const artifactsForContext = ideationArtifacts.map((artifact) => ({
-          type: artifact.artifact_type,
+          artifact_type: artifact.artifactType,
           category: artifact.category,
           name: artifact.name,
           content: artifact.content,
-          subsystem_ids: artifact.subsystem_ids,
+          subsystem_ids: artifact.subsystemIds,
         }));
         log.info('Fetched ideation artifacts for schematic context', {
           projectId,
           artifactCount: artifactsForContext.length,
-          artifactTypes: artifactsForContext.map((a) => a.type),
+          artifactTypes: artifactsForContext.map((a) => a.artifact_type),
         });
 
         // Read AI provider preference from dashboard headers

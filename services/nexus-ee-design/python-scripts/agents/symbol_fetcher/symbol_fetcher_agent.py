@@ -372,6 +372,21 @@ class SymbolFetcherAgent:
             except Exception as e:
                 errors.append(f"generic_passive: {str(e)}")
 
+        # For active devices (MOSFETs, BJTs), try generic symbol before LLM generation
+        generic_active = self.GENERIC_ACTIVE_SYMBOLS.get(category)
+        if generic_active and not generic_symbol:
+            sources_tried.append("generic_active")
+            try:
+                result = await self._fetch_generic_passive(generic_active, part_number, category)
+                if result:
+                    logger.info(f"Using generic active symbol {generic_active} for {part_number}")
+                    await self._cache_symbol(result, category)
+                    return result
+                else:
+                    errors.append("generic_active: Device library not available")
+            except Exception as e:
+                errors.append(f"generic_active: {str(e)}")
+
         # Search online for part information (Octopart, SnapEDA, manufacturer sites)
         sources_tried.append("online_search")
         try:
@@ -700,14 +715,22 @@ class SymbolFetcherAgent:
             if list_response.status_code == 200:
                 libraries = list_response.json().get('libraries', [])
 
-                # Search libraries that might contain this part
+                # Search libraries that might contain this part (capped to avoid runaway 404s)
+                broad_search_count = 0
+                MAX_BROAD_SEARCH = 15
                 for lib_name in libraries:
+                    if broad_search_count >= MAX_BROAD_SEARCH:
+                        logger.info(f"Broad search limit reached ({MAX_BROAD_SEARCH}) for '{part_number}', falling back to LLM generation")
+                        break
+
                     if lib_name in self.SKIP_LIBRARIES:
                         continue
 
                     # Skip already-searched libraries
                     if lib_name in library_names:
                         continue
+
+                    broad_search_count += 1
 
                     url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}/symbol/{part_number}"
                     try:
@@ -756,12 +779,26 @@ class SymbolFetcherAgent:
 
         return None
 
-    # Libraries to skip during broad search (simulation, power symbols, etc.)
+    # Libraries to skip during broad search (simulation, power symbols, non-component libraries)
     SKIP_LIBRARIES = {
-        'Simulation_SPICE',
-        'power',
-        'Graphic',
-        'Mechanical',
+        'Simulation_SPICE', 'power', 'Graphic', 'Mechanical',
+        '4xxx', '4xxx_IEEE', '74xGxx', '74xx', '74xx_IEEE',
+        'Connector', 'Connector_Audio', 'Connector_Generic',
+        'Connector_Generic_MountingPin', 'Connector_Generic_Shielded',
+        'Display_Character', 'Display_Graphic',
+        'Jumper', 'LED', 'Motor', 'Relay', 'Relay_SolidState',
+        'Fiber_Optic', 'RF_AM_FM', 'RF_GPS', 'RF_GSM', 'RF_NFC', 'RF_RFID', 'RF_ZigBee',
+        'Memory_EPROM', 'Memory_ROM', 'Memory_UniqueID',
+    }
+
+    # Generic symbol mappings for active devices (MOSFETs, BJTs, etc.)
+    GENERIC_ACTIVE_SYMBOLS = {
+        'MOSFET': 'Q_NMOS_GDS',
+        'MOSFET_P': 'Q_PMOS_GDS',
+        'BJT_NPN': 'Q_NPN_BEC',
+        'BJT_PNP': 'Q_PNP_BEC',
+        'Diode': 'D',
+        'Zener': 'D_Zener',
     }
 
     async def _fetch_from_kicad_local_install(
