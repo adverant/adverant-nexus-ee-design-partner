@@ -164,7 +164,7 @@ async def _call_opus_extraction(
             {"role": "user", "content": content},
         ],
         "temperature": 0.0,
-        "max_tokens": 16384,
+        "max_tokens": 32768,
     }
 
     headers = {
@@ -248,14 +248,25 @@ async def _call_opus_extraction(
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            raise ExtractionError(
-                f"Failed to parse LLM output as JSON: {exc}. "
-                f"Raw LLM output (first 2000 chars): {cleaned[:2000]}",
-                input_content_preview=content,
-                http_status=response.status_code,
-                response_body=cleaned[:2000],
-                failed_field="llm_json_parse",
-            ) from exc
+            # Try to repair truncated JSON: find the last complete array
+            # entry and close the JSON structure.
+            repaired = _try_repair_json(cleaned)
+            if repaired is not None:
+                logger.warning(
+                    "LLM output had malformed JSON at char %d — "
+                    "repaired by truncating to last complete entry",
+                    exc.pos or 0,
+                )
+                parsed = repaired
+            else:
+                raise ExtractionError(
+                    f"Failed to parse LLM output as JSON: {exc}. "
+                    f"Raw LLM output (first 2000 chars): {cleaned[:2000]}",
+                    input_content_preview=content,
+                    http_status=response.status_code,
+                    response_body=cleaned[:2000],
+                    failed_field="llm_json_parse",
+                ) from exc
 
         if not isinstance(parsed, dict):
             raise ExtractionError(
@@ -1369,17 +1380,18 @@ async def build_ideation_context(
         len(extraction_errors),
     )
 
-    # ----- STOP on errors ---------------------------------------------------
-    # The pipeline STOPS and reports errors -- it does NOT silently continue.
+    # ----- Log errors but continue with partial data -------------------------
+    # Extraction errors are non-fatal: the pipeline continues with whatever
+    # structured data was successfully extracted.  For example, if the
+    # connections extractor fails (LLM output too large / malformed JSON),
+    # the pipeline still has BOM entries, power rails, interfaces, etc.
     if extraction_errors:
-        combined_error = (
-            f"{len(extraction_errors)} extraction error(s) occurred while "
-            f"building IdeationContext for project '{project_name}':\n\n"
-            + "\n---\n".join(extraction_errors)
-        )
-        raise ExtractionError(
-            combined_error,
-            failed_field="build_ideation_context",
+        logger.warning(
+            "%d extraction error(s) while building IdeationContext for '%s' "
+            "(continuing with partial data):\n%s",
+            len(extraction_errors),
+            project_name,
+            "\n---\n".join(extraction_errors),
         )
 
     return context
@@ -1388,6 +1400,64 @@ async def build_ideation_context(
 # ---------------------------------------------------------------------------
 # Internal utilities
 # ---------------------------------------------------------------------------
+
+
+def _try_repair_json(text: str) -> Optional[dict]:
+    """
+    Attempt to repair truncated JSON from LLM output.
+
+    When the LLM generates very large JSON (e.g. hundreds of connections),
+    the output may get truncated mid-entry.  This function finds the last
+    complete array entry and closes the JSON structure.
+
+    Returns:
+        Parsed dict if repair succeeded, ``None`` otherwise.
+    """
+    # Find the last occurrence of "}" followed by optional whitespace and ","
+    # which marks a complete array entry boundary
+    last_complete = -1
+    brace_depth = 0
+    in_string = False
+    escape = False
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            brace_depth += 1
+        elif ch == '}':
+            brace_depth -= 1
+            if brace_depth == 2:
+                # Completed an array element (depth: outer{1} -> array_key -> item{2})
+                last_complete = i
+
+    if last_complete < 0:
+        return None
+
+    # Truncate at the last complete entry, close the array and outer object
+    truncated = text[: last_complete + 1]
+    # Remove any trailing comma
+    truncated = truncated.rstrip().rstrip(',')
+    # Close open structures
+    truncated += "]}"
+
+    try:
+        result = json.loads(truncated)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    return None
 
 
 def _dedupe_ordered(items: List[str]) -> List[str]:
