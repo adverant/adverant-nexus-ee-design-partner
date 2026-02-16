@@ -1180,9 +1180,10 @@ async def build_ideation_context(
         )
 
     # ----- Build extraction coroutines --------------------------------------
-    # Each extractor handles a combined content string (all artifacts of that
-    # type concatenated with clear delimiters).  This gives the LLM full
-    # context for cross-referencing between e.g. multiple spec documents.
+    # For connection-heavy artifacts (schematic specs), extract each artifact
+    # individually to avoid generating massive JSON blobs that exceed LLM
+    # output limits.  Other extractors use combined content since their
+    # output is typically smaller.
 
     extraction_tasks: List[tuple] = []  # (label, coroutine)
 
@@ -1193,20 +1194,16 @@ async def build_ideation_context(
             ("bom", extract_bom_entries(combined_bom, combined_format))
         )
 
-    if connection_contents:
-        combined_conn = "\n\n=== NEXT SCHEMATIC SPEC ARTIFACT ===\n\n".join(
-            connection_contents
-        )
+    # Extract connections per-artifact to keep JSON output manageable
+    for i, conn_content in enumerate(connection_contents):
         extraction_tasks.append(
-            ("connections", extract_pin_connections(combined_conn))
+            (f"connections_{i}", extract_pin_connections(conn_content))
         )
 
-    if interface_contents:
-        combined_iface = "\n\n=== NEXT INTERFACE SPEC ARTIFACT ===\n\n".join(
-            interface_contents
-        )
+    # Extract interfaces per-artifact
+    for i, iface_content in enumerate(interface_contents):
         extraction_tasks.append(
-            ("interfaces", extract_interfaces(combined_iface))
+            (f"interfaces_{i}", extract_interfaces(iface_content))
         )
 
     if power_contents:
@@ -1239,7 +1236,7 @@ async def build_ideation_context(
             ("compliance", extract_compliance_requirements(combined_compliance))
         )
 
-    # ----- Execute all extractions in parallel ------------------------------
+    # ----- Execute all extractions in parallel with retry -------------------
     extraction_errors: List[str] = []
     results: Dict[str, Any] = {}
 
@@ -1255,16 +1252,82 @@ async def build_ideation_context(
 
         gathered = await asyncio.gather(*coros, return_exceptions=True)
 
-        for label, result in zip(labels, gathered):
+        # Collect results, retrying failures once
+        retry_tasks: List[Tuple[int, str]] = []
+        for idx, (label, result) in enumerate(zip(labels, gathered)):
             if isinstance(result, Exception):
-                error_msg = (
-                    f"Extraction '{label}' failed: {type(result).__name__}: {result}\n"
-                    f"Traceback: {traceback.format_exception(type(result), result, result.__traceback__)}"
-                )
-                logger.error(error_msg)
-                extraction_errors.append(error_msg)
+                retry_tasks.append((idx, label))
             else:
                 results[label] = result
+
+        if retry_tasks:
+            logger.warning(
+                "Retrying %d failed extraction(s): %s",
+                len(retry_tasks),
+                [label for _, label in retry_tasks],
+            )
+            # Rebuild coroutines for failed tasks
+            retry_labels = []
+            retry_coros = []
+            for orig_idx, label in retry_tasks:
+                retry_labels.append(label)
+                # Re-create the coroutine from the original task definition
+                retry_coros.append(extraction_tasks[orig_idx][1].__class__(
+                    *extraction_tasks[orig_idx][1].cr_frame.f_locals.values()
+                ) if hasattr(extraction_tasks[orig_idx][1], 'cr_frame') else None)
+
+            # For retry, re-invoke the extraction functions directly
+            retry_coros_2 = []
+            for orig_idx, label in retry_tasks:
+                base_label = label.split("_")[0]
+                idx_str = label.split("_")[-1] if "_" in label else None
+                if base_label == "connections" and idx_str is not None:
+                    retry_coros_2.append(extract_pin_connections(connection_contents[int(idx_str)]))
+                elif base_label == "interfaces" and idx_str is not None:
+                    retry_coros_2.append(extract_interfaces(interface_contents[int(idx_str)]))
+                elif label == "bom":
+                    combined_bom = "\n\n=== NEXT BOM/COMPONENT ARTIFACT ===\n\n".join(bom_contents)
+                    combined_format = bom_formats[0] if bom_formats else ""
+                    retry_coros_2.append(extract_bom_entries(combined_bom, combined_format))
+                elif label == "power_rails":
+                    combined_power = "\n\n=== NEXT POWER SPEC ARTIFACT ===\n\n".join(power_contents)
+                    retry_coros_2.append(extract_power_rails(combined_power))
+                elif label == "subsystems":
+                    combined_arch = "\n\n=== NEXT ARCHITECTURE ARTIFACT ===\n\n".join(architecture_contents)
+                    retry_coros_2.append(extract_subsystem_blocks(combined_arch))
+                elif label == "test_criteria":
+                    combined_test = "\n\n=== NEXT TEST PLAN ARTIFACT ===\n\n".join(test_contents)
+                    retry_coros_2.append(extract_test_criteria(combined_test))
+                elif label == "compliance":
+                    combined_compliance = "\n\n=== NEXT COMPLIANCE DOC ARTIFACT ===\n\n".join(compliance_contents)
+                    retry_coros_2.append(extract_compliance_requirements(combined_compliance))
+
+            if retry_coros_2:
+                retry_gathered = await asyncio.gather(*retry_coros_2, return_exceptions=True)
+                for label, result in zip(retry_labels, retry_gathered):
+                    if isinstance(result, Exception):
+                        error_msg = (
+                            f"Extraction '{label}' failed after retry: "
+                            f"{type(result).__name__}: {result}\n"
+                            f"Traceback: {traceback.format_exception(type(result), result, result.__traceback__)}"
+                        )
+                        logger.error(error_msg)
+                        extraction_errors.append(error_msg)
+                    else:
+                        results[label] = result
+
+        # Merge per-artifact connection results into single list
+        all_connections: List[PinConnection] = []
+        all_interfaces: List[InterfaceDefinition] = []
+        for label, data in sorted(results.items()):
+            if label.startswith("connections_"):
+                all_connections.extend(data)
+            elif label.startswith("interfaces_"):
+                all_interfaces.extend(data)
+        if all_connections:
+            results["connections"] = all_connections
+        if all_interfaces:
+            results["interfaces"] = all_interfaces
     else:
         logger.info(
             "No extractable artifact types found in %d artifacts. "
