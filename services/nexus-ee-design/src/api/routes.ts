@@ -280,6 +280,69 @@ function validateUUIDParam(paramName: string) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Artifact type inference for IdeationContext
+// ---------------------------------------------------------------------------
+// The Python ideation_extractors.py expects specific artifact_type values
+// (e.g. "bom", "schematic_spec", "power_spec") to route artifacts to the
+// correct LLM extraction pipelines.  If the stored type is invalid (e.g.
+// "document" from the bulk ingest script), infer the correct type from the
+// artifact name and category so the pipeline gets structured data.
+
+const VALID_ARTIFACT_TYPES = new Set([
+  'system_overview', 'executive_summary', 'architecture_diagram',
+  'schematic_spec', 'power_spec', 'mcu_spec', 'sensing_spec',
+  'communication_spec', 'connector_spec', 'interface_spec',
+  'bom', 'component_selection', 'calculations',
+  'pcb_spec', 'stackup', 'manufacturing_guide',
+  'firmware_spec', 'ai_integration',
+  'test_plan', 'research_paper', 'patent', 'compliance_doc', 'custom',
+]);
+
+function inferArtifactType(name: string, category: string, storedType: string): string {
+  // If stored type is already valid, use it as-is
+  if (VALID_ARTIFACT_TYPES.has(storedType)) return storedType;
+
+  const n = name.toLowerCase();
+
+  // Name-based inference (most specific first)
+  if (n.includes('bill of materials') || n.includes(' bom')) return 'bom';
+  if (n.includes('executive summary')) return 'executive_summary';
+  if (n.includes('system integration') || n.includes('system overview')) return 'system_overview';
+  // Power supply schematics → power_spec (extracts voltage rails, regulators)
+  if (n.includes('power supply')) return 'power_spec';
+  // Current sensing schematics → sensing_spec
+  if (n.includes('current sens')) return 'sensing_spec';
+  // Ethernet / communication schematics → communication_spec
+  if (n.includes('ethernet') || n.includes('communication')) return 'communication_spec';
+  // MCU topology schematics → mcu_spec (when it's a schematic sheet, not a diagram)
+  if (n.includes('mcu') && (n.includes('schematic') || n.includes('sheet'))) return 'mcu_spec';
+  // Generic schematic sheets → schematic_spec
+  if (n.includes('schematic') || /sheet\s*\d/.test(n)) return 'schematic_spec';
+  if (n.includes('stackup')) return 'stackup';
+  if (n.includes('pcb') || n.includes('fabrication')) return 'pcb_spec';
+  if (n.includes('failure mode') || n.includes('fmea')) return 'compliance_doc';
+  if (n.includes('qa checklist') || n.includes('test plan') || n.includes('final qa')) return 'test_plan';
+  if (n.includes('prior art')) return 'research_paper';
+  if (n.includes('patent') || n.includes('claim')) return 'patent';
+  if (n.includes('control loop') || n.includes('sensorless') || n.includes('observer')) return 'firmware_spec';
+  if (n.includes('ai service') || n.includes('llm')) return 'firmware_spec';
+
+  // Category-based fallback
+  const cat = (category || '').toLowerCase();
+  if (cat === 'architecture') return 'architecture_diagram';
+  if (cat === 'component') return 'bom';
+  if (cat === 'schematic') return 'schematic_spec';
+  if (cat === 'pcb') return 'pcb_spec';
+  if (cat === 'firmware') return 'firmware_spec';
+  if (cat === 'validation') return 'test_plan';
+  if (cat === 'research') return 'research_paper';
+
+  // Last resort — return stored type even if unrecognized
+  log.warn('Could not infer artifact type', { name, category, storedType });
+  return storedType;
+}
+
 export function createApiRoutes(io: SocketIOServer): Router {
   const router = Router();
 
@@ -1740,7 +1803,11 @@ export function createApiRoutes(io: SocketIOServer): Router {
         // Fetch ideation artifacts to provide context for schematic generation
         const ideationArtifacts = await findIdeationArtifactsByProject(projectId);
         const artifactsForContext = ideationArtifacts.map((artifact) => ({
-          artifact_type: artifact.artifactType,
+          artifact_type: inferArtifactType(
+            artifact.name || '',
+            artifact.category || '',
+            artifact.artifactType || '',
+          ),
           category: artifact.category,
           name: artifact.name,
           content: artifact.content,
@@ -1749,7 +1816,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
         log.info('Fetched ideation artifacts for schematic context', {
           projectId,
           artifactCount: artifactsForContext.length,
-          artifactTypes: artifactsForContext.map((a) => a.artifact_type),
+          artifactTypes: artifactsForContext.map((a) => `${a.name} → ${a.artifact_type}`),
         });
 
         // Read AI provider preference from dashboard headers
