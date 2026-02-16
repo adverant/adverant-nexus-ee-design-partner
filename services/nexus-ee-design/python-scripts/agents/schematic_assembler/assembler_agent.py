@@ -56,10 +56,16 @@ class SchematicAssemblyError(Exception):
         return self.message
 
 
-# OpenRouter configuration for LLM-first approach
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.6"  # Opus 4.6 via OpenRouter
+# LLM configuration — uses centralized llm_provider (respects AI_PROVIDER env var)
+# These module-level vars can also be monkey-patched by api_generate_schematic.py
+try:
+    from llm_provider import get_llm_api_key, get_llm_base_url, log_provider_info as _log_provider
+    OPENROUTER_API_KEY = get_llm_api_key()
+    OPENROUTER_BASE_URL = get_llm_base_url(chat_completions=True)
+except ImportError:
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "anthropic/claude-opus-4.6"
 
 
 class PinType(Enum):
@@ -1572,6 +1578,42 @@ Return ONLY the extracted (symbol ...) block:"""
             logger.error(f"LLM symbol extraction failed: {e}")
             return None
 
+    def _extract_inner_symbol_deterministic(self, sexp: str) -> Optional[str]:
+        """Extract inner (symbol ...) block from kicad_symbol_lib wrapper using paren counting.
+
+        Deterministic replacement for _extract_inner_symbol() — no LLM calls, no truncation,
+        handles symbols of any size (including 80K+ char MCU definitions).
+        """
+        # Find the first (symbol " token after any (kicad_symbol_lib ...) wrapper
+        start_idx = sexp.find('(symbol "')
+        if start_idx == -1:
+            return None
+
+        # Count parentheses to find the matching close
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(start_idx, len(sexp)):
+            ch = sexp[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return sexp[start_idx:i+1]
+        return None
+
     def _normalize_to_tabs(self, content: str, base_indent: int = 2) -> str:
         """
         Normalize all indentation in S-expression content to use tabs only.
@@ -1597,8 +1639,9 @@ Return ONLY the extracted (symbol ...) block:"""
 
         for line in lines:
             if not line.strip():
-                # Empty line or whitespace-only - just add base indent
-                normalized.append("\t" * base_indent)
+                # Empty line or whitespace-only - emit truly empty line
+                # KiCad 8.x rejects lines containing only tabs
+                normalized.append("")
                 continue
 
             # Count leading whitespace and convert to indent level
@@ -1719,8 +1762,8 @@ Return ONLY the extracted (symbol ...) block:"""
         # CRITICAL: KiCad 8.x requires PURE TAB indentation - mixed tabs/spaces fail
         lines.append("\t(lib_symbols")
         for symbol_id, sexp in sheet.lib_symbols.items():
-            # Extract just the symbol definition from the library wrapper (LLM-based)
-            symbol_content = await self._extract_inner_symbol(sexp, symbol_id)
+            # Extract just the symbol definition from the library wrapper (deterministic parser)
+            symbol_content = self._extract_inner_symbol_deterministic(sexp)
             if symbol_content:
                 # Normalize to pure tab indentation (base_indent=2 for inside lib_symbols)
                 normalized = self._normalize_to_tabs(symbol_content, base_indent=2)

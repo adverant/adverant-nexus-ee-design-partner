@@ -51,8 +51,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # LLM provider configuration
-# Supports both OpenRouter (default) and Claude Code Max proxy pod
-AI_PROVIDER = os.environ.get("AI_PROVIDER", "openrouter")
+# Supports both Claude Code Max proxy pod (default) and OpenRouter
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "claude_code_max")
 CLAUDE_CODE_PROXY_URL = os.environ.get(
     "CLAUDE_CODE_PROXY_URL",
     "http://claude-code-proxy.nexus.svc.cluster.local:3100"

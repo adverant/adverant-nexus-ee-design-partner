@@ -435,7 +435,7 @@ RESPOND IN THIS JSON FORMAT:
             openrouter_api_key: OpenRouter API key (recommended - can access both models)
         """
         self.kimi_client = kimi_client
-        self._ai_provider = os.environ.get("AI_PROVIDER", "openrouter")
+        self._ai_provider = os.environ.get("AI_PROVIDER", "claude_code_max")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
         # Resolve LLM base URL based on provider

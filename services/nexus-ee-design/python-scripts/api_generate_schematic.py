@@ -582,24 +582,24 @@ def main():
         print(json.dumps(result))
         sys.exit(1)
 
-    # Apply AI provider preference from dashboard (passed via X-AI-Provider header)
-    # This sets the env var AND patches already-imported module-level constants
-    ai_provider = params.get("ai_provider")
-    if ai_provider:
-        os.environ["AI_PROVIDER"] = ai_provider
-        logger.info(f"AI provider set from request: {ai_provider}")
-        if ai_provider == "claude_code_max":
-            proxy_url = os.environ.get(
-                "CLAUDE_CODE_PROXY_URL",
-                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
-            )
-            logger.info(
-                "Using Claude Code Max proxy pod for all LLM calls "
-                f"(proxy URL: {proxy_url})"
-            )
-            # Patch module-level constants in already-imported agents
-            # (Python caches imports, so env vars set after import don't affect module-level vars)
-            _patch_agent_providers(proxy_url)
+    # Apply AI provider preference — default to claude_code_max (uses Max plan proxy)
+    # Only falls back to openrouter if explicitly set to "openrouter"
+    ai_provider = params.get("ai_provider", "claude_code_max")
+    os.environ["AI_PROVIDER"] = ai_provider
+    logger.info(f"AI provider: {ai_provider}")
+
+    if ai_provider == "claude_code_max":
+        proxy_url = os.environ.get(
+            "CLAUDE_CODE_PROXY_URL",
+            "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+        )
+        logger.info(
+            "Using Claude Code Max proxy pod for all LLM calls "
+            f"(proxy URL: {proxy_url})"
+        )
+        # Patch module-level constants in already-imported agents
+        # (Python caches imports, so env vars set after import don't affect module-level vars)
+        _patch_agent_providers(proxy_url)
 
     # Run async generation
     result = asyncio.run(run_generation(

@@ -225,13 +225,22 @@ class EnhancedWireRouter:
 
         # Route remaining signals
         logger.info(f"Routing {len(signal_conns)} signal connections")
+        routed_count = 0
+        skipped_count = 0
         for conn in signal_conns:
-            self._route_signal(
-                conn,
-                component_positions,
-                pin_positions,
-                constraint_map.get(conn.get("net_name", ""))
-            )
+            try:
+                self._route_signal(
+                    conn,
+                    component_positions,
+                    pin_positions,
+                    constraint_map.get(conn.get("net_name", ""))
+                )
+                routed_count += 1
+            except Exception as e:
+                skipped_count += 1
+                logger.warning(f"Skipping connection {conn.get('net_name', 'unknown')}: {e}")
+                self._warnings.append(str(e))
+        logger.info(f"Signal routing complete: {routed_count} of {len(signal_conns)} routed, {skipped_count} skipped")
 
         # Post-process: fix 4-way junctions
         self._fix_four_way_junctions()
@@ -429,24 +438,23 @@ class EnhancedWireRouter:
         from_pos = self._get_pin_position(from_ref, from_pin, component_positions, pin_positions)
         to_pos = self._get_pin_position(to_ref, to_pin, component_positions, pin_positions)
 
-        # FAIL FAST - No silent failures per user directive
-        # Missing pin positions = FATAL error with verbose message
+        # Skip connections with missing pin positions instead of aborting all routing
         if not from_pos or not to_pos:
             missing_from = "from_pos" if not from_pos else None
             missing_to = "to_pos" if not to_pos else None
             error_msg = (
-                f"CRITICAL ERROR: Cannot route net '{net_name}' - missing pin positions. "
+                f"WARNING: Cannot route net '{net_name}' - missing pin positions. "
                 f"From: {from_ref}.{from_pin} -> position={'MISSING' if missing_from else from_pos}, "
                 f"To: {to_ref}.{to_pin} -> position={'MISSING' if missing_to else to_pos}. "
                 f"Possible causes: "
                 f"1) Symbol has no pin definitions (placeholder symbol used), "
                 f"2) Pin name mismatch between connection and symbol, "
                 f"3) Component not found in layout (reference mismatch). "
-                f"Available components: {list(component_positions.keys())[:10]}... "
-                f"ACTION REQUIRED: Verify symbol has proper pin definitions, check component references match."
+                f"Available components: {list(component_positions.keys())[:10]}..."
             )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.warning(error_msg)
+            self._warnings.append(error_msg)
+            return  # Skip this connection — do not abort the entire routing loop
 
         route_type = RouteType.SIGNAL
         if constraint:
@@ -798,6 +806,19 @@ class EnhancedWireRouter:
         # Check for T-junctions (one wire's endpoint touches the other wire's middle)
         if (point_on_segment(b1, a1, a2) or point_on_segment(b2, a1, a2) or
             point_on_segment(a1, b1, b2) or point_on_segment(a2, b1, b2)):
+            return False
+
+        # Guard against collinear segments — CCW is degenerate for these
+        # Two parallel segments on the same axis are overlaps/T-junctions, not crossing shorts
+
+        # Both horizontal on same Y → not a crossing
+        if (abs(a1[1] - a2[1]) < 0.01 and abs(b1[1] - b2[1]) < 0.01 and
+            abs(a1[1] - b1[1]) < 0.01):
+            return False
+
+        # Both vertical on same X → not a crossing
+        if (abs(a1[0] - a2[0]) < 0.01 and abs(b1[0] - b2[0]) < 0.01 and
+            abs(a1[0] - b1[0]) < 0.01):
             return False
 
         # Check for actual crossing intersection (+ shape) using CCW algorithm

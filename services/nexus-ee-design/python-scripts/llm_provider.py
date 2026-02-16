@@ -16,7 +16,7 @@ Usage:
     response = await client.post(config["base_url"], headers=config["headers"], json=payload)
 
 Environment Variables:
-    AI_PROVIDER: "openrouter" or "claude_code_max" (default: "openrouter")
+    AI_PROVIDER: "openrouter" or "claude_code_max" (default: "claude_code_max")
     CLAUDE_CODE_PROXY_URL: Proxy pod URL (default: "http://claude-code-proxy.nexus.svc.cluster.local:3100")
     OPENROUTER_API_KEY: OpenRouter API key (required when AI_PROVIDER=openrouter)
 """
@@ -33,7 +33,7 @@ DEFAULT_PROXY_URL = "http://claude-code-proxy.nexus.svc.cluster.local:3100"
 
 def get_ai_provider() -> str:
     """Get the current AI provider from environment."""
-    return os.environ.get("AI_PROVIDER", "openrouter")
+    return os.environ.get("AI_PROVIDER", "claude_code_max")
 
 
 def get_llm_base_url(chat_completions: bool = True) -> str:
