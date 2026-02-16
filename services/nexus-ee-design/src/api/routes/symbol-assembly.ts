@@ -17,6 +17,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { spawn, ChildProcess } from 'child_process';
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import path from 'path';
 import fs from 'fs/promises';
@@ -42,8 +43,24 @@ const GatherSymbolsSchema = z.object({
       content: z.string(),
     })),
     operationId: z.string().optional(),
+    forceRefresh: z.boolean().optional(),
   }),
 });
+
+/**
+ * Compute a stable hash of artifact content to detect when ideation data has changed.
+ * Used to auto-invalidate stale cached assembly reports.
+ */
+function computeArtifactHash(artifacts: Array<{ type?: string; content?: string }>): string {
+  const hash = createHash('sha256');
+  for (const a of artifacts) {
+    hash.update(a.type || '');
+    hash.update('|');
+    hash.update(a.content || '');
+    hash.update('\n');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
 
 /**
  * Assembly report structure
@@ -101,13 +118,21 @@ export function createSymbolAssemblyRoutes(): Router {
         });
       }
 
-      const { ideationArtifacts, operationId: providedOperationId } = validation.data.body;
+      const { ideationArtifacts, operationId: providedOperationId, forceRefresh } = validation.data.body;
 
       // Generate operation ID if not provided
       const { v4: uuidv4 } = await import('uuid');
       const operationId = providedOperationId || uuidv4();
 
-      log.info('Starting symbol assembly', { projectId, operationId, artifactCount: ideationArtifacts.length });
+      // Compute content hash for cache invalidation
+      const artifactHash = computeArtifactHash(ideationArtifacts);
+
+      log.info('Starting symbol assembly', {
+        projectId, operationId,
+        artifactCount: ideationArtifacts.length,
+        artifactHash,
+        forceRefresh: !!forceRefresh,
+      });
 
       // Get WebSocket manager for streaming progress
       const wsManager = getSchematicWsManager();
@@ -372,12 +397,35 @@ export function createSymbolAssemblyRoutes(): Router {
       // Strategy: first check assembly_report.json, then fall back to scanning
       // the filesystem for actual gathered files (protects against a failed run
       // overwriting a successful report).
+      // Cache is invalidated when: forceRefresh=true OR artifact content hash changed.
       const existingReportPath = path.join(outputDir, 'assembly_report.json');
       const backupReportPath = path.join(outputDir, 'assembly_report.success.json');
 
+      // Helper: check if a cached report's artifact hash matches current artifacts
+      const isCacheValid = (report: Record<string, unknown>): boolean => {
+        if (forceRefresh) {
+          log.info('Force refresh requested — invalidating cached assembly report', { operationId });
+          return false;
+        }
+        const cachedHash = report.artifact_hash as string | undefined;
+        if (!cachedHash) {
+          log.info('Cached report has no artifact_hash — invalidating (pre-hash report)', { operationId });
+          return false;
+        }
+        if (cachedHash !== artifactHash) {
+          log.info('Artifact content changed — invalidating cached assembly report', {
+            operationId,
+            cachedHash,
+            currentHash: artifactHash,
+          });
+          return false;
+        }
+        return true;
+      };
+
       // Helper: send reuse response and return early
       const sendReuseResponse = async (report: Record<string, unknown>, symbolCount: number) => {
-        const updatedReport = { ...report, operationId };
+        const updatedReport = { ...report, operationId, artifact_hash: artifactHash };
         await fs.writeFile(existingReportPath, JSON.stringify(updatedReport, null, 2));
 
         wsManager.emitProgress(operationId, {
@@ -405,12 +453,13 @@ export function createSymbolAssemblyRoutes(): Router {
         const existingContent = await fs.readFile(existingReportPath, 'utf-8');
         const existingReport = JSON.parse(existingContent) as Record<string, unknown>;
         const components = existingReport.components as unknown[];
-        if (existingReport.status === 'complete' && components?.length > 0) {
+        if (existingReport.status === 'complete' && components?.length > 0 && isCacheValid(existingReport)) {
           log.info('Found existing completed assembly report — reusing previous results', {
             operationId,
             previousOperationId: existingReport.operationId,
             symbolsFound: existingReport.symbols_found,
             totalComponents: existingReport.total_components,
+            artifactHash,
           });
           await sendReuseResponse(existingReport, (existingReport.symbols_found as number) || components.length);
           return;
@@ -424,7 +473,7 @@ export function createSymbolAssemblyRoutes(): Router {
         const backupContent = await fs.readFile(backupReportPath, 'utf-8');
         const backupReport = JSON.parse(backupContent) as Record<string, unknown>;
         const components = backupReport.components as unknown[];
-        if (backupReport.status === 'complete' && components?.length > 0) {
+        if (backupReport.status === 'complete' && components?.length > 0 && isCacheValid(backupReport)) {
           log.info('Found backup assembly report (main was overwritten by error) — reusing', {
             operationId,
             previousOperationId: backupReport.operationId,
@@ -440,7 +489,8 @@ export function createSymbolAssemblyRoutes(): Router {
       // Strategy 3: Scan filesystem for gathered symbols even if report is missing/error.
       // A failed run may have overwritten the report, but the actual symbol files
       // and characterizations from previous successful runs still exist on disk.
-      try {
+      // Skip filesystem reuse when forceRefresh is requested.
+      if (!forceRefresh) try {
         const symbolsDir = path.join(outputDir, 'symbols');
         const charsDir = path.join(outputDir, 'characterizations');
         const datasheetsDir = path.join(outputDir, 'datasheets');
@@ -598,7 +648,7 @@ export function createSymbolAssemblyRoutes(): Router {
         }
       });
 
-      python.on('close', (code, signal) => {
+      python.on('close', async (code, signal) => {
         // Unregister process
         activeProcesses.delete(operationId);
 
@@ -624,6 +674,21 @@ export function createSymbolAssemblyRoutes(): Router {
           });
         } else {
           log.info('Symbol assembly complete', { operationId });
+
+          // Stamp artifact_hash into the report for future cache validation
+          try {
+            const reportContent = await fs.readFile(existingReportPath, 'utf-8');
+            const report = JSON.parse(reportContent);
+            if (!report.artifact_hash) {
+              report.artifact_hash = artifactHash;
+              await fs.writeFile(existingReportPath, JSON.stringify(report, null, 2));
+            }
+            // Save backup of successful report
+            await fs.copyFile(existingReportPath, backupReportPath);
+          } catch {
+            // Non-fatal: hash stamping failed, report still valid
+          }
+
           wsManager.emitProgress(operationId, {
             type: SchematicEventType.SYMBOL_ASSEMBLY_COMPLETE,
             operationId,
