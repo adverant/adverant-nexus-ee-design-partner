@@ -71,6 +71,8 @@ from ideation_context import (
     PlacementContext,
     ValidationContext,
 )
+from checkpoint_manager import CheckpointManager
+from retry_utils import retry_phase
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +250,7 @@ class MAPOSchematicPipeline:
         self._renderer: Optional[Any] = None  # KiCanvas renderer
         self._artifact_exporter: Optional[ArtifactExporterAgent] = None  # PDF/image export + NFS sync
         self._smoke_test: Optional[SmokeTestAgent] = None  # SPICE-based circuit validation
+        self._checkpoint_mgr: Optional[CheckpointManager] = None  # Checkpoint persistence
         # Note: Gaming AI optimization uses stateless optimize_schematic() function
 
     def _emit_progress(
@@ -399,6 +402,10 @@ class MAPOSchematicPipeline:
         start_time = datetime.now()
         result = PipelineResult(success=False)
 
+        # Initialize checkpoint manager using progress emitter's operation_id (if available)
+        op_id = getattr(self._progress, 'operation_id', None) or f"pipeline-{os.getpid()}"
+        self._checkpoint_mgr = CheckpointManager(op_id)
+
         try:
             # Ensure initialized
             if not self._symbol_fetcher:
@@ -452,9 +459,13 @@ class MAPOSchematicPipeline:
                 )
 
                 try:
-                    generated_connections = await self._connection_generator.generate_connections(
+                    generated_connections = await retry_phase(
+                        self._connection_generator.generate_connections,
                         bom=bom,
-                        design_intent=design_intent
+                        design_intent=design_intent,
+                        max_retries=3,
+                        base_delay=10.0,
+                        phase_name="connections",
                     )
                     connection_objs = [
                         Connection(
@@ -471,6 +482,24 @@ class MAPOSchematicPipeline:
                         SchematicPhase.CONNECTIONS,
                         f"Generated {len(connection_objs)} connections"
                     )
+
+                    # Checkpoint: save connections so we can skip re-generation on resume
+                    try:
+                        if hasattr(self, '_checkpoint_mgr') and self._checkpoint_mgr:
+                            self._checkpoint_mgr.save_checkpoint(
+                                phase="connections",
+                                data={
+                                    "connections": [
+                                        {"from_ref": c.from_ref, "from_pin": c.from_pin,
+                                         "to_ref": c.to_ref, "to_pin": c.to_pin,
+                                         "net_name": c.net_name}
+                                        for c in connection_objs
+                                    ]
+                                },
+                                completed_phases=["connections"],
+                            )
+                    except Exception as cp_err:
+                        logger.warning(f"Checkpoint save (connections) failed: {cp_err}")
                 except Exception as e:
                     # CRITICAL: LLM connection generation failed
                     # This means NO signal connections were generated - schematic will have 0 wires!
@@ -640,6 +669,17 @@ class MAPOSchematicPipeline:
                     f"Layout optimized: {len(optimization_result.improvements) if optimization_result else 0} improvements"
                 )
 
+                # Checkpoint: save after layout (positions updated)
+                try:
+                    if self._checkpoint_mgr:
+                        self._checkpoint_mgr.save_checkpoint(
+                            phase="layout",
+                            data={"layout_complete": True},
+                            completed_phases=["connections", "assembly", "layout"],
+                        )
+                except Exception as cp_err:
+                    logger.warning(f"Checkpoint save (layout) failed: {cp_err}")
+
             # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
             if self._standards_compliance:
                 logger.info("Running standards compliance check...")
@@ -664,6 +704,20 @@ class MAPOSchematicPipeline:
 
             logger.info(f"Schematic assembled: {output_path}")
 
+            # Checkpoint: save assembled schematic (most critical artifact)
+            try:
+                if hasattr(self, '_checkpoint_mgr') and self._checkpoint_mgr:
+                    self._checkpoint_mgr.save_checkpoint(
+                        phase="assembly",
+                        data={
+                            "schematic_content": schematic_content,
+                            "output_path": str(output_path),
+                        },
+                        completed_phases=["connections", "assembly"],
+                    )
+            except Exception as cp_err:
+                logger.warning(f"Checkpoint save (assembly) failed: {cp_err}")
+
             # Phase 3.5: Smoke Test (LLM-based circuit validation)
             # Ensures circuit won't "smoke" when power is applied
             if self._smoke_test:
@@ -676,10 +730,14 @@ class MAPOSchematicPipeline:
                     event_type=SchematicEventType.SMOKE_TEST_RUNNING.value
                 )
 
-                smoke_result = await self._smoke_test.run_smoke_test(
+                smoke_result = await retry_phase(
+                    self._smoke_test.run_smoke_test,
                     kicad_sch_content=schematic_content,
                     bom_items=bom,
-                    power_sources=None  # Auto-detect from schematic
+                    power_sources=None,  # Auto-detect from schematic
+                    max_retries=3,
+                    base_delay=10.0,
+                    phase_name="smoke_test",
                 )
                 result.smoke_test_result = smoke_result
                 result.smoke_test_passed = smoke_result.passed

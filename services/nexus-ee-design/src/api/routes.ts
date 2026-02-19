@@ -1873,6 +1873,9 @@ export function createApiRoutes(io: SocketIOServer): Router {
             operationId, // Include operation ID so frontend can subscribe
           });
 
+          // Track the last phase that completed successfully (replaces hardcoded 'symbols' as any)
+          let lastSuccessfulPhase: string = 'init';
+
           try {
             // Use executeWithProgress to relay PROGRESS: events via WebSocket
             // Pass JSON via stdin instead of CLI args to avoid E2BIG errors with large payloads
@@ -1880,9 +1883,15 @@ export function createApiRoutes(io: SocketIOServer): Router {
             'api_generate_schematic.py',
             ['--stdin'],  // Use --stdin flag instead of --json to avoid E2BIG errors
             {
-              timeout: 1200000, // 20 minute timeout - schematic gen includes LLM + SPICE smoke test + proxy queue wait
+              inactivityTimeout: 900000, // 15 min inactivity watchdog — kills only on silence, not elapsed time
               stdin: JSON.stringify(mapoInput),  // Pass JSON via stdin instead of CLI arg
               onProgress: (event: ProgressEvent) => {
+                // Track completed phases for error reporting
+                if (event.type === 'phase_complete' || event.type === 'PHASE_COMPLETE') {
+                  const phase = (event as any).phase || (event as any).data?.phase;
+                  if (phase) lastSuccessfulPhase = phase;
+                }
+
                 // Relay progress event to WebSocket subscribers
                 // Cast to SchematicProgressEvent (types are compatible at runtime)
                 schematicWsManager.emitProgress(operationId, event as import('./websocket-schematic.js').SchematicProgressEvent);
@@ -1898,32 +1907,63 @@ export function createApiRoutes(io: SocketIOServer): Router {
           );
 
           if (!result.success) {
-            // NO FALLBACK - Emit error via WebSocket (response already sent)
-            log.error(
-              'MAPO pipeline failed - NO FALLBACK (placeholder generator removed)',
-              new Error(result.stderr || 'Unknown pipeline error'),
-              { projectId, stdout: result.stdout }
-            );
+            // Check for partial success — pipeline failed but assembly completed
+            const partialResult = result.output as any;
+            if (partialResult?.partial_success && partialResult?.schematic_content) {
+              log.warn('MAPO pipeline partially succeeded — returning partial schematic', {
+                projectId,
+                completedPhases: partialResult.completed_phases,
+                contentLength: partialResult.schematic_content?.length,
+              });
 
-            // Emit error via WebSocket to subscribers
-            schematicWsManager.failOperation(
-              operationId!,
-              `MAPO pipeline failed: ${result.stderr || 'Unknown error'}`,
-              { lastSuccessfulPhase: 'symbols' as any }
-            );
+              // Parse the partial schematic and emit as partial success
+              const parsed = parseKicadSchematic(partialResult.schematic_content);
+              generatedSchematic = {
+                content: partialResult.schematic_content,
+                sheets: parsed.sheets.length > 0
+                  ? parsed.sheets
+                  : [{ name: 'Sheet1', uuid: 'partial', page: 1 }],
+                components: parsed.components,
+                nets: parsed.nets,
+              };
 
-            // Emit detailed error to legacy client
-            io.to(`project:${projectId}`).emit('schematic:error', {
-              projectId,
-              status: 'failed',
-              message: 'Schematic generation failed',
-              details: {
-                error: result.stderr || 'Unknown error',
-                action: 'Check server logs for full error details. Ensure OPENROUTER_API_KEY is set.',
-              },
-            });
+              io.to(`project:${projectId}`).emit('schematic:progress', {
+                projectId,
+                operationId,
+                status: 'partial_success',
+                message: `Partial schematic recovered (${parsed.components.length} components). Later phases failed.`,
+                isPartial: true,
+              });
 
-            return; // Response already sent, just exit
+              // Don't return — fall through to the success path to save the partial result
+            } else {
+              // NO FALLBACK - Emit error via WebSocket (response already sent)
+              log.error(
+                'MAPO pipeline failed - NO FALLBACK (placeholder generator removed)',
+                new Error(result.stderr || 'Unknown pipeline error'),
+                { projectId, stdout: result.stdout }
+              );
+
+              // Emit error via WebSocket to subscribers
+              schematicWsManager.failOperation(
+                operationId!,
+                `MAPO pipeline failed: ${result.stderr || 'Unknown error'}`,
+                { lastSuccessfulPhase: lastSuccessfulPhase as any }
+              );
+
+              // Emit detailed error to legacy client
+              io.to(`project:${projectId}`).emit('schematic:error', {
+                projectId,
+                status: 'failed',
+                message: 'Schematic generation failed',
+                details: {
+                  error: result.stderr || 'Unknown error',
+                  action: 'Check server logs for full error details. Ensure OPENROUTER_API_KEY is set.',
+                },
+              });
+
+              return; // Response already sent, just exit
+            }
           }
 
           // MAPO succeeded - process the result

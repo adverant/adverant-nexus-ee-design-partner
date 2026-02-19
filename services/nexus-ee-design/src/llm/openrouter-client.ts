@@ -34,7 +34,7 @@ import {
 // ============================================================================
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_TIMEOUT = 120000; // 2 minutes
+const DEFAULT_TIMEOUT = 600000; // 10 minutes — LLM calls for schematic gen can be long
 const MAX_RETRIES = 3;
 const RETRY_DELAY_BASE = 1000; // 1 second
 const TOKENS_PER_CHAR_ESTIMATE = 0.25; // Conservative estimate

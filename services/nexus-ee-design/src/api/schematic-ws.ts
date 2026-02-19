@@ -33,7 +33,11 @@ interface SchematicOperation {
   status: 'running' | 'complete' | 'error';
   lastEvent?: SchematicProgressEvent;
   eventCount: number;
+  completedPhases: string[];                    // Track which phases finished
+  eventHistory: SchematicProgressEvent[];       // Last 50 events for reconnect replay
 }
+
+const MAX_EVENT_HISTORY = 50;
 
 /**
  * Schematic WebSocket Manager
@@ -64,10 +68,18 @@ export class SchematicWebSocketManager extends EventEmitter {
         socket.join(`operation:${operationId}`);
         log.debug('Client subscribed to operation', { socketId: socket.id, operationId });
 
-        // Send current status if operation exists
+        // Send full operation state on reconnect (not just last event)
         const operation = this.operations.get(operationId);
-        if (operation?.lastEvent) {
-          socket.emit('progress', operation.lastEvent);
+        if (operation) {
+          socket.emit('operation:state', {
+            operationId: operation.operationId,
+            status: operation.status,
+            completedPhases: operation.completedPhases,
+            eventHistory: operation.eventHistory,
+            lastEvent: operation.lastEvent,
+            eventCount: operation.eventCount,
+            startedAt: operation.startedAt.toISOString(),
+          });
         }
       });
 
@@ -113,6 +125,8 @@ export class SchematicWebSocketManager extends EventEmitter {
       startedAt: new Date(),
       status: 'running',
       eventCount: 0,
+      completedPhases: [],
+      eventHistory: [],
     };
 
     this.operations.set(operationId, operation);
@@ -134,6 +148,21 @@ export class SchematicWebSocketManager extends EventEmitter {
     // Update operation tracking
     operation.lastEvent = event;
     operation.eventCount++;
+
+    // Maintain capped event history for reconnection replay
+    operation.eventHistory.push(event);
+    if (operation.eventHistory.length > MAX_EVENT_HISTORY) {
+      operation.eventHistory.shift();
+    }
+
+    // Track completed phases
+    const eventTypeStr = String(event.type);
+    if (eventTypeStr === SchematicEventType.PHASE_COMPLETE || eventTypeStr.includes('complete')) {
+      const phase = (event as any).phase;
+      if (phase && !operation.completedPhases.includes(phase)) {
+        operation.completedPhases.push(phase);
+      }
+    }
 
     if (event.type === SchematicEventType.COMPLETE) {
       operation.status = 'complete';

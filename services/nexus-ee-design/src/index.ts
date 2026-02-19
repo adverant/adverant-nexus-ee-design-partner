@@ -44,9 +44,9 @@ async function startServer(): Promise<void> {
     },
     path: '/ee-design/ws',
     // Timeout settings for Istio proxy compatibility
-    pingTimeout: 60000,      // 60 seconds (default is 20s)
+    pingTimeout: 300000,     // 5 minutes — schematic gen streams for 20+ min
     pingInterval: 25000,     // 25 seconds heartbeat
-    connectTimeout: 45000,   // 45 seconds connection timeout
+    connectTimeout: 120000,  // 2 minutes connection timeout
     allowUpgrades: true,     // Allow transport upgrade from polling to websocket
     transports: ['polling', 'websocket'], // Support both transports
   });

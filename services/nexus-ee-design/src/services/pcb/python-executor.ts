@@ -29,6 +29,12 @@ export interface PythonExecutorConfig {
   maxConcurrent: number;
 }
 
+/**
+ * SIGTERM→SIGKILL grace period (ms).
+ * When killing a process, send SIGTERM first, then SIGKILL after this delay.
+ */
+const SIGKILL_GRACE_MS = 30000;
+
 export interface ScriptResult {
   success: boolean;
   stdout: string;
@@ -256,6 +262,7 @@ if __name__ == "__main__":
     args: string[] = [],
     options?: {
       timeout?: number;
+      inactivityTimeout?: number; // Kill only after N ms of silence (for streaming pipelines)
       cwd?: string;
       env?: Record<string, string>;
       onProgress?: ProgressCallback;
@@ -287,6 +294,7 @@ if __name__ == "__main__":
     try {
       const result = await this.runScriptWithProgress(script, args, {
         timeout: options?.timeout || this.config.timeout,
+        inactivityTimeout: options?.inactivityTimeout,
         cwd: options?.cwd || this.config.workDir,
         env: options?.env,
         onProgress: options?.onProgress,
@@ -327,6 +335,7 @@ if __name__ == "__main__":
     args: string[],
     options: {
       timeout: number;
+      inactivityTimeout?: number;
       cwd: string;
       env?: Record<string, string>;
       onProgress?: ProgressCallback;
@@ -343,6 +352,7 @@ if __name__ == "__main__":
       let stdout = '';
       let stderr = '';
       let lineBuffer = '';
+      let settled = false;
 
       logger.info(`Executing Python script with progress: ${this.config.pythonPath} ${scriptPath}`);
 
@@ -364,10 +374,53 @@ if __name__ == "__main__":
         proc.stdin.end();
       }
 
-      const timeoutHandle = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`Script execution timed out after ${options.timeout}ms`));
-      }, options.timeout);
+      // --- Graceful kill helper: SIGTERM first, SIGKILL after grace period ---
+      const gracefulKill = (reason: string): void => {
+        if (settled) return;
+        settled = true;
+        logger.warn(`Killing Python process: ${reason}`);
+        proc.kill('SIGTERM');
+        const escalation = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+        }, SIGKILL_GRACE_MS);
+        // Don't let the escalation timer keep Node alive
+        escalation.unref();
+        reject(new Error(reason));
+      };
+
+      // --- Timeout strategy ---
+      // When inactivityTimeout is set, use a watchdog that resets on stdout activity.
+      // Otherwise, use the traditional fixed timeout (for short scripts like DRC/Gerber).
+      let watchdogHandle: ReturnType<typeof setTimeout> | null = null;
+      let fixedTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+      const useWatchdog = typeof options.inactivityTimeout === 'number' && options.inactivityTimeout > 0;
+
+      const resetWatchdog = (): void => {
+        if (!useWatchdog) return;
+        if (watchdogHandle) clearTimeout(watchdogHandle);
+        watchdogHandle = setTimeout(() => {
+          gracefulKill(
+            `Script killed: no stdout activity for ${options.inactivityTimeout}ms (inactivity watchdog)`
+          );
+        }, options.inactivityTimeout!);
+      };
+
+      if (useWatchdog) {
+        // Start initial watchdog
+        resetWatchdog();
+        logger.info(`Using activity watchdog: inactivityTimeout=${options.inactivityTimeout}ms`);
+      } else {
+        // Fixed timeout (legacy behavior for short scripts)
+        fixedTimeoutHandle = setTimeout(() => {
+          gracefulKill(`Script execution timed out after ${options.timeout}ms`);
+        }, options.timeout);
+      }
+
+      const clearAllTimers = (): void => {
+        if (watchdogHandle) clearTimeout(watchdogHandle);
+        if (fixedTimeoutHandle) clearTimeout(fixedTimeoutHandle);
+      };
 
       proc.stdout?.on('data', (data: Buffer) => {
         const chunk = data.toString();
@@ -381,6 +434,11 @@ if __name__ == "__main__":
         lineBuffer = lines.pop() || '';
 
         for (const line of lines) {
+          // Reset watchdog on every non-empty line (activity detected)
+          if (line.trim()) {
+            resetWatchdog();
+          }
+
           if (line.startsWith('PROGRESS:')) {
             try {
               const jsonStr = line.slice(9).trim();
@@ -400,11 +458,14 @@ if __name__ == "__main__":
 
       proc.stderr?.on('data', (data: Buffer) => {
         stderr += data.toString();
+        // stderr activity also resets the watchdog (Python logs go to stderr)
+        resetWatchdog();
         this.emit('stderr', { data: data.toString() });
       });
 
       proc.on('close', (code: number | null) => {
-        clearTimeout(timeoutHandle);
+        clearAllTimers();
+        settled = true;
         const duration = Date.now() - startTime;
 
         // Process any remaining buffered line
@@ -445,7 +506,8 @@ if __name__ == "__main__":
       });
 
       proc.on('error', (error: Error) => {
-        clearTimeout(timeoutHandle);
+        clearAllTimers();
+        settled = true;
         reject(error);
       });
     });

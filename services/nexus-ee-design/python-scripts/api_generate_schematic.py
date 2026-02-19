@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -39,6 +40,7 @@ from progress_emitter import ProgressEmitter, init_progress
 from ideation_context import IdeationContext
 from ideation_extractors import build_ideation_context, ExtractionError
 from ralph_loop_orchestrator import RalphLoopOrchestrator, RalphLoopResult
+from checkpoint_manager import CheckpointManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +48,46 @@ logging.basicConfig(
     stream=sys.stderr  # Log to stderr, output JSON to stdout
 )
 logger = logging.getLogger(__name__)
+
+# --- SIGTERM handler: save checkpoint and emit resumable progress before exit ---
+_shutdown_event = asyncio.Event() if hasattr(asyncio, "Event") else None
+_active_checkpoint_mgr: Optional["CheckpointManager"] = None
+_active_output_path: Optional[Path] = None
+
+
+def _sigterm_handler(signum: int, frame: Any) -> None:
+    """Handle SIGTERM: save checkpoint, emit PROGRESS event, exit cleanly."""
+    logger.warning("SIGTERM received — saving checkpoint and exiting gracefully")
+
+    # Try to save a checkpoint with whatever we have on disk
+    if _active_checkpoint_mgr and _active_output_path:
+        try:
+            # Check if assembly output already exists (most critical artifact)
+            sch_files = list(_active_output_path.glob("*.kicad_sch"))
+            if sch_files:
+                content = sch_files[0].read_text()
+                _active_checkpoint_mgr.save_checkpoint(
+                    phase="interrupted",
+                    data={"schematic_content": content, "output_path": str(sch_files[0])},
+                    completed_phases=["assembly"],  # at minimum
+                )
+                logger.info(f"Checkpoint saved on SIGTERM: {sch_files[0]}")
+        except Exception as exc:
+            logger.error(f"Failed to save checkpoint on SIGTERM: {exc}")
+
+    # Emit machine-readable progress so the TypeScript watchdog knows we saved state
+    progress_msg = json.dumps({
+        "type": "checkpoint_saved",
+        "resumable": True,
+        "progress_percentage": 0,
+        "current_step": "Process interrupted — checkpoint saved",
+    })
+    print(f"PROGRESS:{progress_msg}", flush=True)
+
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def create_foc_esc_bom(subsystems: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -284,6 +326,8 @@ async def run_generation(
     Returns:
         Dictionary with generation results
     """
+    global _active_checkpoint_mgr, _active_output_path
+
     try:
         # Create progress emitter for WebSocket streaming (if operation_id provided)
         progress_emitter = None
@@ -341,6 +385,11 @@ async def run_generation(
             output_path = Path(tempfile.mkdtemp(prefix="mapo_schematic_"))
 
         output_path.mkdir(parents=True, exist_ok=True)
+
+        # Register checkpoint manager for SIGTERM handler
+        checkpoint_mgr = CheckpointManager(operation_id or f"gen-{os.getpid()}")
+        _active_checkpoint_mgr = checkpoint_mgr
+        _active_output_path = output_path
 
         logger.info(f"Starting schematic generation: {len(bom)} components")
         logger.info(f"Output directory: {output_path}")
@@ -463,10 +512,35 @@ async def run_generation(
 
     except Exception as e:
         logger.error(f"Generation failed: {e}", exc_info=True)
+
+        # --- Partial result recovery ---
+        # If assembly completed before the failure, return the schematic content
+        # so the frontend can show a partial (but useful) result.
+        partial_content = ""
+        completed_phases: List[str] = []
+        if _active_output_path:
+            sch_files = list(_active_output_path.glob("*.kicad_sch"))
+            if sch_files:
+                try:
+                    partial_content = sch_files[0].read_text()
+                    completed_phases.append("assembly")
+                    logger.info(f"Partial result recovered: {sch_files[0]} ({len(partial_content)} chars)")
+                    # Also save checkpoint for potential future resume
+                    if _active_checkpoint_mgr:
+                        _active_checkpoint_mgr.save_checkpoint(
+                            phase="partial_failure",
+                            data={"schematic_content": partial_content, "error": str(e)},
+                            completed_phases=completed_phases,
+                        )
+                except Exception as read_exc:
+                    logger.warning(f"Failed to read partial result: {read_exc}")
+
         return {
             "success": False,
+            "partial_success": bool(partial_content),
             "error": str(e),
-            "schematic_content": "",
+            "schematic_content": partial_content,
+            "completed_phases": completed_phases,
             "component_count": 0,
             "errors": [str(e)],
         }

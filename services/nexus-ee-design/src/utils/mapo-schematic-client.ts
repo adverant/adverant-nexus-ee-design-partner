@@ -210,7 +210,8 @@ export class MAPOSchematicClient {
    */
   private runPython(args: string[], timeout: number): Promise<PipelineResult> {
     return new Promise((resolve, reject) => {
-      const process = spawn(this.pythonPath, args, {
+      // Renamed from `process` to `proc` to avoid shadowing the Node.js global
+      const proc = spawn(this.pythonPath, args, {
         env: {
           ...process.env,
           PYTHONUNBUFFERED: "1",
@@ -219,23 +220,44 @@ export class MAPOSchematicClient {
 
       let stdout = "";
       let stderr = "";
+      let settled = false;
 
-      process.stdout.on("data", (data) => {
+      // --- Graceful kill: SIGTERM first, SIGKILL after 30s ---
+      const gracefulKill = (reason: string): void => {
+        if (settled) return;
+        settled = true;
+        proc.kill("SIGTERM");
+        const escalation = setTimeout(() => {
+          try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+        }, 30000);
+        escalation.unref();
+        reject(new Error(reason));
+      };
+
+      // --- Activity watchdog: reset on any stdout/stderr ---
+      let watchdogHandle: ReturnType<typeof setTimeout> | null = null;
+      const resetWatchdog = (): void => {
+        if (watchdogHandle) clearTimeout(watchdogHandle);
+        watchdogHandle = setTimeout(() => {
+          gracefulKill(`Pipeline killed: no activity for ${timeout}ms (inactivity watchdog)`);
+        }, timeout);
+      };
+      resetWatchdog(); // start initial watchdog
+
+      proc.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
+        resetWatchdog();
       });
 
-      process.stderr.on("data", (data) => {
+      proc.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
         console.error(`[MAPO Pipeline] ${data.toString()}`);
+        resetWatchdog();
       });
 
-      const timeoutId = setTimeout(() => {
-        process.kill();
-        reject(new Error(`Pipeline timeout after ${timeout}ms`));
-      }, timeout);
-
-      process.on("close", (code) => {
-        clearTimeout(timeoutId);
+      proc.on("close", (code) => {
+        if (watchdogHandle) clearTimeout(watchdogHandle);
+        settled = true;
 
         if (code !== 0) {
           reject(new Error(`Pipeline failed with code ${code}: ${stderr}`));
@@ -270,8 +292,9 @@ export class MAPOSchematicClient {
         }
       });
 
-      process.on("error", (err) => {
-        clearTimeout(timeoutId);
+      proc.on("error", (err) => {
+        if (watchdogHandle) clearTimeout(watchdogHandle);
+        settled = true;
         reject(err);
       });
     });

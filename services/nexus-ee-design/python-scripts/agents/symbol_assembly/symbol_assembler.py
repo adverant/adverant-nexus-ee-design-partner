@@ -83,7 +83,7 @@ LLM_CLAUDE_CODE_PROXY_URL: str = os.environ.get(
     "http://claude-code-proxy.nexus.svc.cluster.local:3100",
 )
 LLM_CLAUDE_CODE_PROXY_TIMEOUT: int = int(
-    os.environ.get("LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS", "600")
+    os.environ.get("LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS", "3600")
 )
 
 # Map OpenRouter model IDs to native Anthropic model IDs for the proxy
@@ -3651,7 +3651,7 @@ class SymbolAssembler:
                 "X-Title": "Nexus EE Design - Symbol Assembly",
             },
             json=payload,
-            timeout=120.0,
+            timeout=3600.0,
         )
 
         if response.status_code != 200:

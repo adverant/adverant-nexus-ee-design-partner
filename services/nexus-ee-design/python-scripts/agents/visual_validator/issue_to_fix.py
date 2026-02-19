@@ -569,7 +569,7 @@ RESPOND ONLY WITH THE JSON ARRAY, NO OTHER TEXT.
             net_names=", ".join(context.get("net_names", [])[:10]),
         )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=600.0) as client:
             response = await client.post(
                 f"{OPENROUTER_BASE_URL}/chat/completions",
                 headers={
