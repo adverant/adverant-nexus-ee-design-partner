@@ -23,7 +23,7 @@ import logging
 import os
 import traceback
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -1108,6 +1108,7 @@ async def build_ideation_context(
     raw_artifacts: List[Dict[str, Any]],
     subsystems: List[Dict[str, Any]],
     project_name: str,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> IdeationContext:
     """
     Build a fully populated ``IdeationContext`` from raw ideation artifacts.
@@ -1272,8 +1273,20 @@ async def build_ideation_context(
 
         labels = [label for label, _ in extraction_tasks]
         coros = [coro for _, coro in extraction_tasks]
+        total_tasks = len(coros)
 
-        gathered = await asyncio.gather(*coros, return_exceptions=True)
+        # Wrap each coroutine to emit progress on completion
+        async def _tracked(label: str, coro):
+            result = await coro
+            if progress_callback:
+                try:
+                    progress_callback(label, total_tasks)
+                except Exception:
+                    pass  # Don't let callback errors break extraction
+            return result
+
+        tracked_coros = [_tracked(lbl, c) for lbl, c in zip(labels, coros)]
+        gathered = await asyncio.gather(*tracked_coros, return_exceptions=True)
 
         # Collect results, retrying failures once
         retry_tasks: List[Tuple[int, str]] = []

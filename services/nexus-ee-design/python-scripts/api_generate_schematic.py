@@ -334,18 +334,47 @@ async def run_generation(
         if operation_id:
             progress_emitter = init_progress(operation_id)
             logger.info(f"Progress streaming enabled for operation: {operation_id}")
+            # Emit immediately so the frontend sees activity
+            progress_emitter.emit(
+                "phase_start", 1, "Initializing schematic generation pipeline...",
+                phase="symbols",
+            )
 
         # Build structured IdeationContext from artifacts (replaces create_design_intent)
         ideation_context: Optional[IdeationContext] = None
         if ideation_artifacts:
-            logger.info(f"Building IdeationContext from {len(ideation_artifacts)} ideation artifacts")
+            artifact_count = len(ideation_artifacts)
+            logger.info(f"Building IdeationContext from {artifact_count} ideation artifacts")
             for artifact in ideation_artifacts:
                 logger.info(f"  - {artifact.get('name', 'unknown')} ({artifact.get('artifact_type', 'unknown')})")
+
+            if progress_emitter:
+                progress_emitter.emit(
+                    "phase_start", 2,
+                    f"Extracting design context from {artifact_count} artifacts (this may take several minutes)...",
+                    phase="symbols",
+                )
+
+            # Progress callback for per-extraction updates
+            _extraction_done = 0
+
+            def _on_extraction_progress(label: str, total: int) -> None:
+                nonlocal _extraction_done
+                _extraction_done += 1
+                if progress_emitter:
+                    pct = min(20, 2 + int(18 * _extraction_done / max(total, 1)))
+                    progress_emitter.emit(
+                        "symbol_resolving", pct,
+                        f"Extracted {label} ({_extraction_done}/{total} tasks complete)",
+                        phase="symbols",
+                    )
+
             try:
                 ideation_context = await build_ideation_context(
                     raw_artifacts=ideation_artifacts,
                     subsystems=subsystems or [],
                     project_name=project_name,
+                    progress_callback=_on_extraction_progress,
                 )
                 logger.info(
                     f"IdeationContext built: bom={ideation_context.has_bom_artifacts}, "
@@ -353,8 +382,18 @@ async def run_generation(
                     f"placement={ideation_context.has_placement_hints}, "
                     f"validation={ideation_context.has_validation_criteria}"
                 )
+                if progress_emitter:
+                    progress_emitter.emit(
+                        "phase_complete", 20,
+                        "Design context extraction complete",
+                        phase="symbols",
+                    )
             except ExtractionError as exc:
                 logger.error(f"IdeationContext extraction failed: {exc}")
+                if progress_emitter:
+                    progress_emitter.emit(
+                        "error", 0, f"Ideation extraction failed: {exc}",
+                    )
                 return {
                     "success": False,
                     "error": f"Ideation artifact extraction failed: {exc}",
