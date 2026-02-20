@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_HTTP_TIMEOUT = 120.0  # seconds -- LLM extraction can be slow on large artifacts
+_HTTP_TIMEOUT = float(os.environ.get("IDEATION_EXTRACTION_TIMEOUT_SECONDS", "600"))
 
 # LLM provider: use centralized config (defaults to Claude Code Max proxy)
 try:
@@ -1133,14 +1133,9 @@ async def build_ideation_context(
 
     Returns:
         A fully populated ``IdeationContext`` instance.  If extraction
-        errors occurred, they are recorded in ``extraction_errors`` and
-        the function raises an ``ExtractionError`` wrapping the first
-        error so the pipeline can halt.
-
-    Raises:
-        ExtractionError: If ANY extraction step fails.  The error message
-            includes all collected errors so the operator can diagnose the
-            full scope of failures in a single log entry.
+        errors occurred, they are recorded in ``extraction_errors`` but
+        the function continues with partial data (non-fatal).  The
+        pipeline receives whatever was successfully extracted.
     """
     logger.info(
         "Building IdeationContext from %d artifacts for project '%s'",
@@ -1302,6 +1297,8 @@ async def build_ideation_context(
                 len(retry_tasks),
                 [label for _, label in retry_tasks],
             )
+            # Brief delay before retry to let the proxy recover
+            await asyncio.sleep(5)
             # Re-invoke the extraction functions directly for retry
             retry_labels = [label for _, label in retry_tasks]
             retry_coros_2 = []
