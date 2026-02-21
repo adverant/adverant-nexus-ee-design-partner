@@ -1883,7 +1883,7 @@ export function createApiRoutes(io: SocketIOServer): Router {
             'api_generate_schematic.py',
             ['--stdin'],  // Use --stdin flag instead of --json to avoid E2BIG errors
             {
-              inactivityTimeout: 900000, // 15 min inactivity watchdog — kills only on silence, not elapsed time
+              inactivityTimeout: 3600000, // 60 min inactivity watchdog — proxy queue delays can be 5+ min per request
               stdin: JSON.stringify(mapoInput),  // Pass JSON via stdin instead of CLI arg
               onProgress: (event: ProgressEvent) => {
                 // Track completed phases for error reporting
