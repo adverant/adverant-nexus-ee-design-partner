@@ -421,6 +421,9 @@ class ConnectionGeneratorAgent:
                     raise
                 continue
 
+            # Remap any LLM-invented references back to actual BOM references
+            connections_data = self._remap_references(connections_data, components)
+
             # Validate logical connections
             validation_errors = self._validate_logical_connections(
                 connections_data,
@@ -488,6 +491,13 @@ class ConnectionGeneratorAgent:
         voltage_str = json.dumps(context.voltage_map, indent=2)
         current_str = json.dumps(context.current_map, indent=2)
 
+        # Build explicit reference table for LLM clarity
+        ref_table = "\n".join(
+            f"  {comp.reference} = {comp.part_number} ({comp.category}, {comp.value})"
+            for comp in components
+        )
+        valid_refs = [comp.reference for comp in components]
+
         prompt = f"""You are an expert electronics engineer specializing in circuit connectivity.
 
 Generate LOGICAL CONNECTIONS for a KiCad schematic based on the design intent and components.
@@ -499,7 +509,19 @@ handled by a separate wire router agent.
 DESIGN INTENT:
 {design_intent}
 
-COMPONENTS:
+═══════════════════════════════════════════════════════════════════
+CRITICAL: VALID COMPONENT REFERENCES — USE THESE EXACT REFERENCES
+═══════════════════════════════════════════════════════════════════
+{ref_table}
+
+Valid references: {json.dumps(valid_refs)}
+
+You MUST use ONLY these exact reference designators (e.g., "U1", "C4", "R7").
+DO NOT invent references like "U_STM32", "C_BYPASS1", "R_PULL". Use the EXACT
+references from the table above. Any connection using a reference NOT in this
+list will be rejected as invalid.
+
+COMPONENTS (full detail):
 {json.dumps(comp_summary, indent=2)}
 
 VOLTAGE MAP (V):
@@ -846,6 +868,84 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
                 )
 
         return errors
+
+    def _remap_references(
+        self,
+        connections_data: List[Dict],
+        components: List[ComponentInfo]
+    ) -> List[Dict]:
+        """
+        Remap LLM-invented references back to actual BOM references.
+
+        The LLM sometimes invents descriptive references like "U_STM32", "C_BYPASS1"
+        instead of using the actual BOM references "U1", "C4". This method attempts
+        to fuzzy-match and remap them.
+        """
+        valid_refs = {c.reference for c in components}
+
+        # Build lookup maps for fuzzy matching
+        # Map: part_number -> reference (e.g., "STM32G431CBTxZ" -> "U1")
+        pn_to_ref: Dict[str, str] = {}
+        # Map: category prefix + index -> reference
+        cat_to_refs: Dict[str, List[str]] = {}
+
+        for comp in components:
+            pn_to_ref[comp.part_number.upper()] = comp.reference
+            # Also index by partial part number (first word)
+            first_word = comp.part_number.split("-")[0].split("_")[0].upper()
+            if first_word not in pn_to_ref:
+                pn_to_ref[first_word] = comp.reference
+
+            # Group by prefix letter
+            prefix = ''.join(c for c in comp.reference if c.isalpha())
+            if prefix not in cat_to_refs:
+                cat_to_refs[prefix] = []
+            cat_to_refs[prefix].append(comp.reference)
+
+        remapped_count = 0
+
+        for conn in connections_data:
+            for ref_field in ["from_ref", "to_ref"]:
+                ref = conn.get(ref_field, "")
+                if ref in valid_refs:
+                    continue  # Already valid
+
+                # Try fuzzy matching strategies
+                matched_ref = None
+
+                # Strategy 1: Check if ref contains a part number
+                ref_upper = ref.upper()
+                for pn, actual_ref in pn_to_ref.items():
+                    if pn in ref_upper or ref_upper in pn:
+                        matched_ref = actual_ref
+                        break
+
+                # Strategy 2: Match by prefix letter (e.g., "U_STM32" -> prefix "U")
+                if not matched_ref:
+                    prefix = ''.join(c for c in ref if c.isalpha() and c.isupper())
+                    if not prefix:
+                        prefix = ''.join(c for c in ref if c.isalpha())[:1].upper()
+                    if prefix in cat_to_refs and cat_to_refs[prefix]:
+                        # Use the first available ref with this prefix
+                        matched_ref = cat_to_refs[prefix][0]
+
+                if matched_ref:
+                    logger.warning(
+                        f"Remapped LLM reference '{ref}' -> '{matched_ref}' "
+                        f"(field: {ref_field})"
+                    )
+                    conn[ref_field] = matched_ref
+                    remapped_count += 1
+                else:
+                    logger.error(
+                        f"UNMATCHABLE reference '{ref}' (field: {ref_field}) - "
+                        f"not in BOM. Valid refs: {sorted(valid_refs)}"
+                    )
+
+        if remapped_count > 0:
+            logger.info(f"Remapped {remapped_count} LLM-invented references to actual BOM references")
+
+        return connections_data
 
     def _get_min_spacing(self, voltage: float) -> float:
         """Get minimum IPC-2221 spacing for voltage."""

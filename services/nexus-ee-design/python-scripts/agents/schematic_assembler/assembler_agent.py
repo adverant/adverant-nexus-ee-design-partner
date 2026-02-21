@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -400,6 +401,24 @@ class SchematicAssemblerAgent:
         for sheet in sheets:
             self._add_power_symbols(sheet)
 
+        # Step 7: Validate component count against BOM
+        actual_count = sum(len(sheet.symbols) for sheet in sheets)
+        expected_count = len(bom)
+        if actual_count < expected_count:
+            placed_parts = {s.part_number for sheet in sheets for s in sheet.symbols}
+            bom_parts = {item.part_number for item in bom}
+            missing = bom_parts - placed_parts
+            logger.error(
+                f"ASSEMBLY VALIDATION: Only {actual_count}/{expected_count} components placed. "
+                f"Missing parts: {sorted(missing)}"
+            )
+            # Log as error but don't raise — let the pipeline continue so visual
+            # validation can detect and potentially fix placement issues
+        else:
+            logger.info(
+                f"ASSEMBLY VALIDATION: All {actual_count}/{expected_count} components placed successfully"
+            )
+
         logger.info(f"Assembly complete: {len(sheets)} sheet(s)")
         return sheets
 
@@ -510,19 +529,131 @@ Return ONLY the symbol name (no quotes, no explanation):"""
             logger.error(f"LLM symbol name extraction failed: {e}")
             return None
 
-    async def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
+    def _parse_pins_deterministic(self, sexp: str) -> List[Pin]:
         """
-        Parse pin information from KiCad S-expression using LLM (Opus 4.6 via OpenRouter).
+        Parse pins from KiCad S-expression deterministically using regex.
 
-        AI-first approach: Uses Claude Opus 4.6 to intelligently parse pin definitions
-        from any KiCad S-expression format (v6, v7, v8, custom). The LLM understands
-        the semantic structure and extracts pins reliably regardless of format variations.
+        No LLM dependency — works offline, instant, and deterministic.
+        Handles KiCad v6/v7/v8 pin formats.
 
         Args:
             sexp: KiCad symbol S-expression string
 
         Returns:
-            List of Pin objects extracted by the LLM.
+            List of Pin objects extracted from the S-expression.
+        """
+        pins = []
+
+        # KiCad pin type mapping
+        type_map = {
+            "input": PinType.INPUT,
+            "output": PinType.OUTPUT,
+            "bidirectional": PinType.BIDIRECTIONAL,
+            "tri_state": PinType.TRI_STATE,
+            "passive": PinType.PASSIVE,
+            "free": PinType.FREE,
+            "unspecified": PinType.UNSPECIFIED,
+            "power_in": PinType.POWER_IN,
+            "power_out": PinType.POWER_OUT,
+            "open_collector": PinType.OPEN_COLLECTOR,
+            "open_emitter": PinType.OPEN_EMITTER,
+            "no_connect": PinType.NO_CONNECT,
+        }
+
+        # Regex to find pin blocks: (pin TYPE STYLE (at X Y [ANGLE]) ... (name "NAME") ... (number "NUM"))
+        # Using DOTALL so . matches newlines within a pin block
+        pin_block_pattern = re.compile(
+            r'\(pin\s+(\w+)\s+\w+'     # (pin TYPE STYLE
+            r'(.*?)'                     # ... everything inside pin block ...
+            r'\)',                        # closing paren
+            re.DOTALL
+        )
+
+        # Sub-patterns for fields within a pin block
+        at_pattern = re.compile(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)')
+        name_pattern = re.compile(r'\(name\s+"([^"]*)"')
+        number_pattern = re.compile(r'\(number\s+"([^"]*)"')
+        length_pattern = re.compile(r'\(length\s+([-\d.]+)\)')
+
+        # Find all pin blocks by tracking balanced parentheses
+        i = 0
+        while i < len(sexp):
+            # Find next (pin
+            pin_start = sexp.find('(pin ', i)
+            if pin_start == -1:
+                break
+
+            # Find the matching closing paren by counting nesting
+            depth = 0
+            j = pin_start
+            while j < len(sexp):
+                if sexp[j] == '(':
+                    depth += 1
+                elif sexp[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+
+            if depth != 0:
+                # Unbalanced — skip
+                i = pin_start + 5
+                continue
+
+            pin_block = sexp[pin_start:j + 1]
+            i = j + 1
+
+            # Extract pin type (first word after "pin ")
+            pin_type_match = re.match(r'\(pin\s+(\w+)', pin_block)
+            if not pin_type_match:
+                continue
+            pin_type_str = pin_type_match.group(1).lower()
+            pin_type = type_map.get(pin_type_str, PinType.UNSPECIFIED)
+
+            # Extract position
+            at_match = at_pattern.search(pin_block)
+            if not at_match:
+                continue
+            x = float(at_match.group(1))
+            y = float(at_match.group(2))
+            angle = float(at_match.group(3)) if at_match.group(3) else 0.0
+
+            # Extract name
+            name_match = name_pattern.search(pin_block)
+            pin_name = name_match.group(1) if name_match else ""
+
+            # Extract number
+            number_match = number_pattern.search(pin_block)
+            pin_number = number_match.group(1) if number_match else ""
+
+            # Extract length
+            length_match = length_pattern.search(pin_block)
+            pin_length = float(length_match.group(1)) if length_match else 2.54
+
+            if pin_name or pin_number:  # Must have at least name or number
+                pins.append(Pin(
+                    name=pin_name,
+                    number=pin_number,
+                    pin_type=pin_type,
+                    position=(x, y),
+                    orientation=int(angle),
+                    length=pin_length,
+                ))
+
+        return pins
+
+    async def _parse_pins_from_sexp(self, sexp: str) -> List[Pin]:
+        """
+        Parse pin information from KiCad S-expression.
+
+        Uses deterministic regex parser as primary path (instant, no API key needed).
+        Falls back to LLM only if deterministic parser returns empty and API key is set.
+
+        Args:
+            sexp: KiCad symbol S-expression string
+
+        Returns:
+            List of Pin objects.
             Cached for subsequent calls with the same sexp.
         """
         # Cache key based on sexp content hash
@@ -534,10 +665,22 @@ Return ONLY the symbol name (no quotes, no explanation):"""
             logger.debug(f"Pin parse cache hit for {cache_key[:8]}")
             return self._pin_parse_cache[cache_key]
 
-        # Check if LLM is available
+        # PRIMARY: Deterministic S-expression parser (no LLM needed)
+        pins = self._parse_pins_deterministic(sexp)
+        if pins:
+            self._pin_parse_cache[cache_key] = pins
+            logger.info(f"Deterministic parser extracted {len(pins)} pins (cached as {cache_key[:8]})")
+            return pins
+
+        # FALLBACK: LLM-based parsing (only if deterministic failed AND API key available)
         if not self._openrouter_api_key:
-            logger.error("LLM pin parsing unavailable - OPENROUTER_API_KEY not set")
+            logger.warning(
+                "Deterministic pin parser found 0 pins and LLM unavailable "
+                "(OPENROUTER_API_KEY not set). Returning empty pin list."
+            )
             return []
+
+        logger.info("Deterministic parser found 0 pins — falling back to LLM...")
 
         # Initialize HTTP client if needed
         if self._http_client is None:

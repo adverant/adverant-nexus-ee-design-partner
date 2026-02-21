@@ -599,7 +599,13 @@ class SymbolFetcherAgent:
         for cat_dir in self.cache_path.iterdir():
             if cat_dir.is_dir():
                 for symbol_file in cat_dir.glob("*.kicad_sym"):
-                    if normalized in self._normalize_part_number(symbol_file.stem):
+                    cached_normalized = self._normalize_part_number(symbol_file.stem)
+                    # Check if either contains the other (handles suffix variants)
+                    if normalized in cached_normalized or cached_normalized in normalized:
+                        logger.info(
+                            f"Fuzzy cache hit: '{part_number}' matched '{symbol_file.stem}' "
+                            f"(normalized: '{normalized}' in '{cached_normalized}')"
+                        )
                         symbol_sexp = symbol_file.read_text()
                         return FetchedSymbol(
                             part_number=symbol_file.stem,
@@ -608,6 +614,32 @@ class SymbolFetcherAgent:
                             source=SymbolSource.LOCAL_CACHE,
                             metadata={'fuzzy_match': True, 'original_query': part_number}
                         )
+
+        # Try matching by base part family (strip trailing package/variant codes)
+        # e.g., STM32G431CBT6 → STM32G431CB, TJA1051T/3 → TJA1051T
+        base_pn = re.sub(r'[/].*$', '', part_number)  # Strip /3 suffix
+        base_pn = re.sub(r'[-_\s]', '', base_pn).upper()
+        if len(base_pn) > 6:
+            # Try progressively shorter prefix matching
+            for prefix_len in range(len(base_pn), max(len(base_pn) - 4, 5), -1):
+                prefix = base_pn[:prefix_len]
+                for cat_dir in self.cache_path.iterdir():
+                    if cat_dir.is_dir():
+                        for symbol_file in cat_dir.glob("*.kicad_sym"):
+                            stem_norm = re.sub(r'[-_\s]', '', symbol_file.stem).upper()
+                            if stem_norm.startswith(prefix) or prefix.startswith(stem_norm):
+                                logger.info(
+                                    f"Base-family cache hit: '{part_number}' matched "
+                                    f"'{symbol_file.stem}' (prefix: '{prefix}')"
+                                )
+                                symbol_sexp = symbol_file.read_text()
+                                return FetchedSymbol(
+                                    part_number=symbol_file.stem,
+                                    manufacturer=manufacturer,
+                                    symbol_sexp=symbol_sexp,
+                                    source=SymbolSource.LOCAL_CACHE,
+                                    metadata={'fuzzy_match': True, 'match_type': 'base_family', 'original_query': part_number}
+                                )
 
         return None
 
@@ -1876,7 +1908,8 @@ No explanation or markdown formatting."""
         """Normalize part number for fuzzy matching."""
         # Remove common suffixes and normalize
         normalized = part_number.upper()
-        normalized = re.sub(r'[-_\s]', '', normalized)
+        normalized = re.sub(r'[-_\s/]', '', normalized)
+        # Remove packaging/ordering suffixes
         normalized = re.sub(r'(TR|CT|ND|REEL|TAPE|CUT|BULK)$', '', normalized)
         return normalized
 

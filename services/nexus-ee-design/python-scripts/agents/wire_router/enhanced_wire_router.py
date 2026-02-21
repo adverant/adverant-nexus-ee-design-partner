@@ -242,6 +242,23 @@ class EnhancedWireRouter:
                 self._warnings.append(str(e))
         logger.info(f"Signal routing complete: {routed_count} of {len(signal_conns)} routed, {skipped_count} skipped")
 
+        # Check total routing success across ALL connection types
+        total_connections = len(connections)
+        total_routed = len(self._wires)  # Actual wires generated
+        if total_connections > 0 and skipped_count > 0:
+            failure_pct = skipped_count / max(len(signal_conns), 1)
+            logger.error(
+                f"ROUTING SUMMARY: {skipped_count}/{len(signal_conns)} signal connections FAILED to route "
+                f"({failure_pct:.0%} failure rate). "
+                f"Total wires generated: {total_routed}. "
+                f"Check symbol pin definitions and reference matching."
+            )
+            if failure_pct > 0.5:
+                logger.error(
+                    f"CRITICAL: >50% routing failure rate ({failure_pct:.0%}). "
+                    f"Most connections could not be routed — schematic will be non-functional."
+                )
+
         # Post-process: fix 4-way junctions
         self._fix_four_way_junctions()
 
@@ -443,18 +460,19 @@ class EnhancedWireRouter:
             missing_from = "from_pos" if not from_pos else None
             missing_to = "to_pos" if not to_pos else None
             error_msg = (
-                f"WARNING: Cannot route net '{net_name}' - missing pin positions. "
+                f"ROUTING FAILURE: Cannot route net '{net_name}' - missing pin positions. "
                 f"From: {from_ref}.{from_pin} -> position={'MISSING' if missing_from else from_pos}, "
                 f"To: {to_ref}.{to_pin} -> position={'MISSING' if missing_to else to_pos}. "
-                f"Possible causes: "
-                f"1) Symbol has no pin definitions (placeholder symbol used), "
+                f"Causes: "
+                f"1) Symbol has no pin definitions (placeholder symbol?), "
                 f"2) Pin name mismatch between connection and symbol, "
                 f"3) Component not found in layout (reference mismatch). "
                 f"Available components: {list(component_positions.keys())[:10]}..."
             )
-            logger.warning(error_msg)
+            logger.error(error_msg)
             self._warnings.append(error_msg)
-            return  # Skip this connection — do not abort the entire routing loop
+            # Raise to trigger the skip counter in the routing loop
+            raise ValueError(error_msg)
 
         route_type = RouteType.SIGNAL
         if constraint:

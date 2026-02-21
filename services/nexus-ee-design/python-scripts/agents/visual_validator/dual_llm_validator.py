@@ -1133,6 +1133,40 @@ class ValidationLoop:
                 f"(delta: {result.combined_score - previous_score:+.2%})"
             )
 
+            # Save per-iteration image and Opus analysis report to disk
+            try:
+                iteration_dir = Path(schematic_path).parent / "validation_iterations"
+                iteration_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save rendered image
+                img_path = iteration_dir / f"iteration_{iteration + 1}.png"
+                img_path.write_bytes(image_result.image_data)
+
+                # Save analysis report
+                report = {
+                    "iteration": iteration + 1,
+                    "combined_score": round(result.combined_score, 4),
+                    "delta": round(result.combined_score - previous_score, 4),
+                    "agreed_issues": [
+                        {"category": str(i.category), "message": i.message, "confidence": i.confidence}
+                        for i in result.agreed_issues
+                    ] if hasattr(result, 'agreed_issues') else [],
+                    "opus_unique_issues": [
+                        {"category": str(i.category), "message": i.message, "confidence": i.confidence}
+                        for i in result.unique_opus_issues
+                    ] if hasattr(result, 'unique_opus_issues') else [],
+                    "timestamp": datetime.now().isoformat(),
+                }
+                report_path = iteration_dir / f"iteration_{iteration + 1}_report.json"
+                report_path.write_text(json.dumps(report, indent=2))
+
+                logger.info(
+                    f"Saved iteration {iteration + 1} image ({len(image_result.image_data)} bytes) "
+                    f"and report to {iteration_dir}"
+                )
+            except Exception as save_err:
+                logger.warning(f"Failed to save iteration artifacts: {save_err}")
+
             # Step 3: Track progress and detect stagnation
             logger.info("Step 3: Analyzing progress...")
             progress = self.progress_tracker.record_and_analyze(

@@ -270,14 +270,27 @@ class LayoutOptimizerAgent:
             analysis.separation_zones
         )
 
-        # Step 5: Ensure all symbols have positions
-        for symbol in symbols:
-            if symbol.reference not in positions:
-                # Fallback position
+        # Step 5: Ensure all symbols have positions — spread in grid, never stack
+        unplaced = [s for s in symbols if s.reference not in positions]
+        if unplaced:
+            # Grid layout for unplaced components instead of stacking at center
+            cols = max(int(len(unplaced) ** 0.5), 1)
+            rows = (len(unplaced) + cols - 1) // cols
+            spacing_x = min(40.0, (self.CANVAS_WIDTH - 40) / (cols + 1))
+            spacing_y = min(30.0, (self.CANVAS_HEIGHT - 40) / (rows + 1))
+
+            for idx, symbol in enumerate(unplaced):
+                col = idx % cols
+                row = idx // cols
                 positions[symbol.reference] = (
-                    self.CANVAS_WIDTH / 2,
-                    self.CANVAS_HEIGHT / 2
+                    20.0 + (col + 1) * spacing_x,
+                    20.0 + (row + 1) * spacing_y
                 )
+
+            logger.warning(
+                f"Spread {len(unplaced)} unplaced components in {cols}x{rows} grid "
+                f"(signal flow analysis had no placement data for these)"
+            )
 
         return positions
 

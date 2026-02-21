@@ -704,6 +704,25 @@ class MAPOSchematicPipeline:
 
             logger.info(f"Schematic assembled: {output_path}")
 
+            # Validate: symbol instance count in output matches BOM
+            import re as _re
+            symbol_instances = len(_re.findall(r'\(symbol \(lib_id', schematic_content))
+            bom_count = len(bom_items)
+            if symbol_instances < bom_count * 0.8:
+                logger.error(
+                    f"OUTPUT VALIDATION FAILED: Only {symbol_instances}/{bom_count} symbol instances "
+                    f"in generated schematic (< 80% threshold). Some BOM components were not placed."
+                )
+                if not hasattr(self, '_pipeline_errors'):
+                    self._pipeline_errors = []
+                self._pipeline_errors.append(
+                    f"Component count validation: {symbol_instances}/{bom_count} placed"
+                )
+            else:
+                logger.info(
+                    f"OUTPUT VALIDATION: {symbol_instances}/{bom_count} symbol instances in schematic"
+                )
+
             # Checkpoint: save assembled schematic (most critical artifact)
             try:
                 if hasattr(self, '_checkpoint_mgr') and self._checkpoint_mgr:
@@ -798,10 +817,15 @@ class MAPOSchematicPipeline:
                 logger.info("CRITICAL: Using kicad-worker for image extraction (NO FALLBACKS)")
 
                 # Initialize enhanced components
+                # Save every iteration's image for debugging and Opus analysis review
+                iteration_output_dir = str(output_path.parent / "validation_iterations")
+                os.makedirs(iteration_output_dir, exist_ok=True)
+
                 image_extractor = SchematicImageExtractor(
                     kicad_worker_url=os.environ.get('KICAD_WORKER_URL', 'http://mapos-kicad-worker:8080'),
                     dpi=300,
-                    save_to_disk=False,  # Only save during debugging
+                    save_to_disk=True,
+                    output_dir=iteration_output_dir,
                 )
 
                 progress_tracker = ProgressTracker(
