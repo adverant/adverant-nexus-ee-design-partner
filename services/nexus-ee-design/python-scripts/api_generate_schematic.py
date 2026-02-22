@@ -411,6 +411,28 @@ async def run_generation(
             bom = []
             logger.warning("No BOM or subsystems provided, generating minimal schematic")
 
+        # CRITICAL FIX: If BOM is still empty but IdeationContext has BOM data,
+        # extract it. The ideation artifacts contain real component data that
+        # create_foc_esc_bom() misses when subsystem names don't match hardcoded keys.
+        if (not bom or len(bom) == 0) and ideation_context and ideation_context.has_bom_artifacts:
+            bom = [
+                {
+                    "part_number": entry.part_number,
+                    "category": entry.category,
+                    "reference": entry.reference_designator,
+                    "value": entry.value,
+                    "manufacturer": entry.manufacturer,
+                    "description": entry.description,
+                    "quantity": entry.quantity,
+                }
+                for entry in ideation_context.symbol_resolution.preferred_parts
+                if entry.part_number  # Skip entries without part numbers
+            ]
+            logger.info(
+                f"Extracted BOM with {len(bom)} components from IdeationContext "
+                f"(create_foc_esc_bom returned 0 — subsystem names likely didn't match hardcoded keys)"
+            )
+
         # Use IdeationContext design_intent_text for backward compat, or legacy create_design_intent
         if design_intent is None:
             if ideation_context:

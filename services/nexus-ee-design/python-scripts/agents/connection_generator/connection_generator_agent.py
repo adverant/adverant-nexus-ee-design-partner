@@ -498,6 +498,14 @@ class ConnectionGeneratorAgent:
         )
         valid_refs = [comp.reference for comp in components]
 
+        # Truncate design_intent to avoid bloating the prompt (was 242KB in production!)
+        # Connection generation only needs component list + brief design overview,
+        # not full ideation artifact text.
+        max_intent_chars = 3000
+        truncated_intent = design_intent[:max_intent_chars]
+        if len(design_intent) > max_intent_chars:
+            truncated_intent += f"\n... [truncated from {len(design_intent)} chars to {max_intent_chars}]"
+
         prompt = f"""You are an expert electronics engineer specializing in circuit connectivity.
 
 Generate LOGICAL CONNECTIONS for a KiCad schematic based on the design intent and components.
@@ -507,7 +515,7 @@ NOT physical wire routing. Physical routing (coordinates, waypoints, angles) wil
 handled by a separate wire router agent.
 
 DESIGN INTENT:
-{design_intent}
+{truncated_intent}
 
 ═══════════════════════════════════════════════════════════════════
 CRITICAL: VALID COMPONENT REFERENCES — USE THESE EXACT REFERENCES
@@ -681,7 +689,7 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
         """
         Parse JSON from LLM response with robust error handling.
 
-        Handles markdown code fences, truncation, etc.
+        Handles markdown code fences, truncation, conversational preambles, etc.
         """
         # Strip markdown code fences
         clean_text = text.strip()
@@ -698,11 +706,31 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
         except json.JSONDecodeError:
             pass
 
-        # Try regex extraction
+        # Try regex extraction: find outermost { ... } with "connections" key
+        json_match = re.search(r'\{[^{}]*"connections"\s*:\s*\[[\s\S]*\]\s*[^{}]*\}', clean_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: find ANY JSON object
         json_match = re.search(r'\{[\s\S]*\}', clean_text)
         if json_match:
             try:
                 return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: try to find a JSON array of connections
+        array_match = re.search(r'\[[\s\S]*\]', clean_text)
+        if array_match:
+            try:
+                parsed = json.loads(array_match.group())
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    # Check if it looks like connection data
+                    if isinstance(parsed[0], dict) and "from_ref" in parsed[0]:
+                        return {"connections": parsed}
             except json.JSONDecodeError:
                 pass
 

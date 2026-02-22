@@ -462,6 +462,20 @@ class MAPOSchematicPipeline:
                 for item in bom
             ]
 
+            # FAIL-FAST: Reject empty BOM before wasting hours on LLM calls
+            if not bom_items:
+                raise SchematicGenerationError(
+                    message=(
+                        f"BOM is empty — cannot generate schematic with 0 components. "
+                        f"Input bom had {len(bom)} raw entries but 0 converted to BOMItem objects."
+                    ),
+                    suggestion=(
+                        "1. Ensure ideation artifacts contain component/BOM data\n"
+                        "2. Verify subsystem names match expected values in create_foc_esc_bom()\n"
+                        "3. Pass BOM explicitly via the 'bom' parameter"
+                    ),
+                )
+
             # Convert connections if provided, otherwise auto-generate
             connection_objs = None
             if connections:
