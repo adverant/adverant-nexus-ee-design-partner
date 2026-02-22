@@ -2024,6 +2024,13 @@ Return ONLY the extracted (symbol ...) block:"""
             # Extract just the symbol definition from the library wrapper (deterministic parser)
             symbol_content = self._extract_inner_symbol_deterministic(sexp)
             if symbol_content:
+                # CRITICAL: Strip (embedded_fonts ...) from symbol definitions.
+                # Cached .kicad_sym files include this property, but it's NOT valid
+                # inside the lib_symbols section of a .kicad_sch file. kicad-cli will
+                # reject the schematic with "Failed to load schematic file" if present.
+                symbol_content = re.sub(
+                    r'\s*\(embedded_fonts\s+\w+\)', '', symbol_content
+                )
                 # SAFETY NET: Ensure the extracted symbol's internal name matches the dict key.
                 # If the fetcher returned e.g. a generic "R" symbol but the instance references
                 # the part number "C2012X7R1E104K", kicad-cli would fail to find the definition.

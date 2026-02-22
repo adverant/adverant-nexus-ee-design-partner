@@ -317,7 +317,40 @@ Return ONLY valid JSON, no explanations outside the JSON structure."""
                 end_idx = len(lines) - 1 if lines[-1].startswith("```") else len(lines)
                 content = "\n".join(lines[start_idx:end_idx])
 
-            return json.loads(content)
+            # Try direct parse first
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                pass
+
+            # LLM often returns JSON followed by explanatory text ("Extra data" error).
+            # Extract the first complete JSON object using brace counting.
+            brace_start = content.find("{")
+            if brace_start >= 0:
+                depth = 0
+                in_str = False
+                esc = False
+                for i in range(brace_start, len(content)):
+                    ch = content[i]
+                    if esc:
+                        esc = False
+                        continue
+                    if ch == "\\":
+                        esc = True
+                        continue
+                    if ch == '"':
+                        in_str = not in_str
+                        continue
+                    if in_str:
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return json.loads(content[brace_start : i + 1])
+
+            return json.loads(content)  # fallback — will raise JSONDecodeError
 
         except json.JSONDecodeError as e:
             logger.error(f"LLM smoke test returned invalid JSON: {e}")
