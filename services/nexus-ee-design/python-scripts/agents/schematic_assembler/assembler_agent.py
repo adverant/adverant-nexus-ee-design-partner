@@ -443,15 +443,28 @@ class SchematicAssemblerAgent:
                         item.manufacturer,
                         item.category
                     )
-                    # Extract actual symbol name from the S-expression (LLM-based)
-                    actual_symbol_name = await self._extract_symbol_name(fetched.symbol_sexp)
+                    # Extract actual symbol name DETERMINISTICALLY first (no LLM)
+                    actual_symbol_name = self._extract_symbol_name_deterministic(fetched.symbol_sexp)
+                    if not actual_symbol_name:
+                        # Deterministic extraction failed — try LLM as fallback
+                        actual_symbol_name = await self._extract_symbol_name(fetched.symbol_sexp)
+                    if not actual_symbol_name:
+                        logger.warning(
+                            f"Could not extract symbol name from fetched sexp for {item.part_number} "
+                            f"(sexp length={len(fetched.symbol_sexp)}). Using part_number as name."
+                        )
+                        actual_symbol_name = fetched.part_number
                     symbol_data = {
                         "sexp": fetched.symbol_sexp,
-                        "symbol_name": actual_symbol_name or fetched.part_number,
-                        "pins": await self._parse_pins_from_sexp(fetched.symbol_sexp),
+                        "symbol_name": actual_symbol_name,
+                        "pins": self._parse_pins_deterministic(fetched.symbol_sexp),
                         "source": fetched.source.value,
                         "metadata": fetched.metadata
                     }
+                    logger.info(
+                        f"Resolved {item.part_number} -> symbol '{actual_symbol_name}' "
+                        f"from {fetched.source.value} ({len(symbol_data['pins'])} pins)"
+                    )
                 except Exception as e:
                     logger.warning(f"Symbol fetch failed for {item.part_number}: {e}")
 
@@ -462,6 +475,49 @@ class SchematicAssemblerAgent:
             resolved[item.part_number] = symbol_data
 
         return resolved
+
+    def _extract_symbol_name_deterministic(self, sexp: str) -> Optional[str]:
+        """
+        Extract the primary symbol name from a KiCad S-expression deterministically.
+
+        Parses the sexp directly using regex — no LLM dependency. Finds the first
+        (symbol "NAME" ...) that is NOT a sub-symbol (i.e., doesn't end with _N_N suffix).
+
+        This is the PRIMARY extraction path — fast, reliable, deterministic.
+        """
+        if not sexp or not sexp.strip():
+            return None
+
+        # Find all (symbol "NAME" patterns
+        pattern = re.compile(r'\(symbol\s+"([^"]+)"')
+        for match in pattern.finditer(sexp):
+            name = match.group(1)
+            # Skip sub-symbols (e.g., "R_0_1", "STM32G431CBTxZ_1_1")
+            if not re.search(r'_\d+_\d+$', name):
+                return name
+        return None
+
+    def _rename_symbol_in_sexp(self, sexp: str, old_name: str, new_name: str) -> str:
+        """
+        Rename a symbol and all its sub-symbols in a KiCad S-expression.
+
+        Replaces:
+          (symbol "OLD_NAME" ...) → (symbol "NEW_NAME" ...)
+          (symbol "OLD_NAME_0_1" ...) → (symbol "NEW_NAME_0_1" ...)
+          (symbol "OLD_NAME_1_1" ...) → (symbol "NEW_NAME_1_1" ...)
+
+        This is a safety net for when a fetched symbol's internal name doesn't
+        match the expected lib_id in the schematic.
+        """
+        # Escape for regex
+        escaped_old = re.escape(old_name)
+        # Replace main symbol and all sub-symbols (e.g., R_0_1 → PARTNUM_0_1)
+        result = re.sub(
+            rf'\(symbol\s+"{escaped_old}((?:_\d+_\d+)?)"',
+            lambda m: f'(symbol "{new_name}{m.group(1)}"',
+            sexp
+        )
+        return result
 
     async def _extract_symbol_name(self, sexp: str) -> Optional[str]:
         """
@@ -968,6 +1024,66 @@ JSON array of pins:"""
             # Add lib symbol if not already present (keyed by actual symbol name)
             if actual_symbol_name not in main_sheet.lib_symbols:
                 main_sheet.lib_symbols[actual_symbol_name] = symbol_data.get("sexp", "")
+
+        # POST-ASSIGNMENT VALIDATION: Ensure every symbol instance's lib_id has a definition
+        referenced_ids = set(s.symbol_id for s in main_sheet.symbols)
+        defined_ids = set(main_sheet.lib_symbols.keys())
+        missing_ids = referenced_ids - defined_ids
+        if missing_ids:
+            logger.error(
+                f"SYMBOL INTEGRITY CHECK FAILED: {len(missing_ids)} lib_ids referenced "
+                f"but not defined: {sorted(missing_ids)}"
+            )
+            # Generate placeholder definitions for missing symbols
+            for mid in missing_ids:
+                logger.warning(f"Generating emergency placeholder for missing lib_symbol: {mid}")
+                placeholder_sexp = self._create_emergency_lib_symbol(mid)
+                main_sheet.lib_symbols[mid] = placeholder_sexp
+        else:
+            logger.info(
+                f"Symbol integrity check PASSED: {len(referenced_ids)} unique lib_ids, "
+                f"all have definitions"
+            )
+
+    def _create_emergency_lib_symbol(self, symbol_id: str) -> str:
+        """Create a minimal lib_symbol sexp for an undefined symbol_id.
+
+        This is a last-resort safety net — ensures kicad-cli never encounters
+        an undefined lib_id reference.
+        """
+        safe_id = symbol_id.replace('"', '\\"')
+        return f'''(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)
+  (symbol "{safe_id}" (in_bom yes) (on_board yes)
+    (property "Reference" "?" (at 0 3.81 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "{safe_id}" (at 0 -3.81 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "~" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "{safe_id}_0_1"
+      (rectangle (start -5.08 5.08) (end 5.08 -5.08)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+    )
+    (symbol "{safe_id}_1_1"
+      (pin passive line (at -7.62 2.54 0) (length 2.54)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 7.62 2.54 180) (length 2.54)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+)'''
 
     def _place_components_optimized(
         self,
@@ -1908,6 +2024,16 @@ Return ONLY the extracted (symbol ...) block:"""
             # Extract just the symbol definition from the library wrapper (deterministic parser)
             symbol_content = self._extract_inner_symbol_deterministic(sexp)
             if symbol_content:
+                # SAFETY NET: Ensure the extracted symbol's internal name matches the dict key.
+                # If the fetcher returned e.g. a generic "R" symbol but the instance references
+                # the part number "C2012X7R1E104K", kicad-cli would fail to find the definition.
+                internal_name = self._extract_symbol_name_deterministic(symbol_content)
+                if internal_name and internal_name != symbol_id:
+                    logger.warning(
+                        f"lib_symbol name mismatch: internal='{internal_name}' vs expected='{symbol_id}'. "
+                        f"Renaming symbol in sexp to match instance lib_id."
+                    )
+                    symbol_content = self._rename_symbol_in_sexp(symbol_content, internal_name, symbol_id)
                 # Normalize to pure tab indentation (base_indent=2 for inside lib_symbols)
                 normalized = self._normalize_to_tabs(symbol_content, base_indent=2)
                 lines.append(normalized)
