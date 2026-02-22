@@ -1834,6 +1834,13 @@ export function createApiRoutes(io: SocketIOServer): Router {
           // Pass AI provider preference so Python pipeline routes through
           // the user's selected provider (e.g., claude_code_max proxy pod)
           ai_provider: aiProvider || undefined,
+          // Resume from checkpoint: skip completed phases to save hours of LLM tokens
+          // Accepts: request body flag, query param, or X-Resume-Checkpoint header
+          resume_from_checkpoint: !!(
+            req.body.resume_from_checkpoint
+            || req.query.resume === 'true'
+            || req.headers['x-resume-checkpoint'] === 'true'
+          ),
         };
 
         // IMMEDIATELY return operationId to frontend so it can subscribe to WebSocket

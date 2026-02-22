@@ -306,6 +306,7 @@ async def run_generation(
     ralph_max_iterations: int = 100,  # Max Ralph Loop iterations
     ralph_target_score: float = 100.0,  # Target score (0-100)
     ralph_plateau_threshold: int = 20,  # Stop if no improvement for N iterations
+    resume_from_checkpoint: bool = False,  # Resume from last checkpoint (skip completed phases)
 ) -> Dict[str, Any]:
     """
     Run the MAPO schematic generation pipeline.
@@ -488,7 +489,10 @@ async def run_generation(
                 await orchestrator.close()
         else:
             # Traditional single-pass pipeline
-            logger.info("Using traditional single-pass MAPO pipeline")
+            if resume_from_checkpoint:
+                logger.info("Using traditional MAPO pipeline with CHECKPOINT RESUME")
+            else:
+                logger.info("Using traditional single-pass MAPO pipeline")
 
             pipeline = MAPOSchematicPipeline(config, progress_emitter=progress_emitter)
             try:
@@ -498,6 +502,7 @@ async def run_generation(
                     design_name=design_name,
                     skip_validation=skip_validation,
                     ideation_context=ideation_context,
+                    resume_from_checkpoint=resume_from_checkpoint,
                 )
             finally:
                 await pipeline.close()
@@ -678,6 +683,11 @@ def main():
         action="store_true",
         help="Pretty print JSON output"
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from last checkpoint (skip completed pipeline phases)"
+    )
 
     args = parser.parse_args()
 
@@ -724,6 +734,15 @@ def main():
         # (Python caches imports, so env vars set after import don't affect module-level vars)
         _patch_agent_providers(proxy_url)
 
+    # Determine resume mode: CLI flag OR JSON input OR env var
+    resume = (
+        args.resume
+        or params.get("resume_from_checkpoint", False)
+        or os.environ.get("RESUME_FROM_CHECKPOINT", "").lower() in ("1", "true", "yes")
+    )
+    if resume:
+        logger.info("RESUME MODE: Will attempt to load and skip completed phases from checkpoint")
+
     # Run async generation
     result = asyncio.run(run_generation(
         bom=params.get("bom"),
@@ -741,6 +760,7 @@ def main():
         ralph_max_iterations=params.get("ralph_max_iterations", 100),
         ralph_target_score=params.get("ralph_target_score", 100.0),
         ralph_plateau_threshold=params.get("ralph_plateau_threshold", 20),
+        resume_from_checkpoint=resume,
     ))
 
     # Output JSON result to stdout

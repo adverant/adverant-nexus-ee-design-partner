@@ -90,6 +90,40 @@ class CheckpointManager:
             logger.warning(f"Failed to load checkpoint: {exc}")
             return None
 
+    def has_phase(self, phase: str) -> bool:
+        """Check if a specific phase was completed in the checkpoint."""
+        checkpoint = self.load_checkpoint()
+        if not checkpoint:
+            return False
+        return phase in checkpoint.get("completed_phases", [])
+
+    def get_phase_data(self, phase: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the data saved for a specific completed phase.
+
+        The checkpoint stores the data from the most recent save_checkpoint() call.
+        Phase-specific data is stored under the "data" key.
+        """
+        checkpoint = self.load_checkpoint()
+        if not checkpoint:
+            return None
+        if phase not in checkpoint.get("completed_phases", []):
+            return None
+        return checkpoint.get("data")
+
+    def increment_resume_count(self) -> int:
+        """Increment and return the number of resume attempts for this operation."""
+        checkpoint = self.load_checkpoint()
+        if not checkpoint:
+            return 0
+        count = checkpoint.get("resume_count", 0) + 1
+        checkpoint["resume_count"] = count
+        # Atomic write
+        tmp_path = self.checkpoint_file.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(checkpoint, indent=2, default=str))
+        tmp_path.rename(self.checkpoint_file)
+        return count
+
     def cleanup(self) -> None:
         """Remove checkpoint directory for this operation."""
         if self.checkpoint_dir.exists():

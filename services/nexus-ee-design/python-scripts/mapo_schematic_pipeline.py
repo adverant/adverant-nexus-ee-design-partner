@@ -378,6 +378,7 @@ class MAPOSchematicPipeline:
         reference_images: Optional[List[bytes]] = None,
         skip_validation: bool = False,
         ideation_context: Optional[IdeationContext] = None,
+        resume_from_checkpoint: bool = False,
     ) -> PipelineResult:
         """
         Generate a validated schematic from BOM and design intent.
@@ -395,6 +396,8 @@ class MAPOSchematicPipeline:
                 When provided, enriches every pipeline phase with structured
                 data (BOM hints, explicit connections, placement hints,
                 validation criteria) instead of relying solely on text.
+            resume_from_checkpoint: If True, try to load checkpoint and skip
+                completed phases. Saves hours of LLM token re-generation.
 
         Returns:
             PipelineResult with schematic and validation info
@@ -405,6 +408,36 @@ class MAPOSchematicPipeline:
         # Initialize checkpoint manager using progress emitter's operation_id (if available)
         op_id = getattr(self._progress, 'operation_id', None) or f"pipeline-{os.getpid()}"
         self._checkpoint_mgr = CheckpointManager(op_id)
+
+        # --- RESUME LOGIC: Load checkpoint and determine which phases to skip ---
+        _resumed_checkpoint: Optional[Dict[str, Any]] = None
+        _completed_phases: List[str] = []
+        if resume_from_checkpoint:
+            _resumed_checkpoint = self._checkpoint_mgr.load_checkpoint()
+            if _resumed_checkpoint:
+                _completed_phases = _resumed_checkpoint.get("completed_phases", [])
+                resume_count = self._checkpoint_mgr.increment_resume_count()
+                logger.info(
+                    f"RESUMING from checkpoint: completed_phases={_completed_phases}, "
+                    f"resume_attempt={resume_count}"
+                )
+                self._emit_progress(
+                    SchematicPhase.SYMBOLS, 0,
+                    f"Resuming from checkpoint (skipping: {', '.join(_completed_phases)})",
+                    event_type="checkpoint_resume",
+                    resumed_phases=_completed_phases,
+                    resume_count=resume_count,
+                )
+
+                if resume_count > 3:
+                    logger.warning(
+                        f"Max resume attempts ({resume_count}) exceeded — starting fresh"
+                    )
+                    self._checkpoint_mgr.cleanup()
+                    _resumed_checkpoint = None
+                    _completed_phases = []
+            else:
+                logger.info("Resume requested but no checkpoint found — running from scratch")
 
         try:
             # Ensure initialized
@@ -447,7 +480,38 @@ class MAPOSchematicPipeline:
                     SchematicPhase.CONNECTIONS, 100,
                     f"Using {len(connection_objs)} explicit connections"
                 )
-            else:
+            elif "connections" in _completed_phases and _resumed_checkpoint:
+                # RESUME: Restore connections from checkpoint (skip LLM re-generation)
+                checkpoint_data = _resumed_checkpoint.get("data", {})
+                saved_connections = checkpoint_data.get("connections", [])
+                if saved_connections:
+                    connection_objs = [
+                        Connection(
+                            from_ref=c.get("from_ref", ""),
+                            from_pin=c.get("from_pin", ""),
+                            to_ref=c.get("to_ref", ""),
+                            to_pin=c.get("to_pin", ""),
+                            net_name=c.get("net_name"),
+                        )
+                        for c in saved_connections
+                    ]
+                    logger.info(
+                        f"RESUMED {len(connection_objs)} connections from checkpoint "
+                        f"(skipped LLM generation — saved hours of tokens)"
+                    )
+                    self._emit_progress(
+                        SchematicPhase.CONNECTIONS, 100,
+                        f"Restored {len(connection_objs)} connections from checkpoint",
+                        event_type="checkpoint_resume",
+                    )
+                else:
+                    logger.warning(
+                        "Checkpoint says connections complete but no data found — regenerating"
+                    )
+                    _completed_phases.remove("connections")
+                    # Fall through to normal generation below
+
+            if connection_objs is None and "connections" not in _completed_phases:
                 # Auto-generate connections from BOM and design intent
                 self._start_phase(SchematicPhase.CONNECTIONS, "Generating connections via LLM...")
                 logger.info("Auto-generating connections from BOM and design intent...")
@@ -537,101 +601,128 @@ class MAPOSchematicPipeline:
 
             logger.info(f"Starting schematic generation: {len(bom_items)} components")
 
-            # Phase 1: Assemble schematic (uses Enhanced Wire Router internally)
-            self._start_phase(SchematicPhase.ASSEMBLY, "Assembling schematic structure...")
-            sheets = await self._assembler.assemble_schematic(
-                bom=bom_items,
-                block_diagram=block_diagram_obj,
-                connections=connection_objs,
-                design_name=design_name
-            )
+            # Initialize sheets (may be populated by assembly or left empty on resume)
+            sheets: List[SchematicSheet] = []
 
-            result.sheets = sheets
-            self._complete_phase(
-                SchematicPhase.ASSEMBLY,
-                f"Assembled {len(sheets)} sheet(s) with {len(sheets[0].symbols) if sheets else 0} components"
-            )
+            # --- RESUME: If assembly already completed, skip to output generation ---
+            _skip_to_output = False
+            _resumed_schematic_content: Optional[str] = None
+            if "assembly" in _completed_phases and _resumed_checkpoint:
+                checkpoint_data = _resumed_checkpoint.get("data", {})
+                _resumed_schematic_content = checkpoint_data.get("schematic_content")
+                if _resumed_schematic_content and len(_resumed_schematic_content) > 100:
+                    _skip_to_output = True
+                    logger.info(
+                        f"RESUMED schematic from checkpoint ({len(_resumed_schematic_content)} chars) "
+                        f"— skipping symbol resolution, assembly, and layout phases"
+                    )
+                    self._emit_progress(
+                        SchematicPhase.ASSEMBLY, 100,
+                        "Restored assembled schematic from checkpoint",
+                        event_type="checkpoint_resume",
+                    )
+                else:
+                    logger.warning("Checkpoint says assembly complete but no schematic_content — re-assembling")
+
+            if not _skip_to_output:
+                # Phase 1: Assemble schematic (uses Enhanced Wire Router internally)
+                self._start_phase(SchematicPhase.ASSEMBLY, "Assembling schematic structure...")
+                sheets = await self._assembler.assemble_schematic(
+                    bom=bom_items,
+                    block_diagram=block_diagram_obj,
+                    connections=connection_objs,
+                    design_name=design_name
+                )
+
+                result.sheets = sheets
+                self._complete_phase(
+                    SchematicPhase.ASSEMBLY,
+                    f"Assembled {len(sheets)} sheet(s) with {len(sheets[0].symbols) if sheets else 0} components"
+                )
 
             # ========================================
             # VALIDATION GATE: Symbol Quality Check
+            # (Skipped when resuming from assembly checkpoint)
             # ========================================
-            # This gate prevents saving schematics with all-placeholder symbols
-            if sheets and sheets[0].symbols:
-                placeholder_symbols = [
-                    s for s in sheets[0].symbols
-                    if s.quality == SymbolQuality.PLACEHOLDER
-                ]
-                valid_symbols = [
-                    s for s in sheets[0].symbols
-                    if s.quality != SymbolQuality.PLACEHOLDER
-                ]
-
-                # Log symbol resolution summary
-                logger.info(f"Symbol Resolution Summary:")
-                logger.info(f"  Total components: {len(sheets[0].symbols)}")
-                logger.info(f"  Valid symbols: {len(valid_symbols)}")
-                logger.info(f"  Placeholder symbols: {len(placeholder_symbols)}")
-
-                # Track statistics
-                for symbol in sheets[0].symbols:
-                    if symbol.quality == SymbolQuality.VERIFIED:
-                        result.symbols_fetched += 1
-                    elif symbol.quality == SymbolQuality.CACHED:
-                        result.symbols_from_cache += 1
-                    elif symbol.quality in (SymbolQuality.LLM_GENERATED, SymbolQuality.PLACEHOLDER):
-                        result.symbols_generated += 1
-
-                # CRITICAL: Fail if ALL symbols are placeholders
-                if len(valid_symbols) == 0 and len(placeholder_symbols) > 0:
-                    failed_components = [
-                        {
-                            "reference": s.reference,
-                            "part_number": s.part_number,
-                            "error": s.resolution_error or "All symbol sources failed"
-                        }
-                        for s in placeholder_symbols
+            if not _skip_to_output:
+                # This gate prevents saving schematics with all-placeholder symbols
+                if sheets and sheets[0].symbols:
+                    placeholder_symbols = [
+                        s for s in sheets[0].symbols
+                        if s.quality == SymbolQuality.PLACEHOLDER
+                    ]
+                    valid_symbols = [
+                        s for s in sheets[0].symbols
+                        if s.quality != SymbolQuality.PLACEHOLDER
                     ]
 
-                    error_msg = (
-                        f"Symbol resolution failed for all {len(bom_items)} components. "
-                        f"No valid symbols could be fetched from any source."
-                    )
-                    logger.error(error_msg)
+                    # Log symbol resolution summary
+                    logger.info(f"Symbol Resolution Summary:")
+                    logger.info(f"  Total components: {len(sheets[0].symbols)}")
+                    logger.info(f"  Valid symbols: {len(valid_symbols)}")
+                    logger.info(f"  Placeholder symbols: {len(placeholder_symbols)}")
 
-                    raise SchematicGenerationError(
-                        message=error_msg,
-                        failed_components=failed_components,
-                        validation_errors=[
-                            f"Tried sources: KiCad Worker, Local Cache, GitHub, SnapEDA, LLM",
-                            f"All {len(placeholder_symbols)} components returned placeholders"
-                        ],
-                        suggestion=(
-                            "1. Verify KICAD_WORKER_URL is accessible from this pod\n"
-                            "2. Check that mapos-kicad-worker service is running\n"
-                            "3. Configure OPENROUTER_API_KEY or ANTHROPIC_API_KEY for LLM fallback"
+                    # Track statistics
+                    for symbol in sheets[0].symbols:
+                        if symbol.quality == SymbolQuality.VERIFIED:
+                            result.symbols_fetched += 1
+                        elif symbol.quality == SymbolQuality.CACHED:
+                            result.symbols_from_cache += 1
+                        elif symbol.quality in (SymbolQuality.LLM_GENERATED, SymbolQuality.PLACEHOLDER):
+                            result.symbols_generated += 1
+
+                    # CRITICAL: Fail if ALL symbols are placeholders
+                    if len(valid_symbols) == 0 and len(placeholder_symbols) > 0:
+                        failed_components = [
+                            {
+                                "reference": s.reference,
+                                "part_number": s.part_number,
+                                "error": s.resolution_error or "All symbol sources failed"
+                            }
+                            for s in placeholder_symbols
+                        ]
+
+                        error_msg = (
+                            f"Symbol resolution failed for all {len(bom_items)} components. "
+                            f"No valid symbols could be fetched from any source."
                         )
-                    )
+                        logger.error(error_msg)
 
-                # WARN if any symbols are placeholders (but still proceed)
-                if len(placeholder_symbols) > 0:
-                    logger.warning(
-                        f"{len(placeholder_symbols)} of {len(sheets[0].symbols)} components "
-                        f"are using placeholder symbols and need manual resolution"
+                        raise SchematicGenerationError(
+                            message=error_msg,
+                            failed_components=failed_components,
+                            validation_errors=[
+                                f"Tried sources: KiCad Worker, Local Cache, GitHub, SnapEDA, LLM",
+                                f"All {len(placeholder_symbols)} components returned placeholders"
+                            ],
+                            suggestion=(
+                                "1. Verify KICAD_WORKER_URL is accessible from this pod\n"
+                                "2. Check that mapos-kicad-worker service is running\n"
+                                "3. Configure OPENROUTER_API_KEY or ANTHROPIC_API_KEY for LLM fallback"
+                            )
+                        )
+
+                    # WARN if any symbols are placeholders (but still proceed)
+                    if len(placeholder_symbols) > 0:
+                        logger.warning(
+                            f"{len(placeholder_symbols)} of {len(sheets[0].symbols)} components "
+                            f"are using placeholder symbols and need manual resolution"
+                        )
+                        for s in placeholder_symbols:
+                            error_msg = f"Placeholder symbol for {s.reference} ({s.part_number})"
+                            result.errors.append(error_msg)
+                            logger.warning(f"  - {s.reference} ({s.part_number}): {s.resolution_error or 'Unknown'}")
+                else:
+                    # No symbols at all - this is also an error
+                    raise SchematicGenerationError(
+                        message="Schematic assembly produced no symbols",
+                        validation_errors=["BOM may be empty or all components filtered out"],
+                        suggestion="Verify BOM contains valid component entries"
                     )
-                    for s in placeholder_symbols:
-                        error_msg = f"Placeholder symbol for {s.reference} ({s.part_number})"
-                        result.errors.append(error_msg)
-                        logger.warning(f"  - {s.reference} ({s.part_number}): {s.resolution_error or 'Unknown'}")
-            else:
-                # No symbols at all - this is also an error
-                raise SchematicGenerationError(
-                    message="Schematic assembly produced no symbols",
-                    validation_errors=["BOM may be empty or all components filtered out"],
-                    suggestion="Verify BOM contains valid component entries"
-                )
 
             # Phase 2: Layout Optimization (IPC-2221/IEEE 315 signal flow)
-            if self._layout_optimizer:
+            # (Skipped when resuming from assembly checkpoint)
+            if not _skip_to_output and self._layout_optimizer:
                 self._start_phase(SchematicPhase.LAYOUT, "Running layout optimization...")
                 logger.info("Running layout optimization...")
 
@@ -681,7 +772,8 @@ class MAPOSchematicPipeline:
                     logger.warning(f"Checkpoint save (layout) failed: {cp_err}")
 
             # Phase 3: Standards Compliance Check (IEC 60750/IEEE 315)
-            if self._standards_compliance:
+            # (Skipped when resuming from assembly checkpoint)
+            if not _skip_to_output and self._standards_compliance:
                 logger.info("Running standards compliance check...")
                 for sheet in sheets:
                     compliance_report = self._standards_compliance.validate(
@@ -698,11 +790,21 @@ class MAPOSchematicPipeline:
 
             # Generate output file
             output_path = self.config.output_dir / f"{design_name}.kicad_sch"
-            schematic_content = await self._assembler.generate_kicad_sch(sheets[0])
-            output_path.write_text(schematic_content)
-            result.schematic_path = output_path
 
-            logger.info(f"Schematic assembled: {output_path}")
+            if _skip_to_output and _resumed_schematic_content:
+                # RESUME: Write checkpoint schematic directly to output file
+                schematic_content = _resumed_schematic_content
+                output_path.write_text(schematic_content)
+                result.schematic_path = output_path
+                logger.info(
+                    f"Wrote resumed schematic to {output_path} "
+                    f"({len(schematic_content)} chars from checkpoint)"
+                )
+            else:
+                schematic_content = await self._assembler.generate_kicad_sch(sheets[0])
+                output_path.write_text(schematic_content)
+                result.schematic_path = output_path
+                logger.info(f"Schematic assembled: {output_path}")
 
             # Validate: symbol instance count in output matches BOM
             import re as _re
@@ -724,14 +826,24 @@ class MAPOSchematicPipeline:
                 )
 
             # Checkpoint: save assembled schematic (most critical artifact)
+            # Include connection data so resume from assembly also has connections available
             try:
                 if hasattr(self, '_checkpoint_mgr') and self._checkpoint_mgr:
+                    checkpoint_data = {
+                        "schematic_content": schematic_content,
+                        "output_path": str(output_path),
+                    }
+                    # Preserve connection data for potential re-use on resume
+                    if connection_objs:
+                        checkpoint_data["connections"] = [
+                            {"from_ref": c.from_ref, "from_pin": c.from_pin,
+                             "to_ref": c.to_ref, "to_pin": c.to_pin,
+                             "net_name": c.net_name}
+                            for c in connection_objs
+                        ]
                     self._checkpoint_mgr.save_checkpoint(
                         phase="assembly",
-                        data={
-                            "schematic_content": schematic_content,
-                            "output_path": str(output_path),
-                        },
+                        data=checkpoint_data,
                         completed_phases=["connections", "assembly"],
                     )
             except Exception as cp_err:
@@ -1024,6 +1136,14 @@ class MAPOSchematicPipeline:
 
         finally:
             result.total_time_seconds = (datetime.now() - start_time).total_seconds()
+
+            # Clean up checkpoint on success (no longer needed)
+            if result.success and self._checkpoint_mgr:
+                try:
+                    self._checkpoint_mgr.cleanup()
+                    logger.info("Pipeline succeeded — checkpoint cleaned up")
+                except Exception:
+                    pass  # Non-critical
 
             # Emit completion if successful
             if result.success and self._progress:
