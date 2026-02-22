@@ -1837,6 +1837,52 @@ Return ONLY the extracted (symbol ...) block:"""
             logger.error(f"LLM symbol extraction failed: {e}")
             return None
 
+    @staticmethod
+    def _normalize_sym_to_sch_format(sym_content: str) -> str:
+        """Normalize .kicad_sym boolean flags to .kicad_sch lib_symbols format.
+
+        KiCad library files (.kicad_sym) use (hide yes), (italic yes), (bold yes) as
+        sub-expressions, but when embedded in a .kicad_sch lib_symbols section, kicad-cli
+        8.x expects bare tokens: hide, italic, bold.
+
+        Transforms:
+          (pin_numbers (hide yes))    -> (pin_numbers hide)
+          (pin_names (offset X) (hide yes)) -> (pin_names (offset X) hide)
+          (pin_names (offset X))  (multiline) -> (pin_names (offset X))  (single line)
+          (italic yes)                -> italic   (inside font)
+          (bold yes)                  -> bold     (inside font)
+          (pin ... (hide yes) ...)    -> (pin ... hide ...)  (hidden pins)
+        """
+        # 1. pin_numbers: multiline (pin_numbers\n(hide yes)\n) -> (pin_numbers hide)
+        sym_content = re.sub(
+            r'\(pin_numbers\s*\n\s*\(hide\s+yes\)\s*\n\s*\)',
+            '(pin_numbers hide)',
+            sym_content,
+        )
+        # 2. pin_names with (hide yes): collapse to single line with bare hide
+        sym_content = re.sub(
+            r'\(pin_names\s*\n\s*(\(offset\s+[\d.]+\))\s*\n\s*\(hide\s+yes\)\s*\n\s*\)',
+            r'(pin_names \1 hide)',
+            sym_content,
+        )
+        # 3. pin_names multiline without hide: collapse to single line
+        sym_content = re.sub(
+            r'\(pin_names\s*\n\s*(\(offset\s+[\d.]+\))\s*\n\s*\)',
+            r'(pin_names \1)',
+            sym_content,
+        )
+        # 4. (italic yes) -> italic (bare token in font context)
+        sym_content = re.sub(r'\(italic\s+yes\)', 'italic', sym_content)
+        # 5. (bold yes) -> bold (bare token in font context)
+        sym_content = re.sub(r'\(bold\s+yes\)', 'bold', sym_content)
+        # 6. (hide yes) inside pin definitions (appears after (length ...), before (name ...))
+        sym_content = re.sub(
+            r'(\(length\s+[\d.]+\))\s*\n(\s*)\(hide\s+yes\)',
+            r'\1\n\2hide',
+            sym_content,
+        )
+        return sym_content
+
     def _extract_inner_symbol_deterministic(self, sexp: str) -> Optional[str]:
         """Extract inner (symbol ...) block from kicad_symbol_lib wrapper using paren counting.
 
@@ -2031,6 +2077,11 @@ Return ONLY the extracted (symbol ...) block:"""
                 symbol_content = re.sub(
                     r'\s*\(embedded_fonts\s+\w+\)', '', symbol_content
                 )
+                # CRITICAL: Normalize .kicad_sym boolean flags to .kicad_sch format.
+                # Cached .kicad_sym files use (hide yes), (italic yes), (bold yes) as
+                # sub-expressions, but kicad-cli expects bare tokens hide/italic/bold
+                # in pin_numbers, pin_names, pin defs, and font contexts.
+                symbol_content = self._normalize_sym_to_sch_format(symbol_content)
                 # SAFETY NET: Ensure the extracted symbol's internal name matches the dict key.
                 # If the fetcher returned e.g. a generic "R" symbol but the instance references
                 # the part number "C2012X7R1E104K", kicad-cli would fail to find the definition.
