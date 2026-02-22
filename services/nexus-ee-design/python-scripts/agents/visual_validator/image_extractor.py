@@ -154,7 +154,7 @@ class SchematicImageExtractor:
         self.dpi = dpi
         self.timeout = timeout
         self.save_to_disk = save_to_disk
-        self.output_dir = output_dir or Path(tempfile.gettempdir()) / "mapo_images"
+        self.output_dir = Path(output_dir) if output_dir else Path(tempfile.gettempdir()) / "mapo_images"
         self._http_client: Optional[httpx.AsyncClient] = None
 
         logger.info(

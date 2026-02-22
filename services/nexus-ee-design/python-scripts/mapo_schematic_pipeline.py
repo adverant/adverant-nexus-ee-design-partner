@@ -944,7 +944,7 @@ class MAPOSchematicPipeline:
 
                 # Initialize enhanced components
                 # Save every iteration's image for debugging and Opus analysis review
-                iteration_output_dir = str(output_path.parent / "validation_iterations")
+                iteration_output_dir = output_path.parent / "validation_iterations"
                 os.makedirs(iteration_output_dir, exist_ok=True)
 
                 image_extractor = SchematicImageExtractor(

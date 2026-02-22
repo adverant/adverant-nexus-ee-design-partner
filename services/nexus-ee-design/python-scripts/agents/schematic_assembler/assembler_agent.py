@@ -66,7 +66,7 @@ try:
 except ImportError:
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "anthropic/claude-opus-4.6"
+OPENROUTER_MODEL = "claude-opus-4-6"
 
 
 class PinType(Enum):
