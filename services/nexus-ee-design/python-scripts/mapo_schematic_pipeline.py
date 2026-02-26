@@ -648,6 +648,29 @@ class MAPOSchematicPipeline:
                         for gc in generated_connections
                     ]
                     logger.info(f"Auto-generated {len(connection_objs)} connections")
+
+                    # Compute connection coverage: fraction of BOM components with at least one connection
+                    connected_refs = set()
+                    for c in connection_objs:
+                        connected_refs.add(c.from_ref)
+                        connected_refs.add(c.to_ref)
+                    # Use component_pins keys (reference designators like U1, R1, C1)
+                    # because BOM dicts from create_foc_esc_bom() lack 'reference' keys
+                    if component_pins:
+                        bom_refs = set(component_pins.keys())
+                    else:
+                        bom_refs = {comp.get("reference", "") for comp in bom if comp.get("reference")}
+                    if bom_refs:
+                        matched = connected_refs & bom_refs
+                        result.connection_coverage = len(matched) / len(bom_refs)
+                    else:
+                        # Fallback: if no ref designators available, use ratio of connected components
+                        result.connection_coverage = min(1.0, len(connected_refs) / max(1, len(bom)))
+                    logger.info(
+                        f"Connection coverage: {result.connection_coverage:.0%} "
+                        f"({len(connected_refs & bom_refs) if bom_refs else len(connected_refs)}/{len(bom_refs) if bom_refs else len(bom)} BOM components connected)"
+                    )
+
                     self._complete_phase(
                         SchematicPhase.CONNECTIONS,
                         f"Generated {len(connection_objs)} connections"
@@ -1129,6 +1152,9 @@ class MAPOSchematicPipeline:
                 except StagnationError as e:
                     logger.error(f"VALIDATION STAGNATION DETECTED")
                     logger.error(str(e))
+                    # Capture best visual score achieved before stagnation
+                    result.visual_score = progress_tracker.best_score
+                    logger.info(f"Visual score (before stagnation): {result.visual_score:.1%}")
                     # Continue with current schematic, but log the issue
                     result.errors.append(f"Validation stagnated: {e.reason.value}")
 
@@ -1141,6 +1167,10 @@ class MAPOSchematicPipeline:
                         "Error type: %s, Error: %s",
                         type(e).__name__, e
                     )
+                    # Capture best visual score achieved before error
+                    if progress_tracker and progress_tracker.best_score > 0:
+                        result.visual_score = progress_tracker.best_score
+                        logger.info(f"Visual score (before error): {result.visual_score:.1%}")
                     result.errors.append(f"Visual validation skipped: {type(e).__name__}: {e}")
                     # Continue with current schematic — visual validation is
                     # an improvement step, not a gate. The schematic was already
