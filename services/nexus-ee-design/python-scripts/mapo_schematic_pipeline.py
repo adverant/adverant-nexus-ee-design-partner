@@ -695,15 +695,12 @@ class MAPOSchematicPipeline:
                         logger.warning(f"Checkpoint save (connections) failed: {cp_err}")
                 except Exception as e:
                     # CRITICAL: LLM connection generation failed
-                    # This means NO signal connections were generated - schematic will have 0 wires!
                     error_msg = (
                         f"CRITICAL: LLM connection generation FAILED: {e}\n"
-                        f"  This means NO signal connections were generated.\n"
-                        f"  Only power connections (VCC/GND) will be available.\n"
-                        f"  Schematic will have 0 signal wires!\n"
-                        f"  Check: OPENROUTER_API_KEY, network connectivity, rate limits."
+                        f"  Check: Claude proxy connectivity, rate limits, prompt format."
                     )
                     logger.error(error_msg)
+                    result.errors.append(f"LLM Connection Generation Failed: {str(e)}")
 
                     # Emit error event so frontend shows clear failure message
                     self._emit_progress(
@@ -712,13 +709,57 @@ class MAPOSchematicPipeline:
                         event_type=SchematicEventType.ERROR.value
                     )
 
-                    # Track error for result summary
-                    if not hasattr(self, '_pipeline_errors'):
-                        self._pipeline_errors = []
-                    self._pipeline_errors.append(f"LLM Connection Generation Failed: {str(e)}")
-
-                    # Fallback to empty (but now with explicit error logging)
+                    # FALLBACK: Try to build connections from seed data (ideation hints)
+                    # This gives us at least power connections and explicit signal paths
                     connection_objs = []
+                    if seed_connections and hasattr(seed_connections, 'explicit_connections'):
+                        try:
+                            from agents.connection_generator.connection_generator_agent import (
+                                ConnectionGeneratorAgent,
+                            )
+                            fallback_gen = ConnectionGeneratorAgent(
+                                llm_base_url=self.config.llm_base_url,
+                                llm_api_key=self.config.llm_api_key,
+                                llm_model=self.config.llm_model,
+                            )
+                            components = fallback_gen._extract_component_info(
+                                bom, component_pins
+                            )
+                            # Generate rule-based power + bypass connections
+                            power_conns = fallback_gen._generate_power_connections(components)
+                            bypass_conns = fallback_gen._generate_bypass_cap_connections(components)
+                            seed_conns = fallback_gen._convert_seed_connections(
+                                seed_connections, components, component_pins
+                            )
+                            all_fallback = power_conns + bypass_conns + seed_conns
+                            connection_objs = [
+                                Connection(
+                                    from_ref=gc.from_ref,
+                                    from_pin=gc.from_pin,
+                                    to_ref=gc.to_ref,
+                                    to_pin=gc.to_pin,
+                                    net_name=gc.net_name,
+                                )
+                                for gc in all_fallback
+                            ]
+                            logger.warning(
+                                f"FALLBACK: Using {len(connection_objs)} connections "
+                                f"from seed data + rule-based generation "
+                                f"({len(power_conns)} power, {len(bypass_conns)} bypass, "
+                                f"{len(seed_conns)} seed)"
+                            )
+                            result.errors.append(
+                                f"Using {len(connection_objs)} fallback connections "
+                                f"(no LLM signal connections)"
+                            )
+                        except Exception as fallback_err:
+                            logger.error(f"Seed connection fallback also failed: {fallback_err}")
+                            result.errors.append(f"Seed fallback failed: {fallback_err}")
+                    else:
+                        logger.error(
+                            "No seed connections available for fallback — "
+                            "schematic will have ZERO wires"
+                        )
 
             # Convert block diagram if provided
             block_diagram_obj = None
@@ -1301,6 +1342,15 @@ class MAPOSchematicPipeline:
 
         finally:
             result.total_time_seconds = (datetime.now() - start_time).total_seconds()
+
+            # Propagate _pipeline_errors to result.errors (these were previously lost)
+            if hasattr(self, '_pipeline_errors') and self._pipeline_errors:
+                for pe in self._pipeline_errors:
+                    if pe not in result.errors:
+                        result.errors.append(pe)
+                logger.warning(
+                    f"Propagated {len(self._pipeline_errors)} pipeline errors to result"
+                )
 
             # Clean up checkpoint on success (no longer needed)
             if result.success and self._checkpoint_mgr:

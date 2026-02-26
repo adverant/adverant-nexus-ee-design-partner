@@ -26,9 +26,11 @@ Version: 3.2 (MAPO v3.2 - Logical Connection Generation)
 import asyncio
 import json
 import logging
+import pathlib
 import re
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -437,6 +439,27 @@ class ConnectionGeneratorAgent:
                 if attempt == MAX_WIRE_GENERATION_RETRIES:
                     raise
                 continue
+
+            # Diagnostic: save raw LLM connection data to file for debugging
+            try:
+                diag_path = pathlib.Path("/data/output/connection_diagnostics.json")
+                diag_path.parent.mkdir(parents=True, exist_ok=True)
+                comp_refs = [c.reference for c in components]
+                diag_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "attempt": attempt,
+                    "raw_connection_count": len(connections_data),
+                    "component_refs": comp_refs,
+                    "sample_connections": connections_data[:5] if connections_data else [],
+                    "sample_connection_refs": [
+                        {"from": c.get("from_ref"), "to": c.get("to_ref")}
+                        for c in connections_data[:10]
+                    ] if connections_data else [],
+                }
+                diag_path.write_text(json.dumps(diag_data, indent=2, default=str))
+                logger.info(f"Connection diagnostics saved to {diag_path}")
+            except Exception as diag_err:
+                logger.warning(f"Failed to save diagnostics: {diag_err}")
 
             # Remap any LLM-invented references back to actual BOM references
             connections_data = self._remap_references(connections_data, components)
