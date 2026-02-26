@@ -235,186 +235,539 @@ class LayoutOptimizerAgent:
         placement_hints: Optional[Any] = None
     ) -> Dict[str, Tuple[float, float]]:
         """
-        Calculate component positions based on signal flow analysis.
+        Calculate component positions using subsystem-based placement.
 
-        Strategy:
-        1. Place components by layer (left to right)
-        2. Within each layer, arrange by functional group
-        3. Apply proximity constraints
-        4. Apply separation constraints
-        5. Power components at top, signals in middle, passives below
+        Strategy (MAPO v3.2 — rewritten for professional layout):
+        1. Build subsystem regions from ideation or inferred from BOM/groups
+        2. Place ICs as anchors within their subsystem region
+        3. Place passives relative to their connected IC (bypass caps close)
+        4. Place connectors at canvas edges (inputs left, outputs right)
+        5. Collision resolution pass
         """
-        positions = {}
+        positions: Dict[str, Tuple[float, float]] = {}
 
-        # Step 1: Place by layer (horizontal signal flow)
-        layer_positions = self._place_by_layer(analysis.component_layers)
-        positions.update(layer_positions)
+        # Build symbol lookup: ref -> symbol
+        sym_lookup = {s.reference: s for s in symbols}
 
-        # Step 2: Adjust for functional grouping
-        if analysis.functional_groups:
-            self._adjust_for_functional_groups(
-                positions,
-                analysis.functional_groups,
-                placement_hints
+        # Build connectivity map: ref -> set of connected refs
+        connectivity: Dict[str, Set[str]] = {}
+        for path in analysis.signal_paths:
+            refs = [path.source_component] + path.sink_components
+            for r in refs:
+                if r not in connectivity:
+                    connectivity[r] = set()
+            for r in refs[1:]:
+                connectivity[path.source_component].add(r)
+                if r not in connectivity:
+                    connectivity[r] = set()
+                connectivity[r].add(path.source_component)
+
+        # Classify every component
+        ic_refs = []
+        passive_refs = []  # R, C, L
+        connector_refs = []  # J
+        power_refs = []  # Voltage regulators, power-related ICs
+        other_refs = []
+        for s in symbols:
+            ref = s.reference
+            if ref.startswith('J'):
+                connector_refs.append(ref)
+            elif ref.startswith('U'):
+                ic_refs.append(ref)
+            elif ref.startswith(('R', 'C', 'L')):
+                passive_refs.append(ref)
+            elif ref.startswith(('D', 'Q')):
+                other_refs.append(ref)
+            else:
+                other_refs.append(ref)
+
+        # Check for power-related ICs in separation_zones
+        power_zone_refs = set(analysis.separation_zones.get('power', []))
+        power_ics = [r for r in ic_refs if r in power_zone_refs]
+        signal_ics = [r for r in ic_refs if r not in power_zone_refs]
+
+        logger.info(
+            f"Component classification: {len(signal_ics)} signal ICs, {len(power_ics)} power ICs, "
+            f"{len(passive_refs)} passives, {len(connector_refs)} connectors, {len(other_refs)} other"
+        )
+
+        # --- Step 1: Build subsystem regions ---
+        # Use functional groups from analysis (enriched by ideation if available)
+        subsystems = self._build_subsystem_regions(
+            analysis.functional_groups, symbols, signal_ics, power_ics,
+            connector_refs, passive_refs, other_refs, connectivity
+        )
+
+        logger.info(f"Built {len(subsystems)} subsystem regions for placement")
+
+        # --- Step 2: Allocate non-overlapping rectangular regions on canvas ---
+        region_allocations = self._allocate_regions(subsystems)
+
+        # --- Step 3: Place components within their subsystem region ---
+        for subsys_name, region in region_allocations.items():
+            subsys = subsystems[subsys_name]
+            rx, ry, rw, rh = region  # x, y, width, height
+
+            # Separate ICs and passives within this subsystem
+            sub_ics = [r for r in subsys['components'] if r.startswith('U')]
+            sub_passives = [r for r in subsys['components'] if r.startswith(('R', 'C', 'L'))]
+            sub_connectors = [r for r in subsys['components'] if r.startswith('J')]
+            sub_other = [r for r in subsys['components']
+                         if not r.startswith(('U', 'R', 'C', 'L', 'J'))]
+
+            # Place ICs as anchors (centered in region, spaced 40mm apart)
+            ic_y = ry + rh * 0.35  # ICs in upper-middle of region
+            ic_spacing = min(40.0, rw / max(len(sub_ics), 1))
+            ic_start_x = rx + (rw - ic_spacing * max(len(sub_ics) - 1, 0)) / 2
+
+            for i, ic_ref in enumerate(sub_ics):
+                positions[ic_ref] = (ic_start_x + i * ic_spacing, ic_y)
+
+            # Place connectors at region edges
+            for i, conn_ref in enumerate(sub_connectors):
+                if subsys.get('edge') == 'left':
+                    positions[conn_ref] = (rx + 5.0, ry + 20.0 + i * 15.0)
+                elif subsys.get('edge') == 'right':
+                    positions[conn_ref] = (rx + rw - 5.0, ry + 20.0 + i * 15.0)
+                else:
+                    positions[conn_ref] = (rx + 5.0, ry + 20.0 + i * 15.0)
+
+            # Place passives relative to their connected IC
+            placed_passives = set()
+            for p_ref in sub_passives:
+                connected_ics = [r for r in connectivity.get(p_ref, set())
+                                 if r in positions and r.startswith('U')]
+                if connected_ics:
+                    # Place near the first connected IC
+                    ic_pos = positions[connected_ics[0]]
+                    # Bypass caps: very close (5mm), other passives: 10-15mm
+                    is_bypass = p_ref.startswith('C')
+                    offset_x = self.SPACING_RULES["bypass_to_ic"] if is_bypass else 12.0
+                    offset_y = 10.0 + (len(placed_passives) % 4) * 8.0
+                    # Alternate left/right placement
+                    side = 1 if len(placed_passives) % 2 == 0 else -1
+                    positions[p_ref] = (
+                        ic_pos[0] + side * offset_x,
+                        ic_pos[1] + offset_y
+                    )
+                    placed_passives.add(p_ref)
+
+            # Place remaining passives (not connected to any IC) in a grid below ICs
+            unplaced_passives = [p for p in sub_passives if p not in placed_passives]
+            if unplaced_passives:
+                passive_y = ry + rh * 0.7
+                cols = max(int(len(unplaced_passives) ** 0.5) + 1, 2)
+                p_spacing_x = min(12.0, rw / (cols + 1))
+                for idx, p_ref in enumerate(unplaced_passives):
+                    col = idx % cols
+                    row = idx // cols
+                    positions[p_ref] = (
+                        rx + 10.0 + col * p_spacing_x,
+                        passive_y + row * 10.0
+                    )
+
+            # Place other components (diodes, transistors) near related ICs
+            for i, o_ref in enumerate(sub_other):
+                connected = [r for r in connectivity.get(o_ref, set())
+                             if r in positions]
+                if connected:
+                    anchor = positions[connected[0]]
+                    positions[o_ref] = (anchor[0] + 15.0, anchor[1] + 15.0 + i * 10.0)
+                else:
+                    positions[o_ref] = (rx + 20.0 + i * 12.0, ry + rh * 0.85)
+
+        # --- Step 4: Ensure all symbols have positions ---
+        unplaced = [s for s in symbols if s.reference not in positions]
+        if unplaced:
+            logger.error(
+                f"LAYOUT ERROR: {len(unplaced)} components still unplaced after subsystem placement: "
+                f"{[s.reference for s in unplaced][:20]}"
             )
+            # Place in a grid at bottom of canvas
+            for idx, symbol in enumerate(unplaced):
+                col = idx % 8
+                row = idx // 8
+                positions[symbol.reference] = (
+                    30.0 + col * 25.0,
+                    self.CANVAS_HEIGHT - 40.0 + row * 15.0
+                )
 
-        # Step 3: Apply proximity constraints (bypass caps near ICs, etc.)
+        # --- Step 5: Collision resolution ---
+        self._resolve_collisions(positions, symbols=symbols)
+
+        # --- Step 6: Apply proximity constraints (bypass caps near ICs) ---
         self._apply_proximity_constraints(
             positions,
             analysis.critical_proximity_pairs
         )
 
-        # Step 4: Apply separation constraints (analog away from digital)
-        self._apply_separation_constraints(
-            positions,
-            analysis.separation_zones
-        )
-
-        # Step 5: Ensure all symbols have positions — spread in grid, never stack
-        unplaced = [s for s in symbols if s.reference not in positions]
-        if unplaced:
-            # Grid layout for unplaced components instead of stacking at center
-            cols = max(int(len(unplaced) ** 0.5), 1)
-            rows = (len(unplaced) + cols - 1) // cols
-            spacing_x = min(40.0, (self.CANVAS_WIDTH - 40) / (cols + 1))
-            spacing_y = min(30.0, (self.CANVAS_HEIGHT - 40) / (rows + 1))
-
-            for idx, symbol in enumerate(unplaced):
-                col = idx % cols
-                row = idx // cols
-                positions[symbol.reference] = (
-                    20.0 + (col + 1) * spacing_x,
-                    20.0 + (row + 1) * spacing_y
-                )
-
-            logger.warning(
-                f"Spread {len(unplaced)} unplaced components in {cols}x{rows} grid "
-                f"(signal flow analysis had no placement data for these)"
-            )
-
         return positions
 
-    def _place_by_layer(
+    def _build_subsystem_regions(
         self,
-        component_layers: List[ComponentLayer]
-    ) -> Dict[str, Tuple[float, float]]:
-        """Place components by signal flow layer (left to right)."""
-        positions = {}
-
-        if not component_layers:
-            return positions
-
-        # Calculate layer x-positions (left to right)
-        num_layers = len(component_layers)
-        layer_spacing = min(
-            self.SPACING_RULES["layer_spacing"],
-            (self.CANVAS_WIDTH - 40) / max(num_layers, 1)
-        )
-
-        for layer in component_layers:
-            # Base x-position for this layer
-            layer_x = 20.0 + layer.x_position_hint * (self.CANVAS_WIDTH - 40.0)
-
-            # Arrange components vertically within layer
-            y_pos = 30.0
-            for comp_ref in layer.components:
-                positions[comp_ref] = (layer_x, y_pos)
-                y_pos += self.SPACING_RULES["vertical_spacing"]
-
-        return positions
-
-    def _adjust_for_functional_groups(
-        self,
-        positions: Dict[str, Tuple[float, float]],
         functional_groups: List[FunctionalGroup],
-        placement_hints: Optional[Any]
-    ):
-        """Adjust positions to group functional subsystems."""
+        symbols: List[Any],
+        signal_ics: List[str],
+        power_ics: List[str],
+        connector_refs: List[str],
+        passive_refs: List[str],
+        other_refs: List[str],
+        connectivity: Dict[str, Set[str]],
+    ) -> Dict[str, Dict]:
+        """
+        Build subsystem definitions for placement.
+
+        Uses functional groups from signal flow analysis (enriched by ideation).
+        Components not in any group are assigned to the closest IC's group.
+        """
+        subsystems: Dict[str, Dict] = {}
+        assigned = set()
+
+        # Process functional groups from analysis
         for group in functional_groups:
             if not group.components:
                 continue
+            # Infer category from group name
+            gname = group.group_name
+            gname_lower = gname.lower()
+            if 'power' in gname_lower or 'supply' in gname_lower:
+                cat = 'power'
+            elif 'connector' in gname_lower or 'input' in gname_lower or 'output' in gname_lower:
+                cat = 'connector'
+            else:
+                cat = 'signal'
+            subsystems[gname] = {
+                'components': list(group.components),
+                'category': cat,
+                'edge': None,
+            }
+            assigned.update(group.components)
 
-            # If ideation provides position hint, use it
-            if group.position_hint:
-                x_hint, y_hint = group.position_hint
-                for comp_ref in group.components:
-                    if comp_ref in positions:
-                        positions[comp_ref] = (x_hint, y_hint)
+        # Create power subsystem for power ICs not in any group
+        unassigned_power = [r for r in power_ics if r not in assigned]
+        if unassigned_power:
+            subsystems['Power Supply'] = {
+                'components': list(unassigned_power),
+                'category': 'power',
+                'edge': None,
+            }
+            assigned.update(unassigned_power)
+
+        # Create connector subsystem (split input/output by analysis)
+        input_conns = []
+        output_conns = []
+        for conn_ref in connector_refs:
+            if conn_ref not in assigned:
+                # Heuristic: connectors connected to sources are inputs, to sinks are outputs
+                connected = connectivity.get(conn_ref, set())
+                if any(r in signal_ics[:len(signal_ics)//2] for r in connected):
+                    input_conns.append(conn_ref)
+                else:
+                    output_conns.append(conn_ref)
+
+        if input_conns:
+            subsystems['Input Connectors'] = {
+                'components': input_conns,
+                'category': 'connector',
+                'edge': 'left',
+            }
+            assigned.update(input_conns)
+        if output_conns:
+            subsystems['Output Connectors'] = {
+                'components': output_conns,
+                'category': 'connector',
+                'edge': 'right',
+            }
+            assigned.update(output_conns)
+        # Any remaining connectors
+        remaining_conns = [r for r in connector_refs if r not in assigned]
+        if remaining_conns:
+            subsystems.setdefault('Input Connectors', {
+                'components': [],
+                'category': 'connector',
+                'edge': 'left',
+            })
+            subsystems['Input Connectors']['components'].extend(remaining_conns)
+            assigned.update(remaining_conns)
+
+        # Assign unassigned ICs to their own subsystem
+        for ic_ref in signal_ics:
+            if ic_ref not in assigned:
+                subsystems[f'IC_{ic_ref}'] = {
+                    'components': [ic_ref],
+                    'category': 'signal',
+                    'edge': None,
+                }
+                assigned.add(ic_ref)
+
+        # Assign unassigned passives to the subsystem of their nearest connected IC
+        for p_ref in passive_refs + other_refs:
+            if p_ref in assigned:
                 continue
+            connected_ics = [r for r in connectivity.get(p_ref, set())
+                            if r in assigned]
+            if connected_ics:
+                # Find which subsystem contains the connected IC
+                for ss_name, ss_data in subsystems.items():
+                    if connected_ics[0] in ss_data['components']:
+                        ss_data['components'].append(p_ref)
+                        assigned.add(p_ref)
+                        break
+            if p_ref not in assigned:
+                # Last resort: put in "Misc" subsystem
+                subsystems.setdefault('Miscellaneous', {
+                    'components': [],
+                    'category': 'other',
+                    'edge': None,
+                })
+                subsystems['Miscellaneous']['components'].append(p_ref)
+                assigned.add(p_ref)
 
-            # Otherwise, calculate centroid and cluster components
-            if len(group.components) == 1:
-                continue
+        for ss_name, ss_data in subsystems.items():
+            logger.info(f"  Subsystem '{ss_name}': {len(ss_data['components'])} components ({ss_data['category']})")
 
-            # Get existing positions
-            group_positions = [
-                positions[ref] for ref in group.components
-                if ref in positions
-            ]
+        return subsystems
 
-            if not group_positions:
-                continue
+    def _allocate_regions(
+        self,
+        subsystems: Dict[str, Dict],
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        """
+        Allocate non-overlapping rectangular regions on the canvas.
 
-            # Calculate centroid
-            avg_x = sum(p[0] for p in group_positions) / len(group_positions)
-            avg_y = sum(p[1] for p in group_positions) / len(group_positions)
+        Returns: {subsystem_name: (x, y, width, height)}
 
-            # Move components closer to centroid (clustering)
-            for i, comp_ref in enumerate(group.components):
-                if comp_ref in positions:
-                    old_x, old_y = positions[comp_ref]
-                    # Move 50% toward centroid
-                    new_x = old_x + 0.5 * (avg_x - old_x)
-                    new_y = old_y + 0.5 * (avg_y - old_y)
-                    positions[comp_ref] = (new_x, new_y)
+        Layout strategy:
+        - Input connectors: left edge
+        - Power supply: top strip
+        - Signal subsystems: middle area, arranged in rows
+        - Output connectors: right edge
+        """
+        regions: Dict[str, Tuple[float, float, float, float]] = {}
+
+        margin = 15.0
+        usable_w = self.CANVAS_WIDTH - 2 * margin
+        usable_h = self.CANVAS_HEIGHT - 2 * margin
+
+        # Categorize subsystems
+        power_ss = {k: v for k, v in subsystems.items() if v['category'] == 'power'}
+        left_conn_ss = {k: v for k, v in subsystems.items()
+                        if v['category'] == 'connector' and v.get('edge') == 'left'}
+        right_conn_ss = {k: v for k, v in subsystems.items()
+                         if v['category'] == 'connector' and v.get('edge') == 'right'}
+        signal_ss = {k: v for k, v in subsystems.items()
+                     if k not in power_ss and k not in left_conn_ss and k not in right_conn_ss}
+
+        # Allocate left connector strip (10% width)
+        left_w = usable_w * 0.10 if left_conn_ss else 0
+        if left_conn_ss:
+            y_offset = margin
+            for name, ss in left_conn_ss.items():
+                h = max(usable_h * 0.5, len(ss['components']) * 15.0)
+                regions[name] = (margin, y_offset, left_w, min(h, usable_h))
+                y_offset += h + 10.0
+
+        # Allocate right connector strip (10% width)
+        right_w = usable_w * 0.10 if right_conn_ss else 0
+        if right_conn_ss:
+            y_offset = margin
+            for name, ss in right_conn_ss.items():
+                h = max(usable_h * 0.5, len(ss['components']) * 15.0)
+                regions[name] = (margin + usable_w - right_w, y_offset, right_w, min(h, usable_h))
+                y_offset += h + 10.0
+
+        # Remaining area for power + signal
+        mid_x = margin + left_w + 5.0
+        mid_w = usable_w - left_w - right_w - 10.0
+
+        # Allocate power strip at top (20% height)
+        power_h = usable_h * 0.20 if power_ss else 0
+        if power_ss:
+            x_offset = mid_x
+            per_w = mid_w / max(len(power_ss), 1)
+            for name, ss in power_ss.items():
+                regions[name] = (x_offset, margin, per_w, power_h)
+                x_offset += per_w
+
+        # Allocate signal subsystems in the remaining area
+        signal_y_start = margin + power_h + 5.0
+        signal_h = usable_h - power_h - 10.0
+
+        if signal_ss:
+            # Arrange signal subsystems in a grid, weighted by component count
+            num_ss = len(signal_ss)
+            cols = max(int(num_ss ** 0.5 + 0.5), 1)
+            rows = (num_ss + cols - 1) // cols
+
+            # Build row lists for weight computation
+            row_lists: List[List[Tuple[str, Dict]]] = [[] for _ in range(rows)]
+            for idx, item in enumerate(signal_ss.items()):
+                row_lists[idx // cols].append(item)
+
+            # Compute per-row height weight (proportional to max component count in row)
+            row_weights = []
+            for row_items in row_lists:
+                if row_items:
+                    row_weights.append(max(len(ss['components']) for _, ss in row_items))
+                else:
+                    row_weights.append(1)
+            total_row_weight = sum(row_weights) or 1
+
+            y_cursor = signal_y_start
+            for r_idx, row_items in enumerate(row_lists):
+                if not row_items:
+                    continue
+                row_h = signal_h * (row_weights[r_idx] / total_row_weight)
+
+                # Compute per-column width weight within this row
+                col_weights = [max(len(ss['components']), 1) for _, ss in row_items]
+                total_col_weight = sum(col_weights) or 1
+
+                x_cursor = mid_x
+                for c_idx, (name, ss) in enumerate(row_items):
+                    cell_w = mid_w * (col_weights[c_idx] / total_col_weight)
+                    regions[name] = (
+                        x_cursor,
+                        y_cursor,
+                        cell_w - 5.0,
+                        row_h - 5.0,
+                    )
+                    x_cursor += cell_w
+                y_cursor += row_h
+
+        return regions
+
+    def _resolve_collisions(
+        self,
+        positions: Dict[str, Tuple[float, float]],
+        symbols: Optional[List] = None,
+    ):
+        """Push overlapping components apart using AABB collision detection.
+
+        Uses actual component dimensions (computed from pin bounding boxes)
+        instead of treating components as points.
+        """
+        # Build component size dict from symbols or defaults
+        component_sizes: Dict[str, Tuple[float, float]] = {}
+        symbol_lookup = {}
+        if symbols:
+            for sym in symbols:
+                symbol_lookup[sym.reference] = sym
+
+        for ref in positions:
+            sym = symbol_lookup.get(ref)
+            if sym and hasattr(sym, 'pins') and sym.pins:
+                xs = [p.position[0] for p in sym.pins]
+                ys = [p.position[1] for p in sym.pins]
+                if xs and ys:
+                    w = max(xs) - min(xs) + 12.0  # Add padding for body + labels
+                    h = max(ys) - min(ys) + 10.0
+                    component_sizes[ref] = (max(w, 10.0), max(h, 8.0))
+                    continue
+            # Default sizes by reference prefix
+            if ref.startswith('U'):
+                component_sizes[ref] = (30.0, 35.0)  # ICs are large
+            elif ref.startswith(('R', 'C', 'L')):
+                component_sizes[ref] = (10.0, 6.0)   # Passives are small
+            elif ref.startswith('Q'):
+                component_sizes[ref] = (12.0, 10.0)  # Transistors
+            elif ref.startswith('J'):
+                component_sizes[ref] = (15.0, 12.0)  # Connectors
+            elif ref.startswith('D'):
+                component_sizes[ref] = (8.0, 5.0)    # Diodes
+            else:
+                component_sizes[ref] = (12.0, 10.0)  # Default
+
+        max_iterations = 100
+        margin = 2.54  # Grid margin between components
+        refs = list(positions.keys())
+
+        for iteration in range(max_iterations):
+            moved = False
+            for i in range(len(refs)):
+                for j in range(i + 1, len(refs)):
+                    r1, r2 = refs[i], refs[j]
+                    p1, p2 = positions[r1], positions[r2]
+                    s1, s2 = component_sizes.get(r1, (12.0, 10.0)), component_sizes.get(r2, (12.0, 10.0))
+
+                    # AABB overlap check
+                    hw1, hh1 = s1[0] / 2 + margin, s1[1] / 2 + margin
+                    hw2, hh2 = s2[0] / 2 + margin, s2[1] / 2 + margin
+
+                    overlap_x = (hw1 + hw2) - abs(p1[0] - p2[0])
+                    overlap_y = (hh1 + hh2) - abs(p1[1] - p2[1])
+
+                    if overlap_x > 0 and overlap_y > 0:
+                        # Push apart along axis of least overlap
+                        if overlap_x < overlap_y:
+                            # Push horizontally
+                            push = overlap_x / 2 + 0.5
+                            if p1[0] <= p2[0]:
+                                positions[r1] = (p1[0] - push, p1[1])
+                                positions[r2] = (p2[0] + push, p2[1])
+                            else:
+                                positions[r1] = (p1[0] + push, p1[1])
+                                positions[r2] = (p2[0] - push, p2[1])
+                        else:
+                            # Push vertically
+                            push = overlap_y / 2 + 0.5
+                            if p1[1] <= p2[1]:
+                                positions[r1] = (p1[0], p1[1] - push)
+                                positions[r2] = (p2[0], p2[1] + push)
+                            else:
+                                positions[r1] = (p1[0], p1[1] + push)
+                                positions[r2] = (p2[0], p2[1] - push)
+                        moved = True
+
+            if not moved:
+                logger.info(f"Collision resolution converged after {iteration + 1} iterations")
+                break
+        else:
+            logger.warning(
+                f"Collision resolution did NOT converge after {max_iterations} iterations. "
+                f"Some components may still overlap."
+            )
+
+        # Validation pass: count remaining overlaps
+        remaining_overlaps = 0
+        for i in range(len(refs)):
+            for j in range(i + 1, len(refs)):
+                r1, r2 = refs[i], refs[j]
+                p1, p2 = positions[r1], positions[r2]
+                s1, s2 = component_sizes.get(r1, (12.0, 10.0)), component_sizes.get(r2, (12.0, 10.0))
+                hw1, hh1 = s1[0] / 2, s1[1] / 2
+                hw2, hh2 = s2[0] / 2, s2[1] / 2
+                if (hw1 + hw2) - abs(p1[0] - p2[0]) > 0 and (hh1 + hh2) - abs(p1[1] - p2[1]) > 0:
+                    remaining_overlaps += 1
+
+        if remaining_overlaps > 0:
+            logger.error(f"LAYOUT QUALITY: {remaining_overlaps} overlapping component pairs remain after collision resolution")
+        else:
+            logger.info("LAYOUT QUALITY: 0 overlapping component pairs - all collisions resolved")
 
     def _apply_proximity_constraints(
         self,
         positions: Dict[str, Tuple[float, float]],
         proximity_pairs: List[Tuple[str, str]]
     ):
-        """Move components that must be close together."""
+        """Move components that must be close together (e.g., bypass caps near ICs)."""
         for comp1, comp2 in proximity_pairs:
             if comp1 in positions and comp2 in positions:
                 pos1 = positions[comp1]
-                # Place comp2 near comp1 (below and slightly right)
-                positions[comp2] = (
-                    pos1[0] + self.SPACING_RULES["bypass_to_ic"],
-                    pos1[1] + 10.0  # 10mm below
-                )
+                pos2 = positions[comp2]
+                # Check current distance
+                dx = pos2[0] - pos1[0]
+                dy = pos2[1] - pos1[1]
+                dist = (dx**2 + dy**2) ** 0.5
+                target_dist = self.SPACING_RULES["bypass_to_ic"]
 
-    def _apply_separation_constraints(
-        self,
-        positions: Dict[str, Tuple[float, float]],
-        separation_zones: Dict[str, List[str]]
-    ):
-        """Ensure zones are spatially separated."""
-        # Move analog components to left side
-        analog_comps = separation_zones.get('analog', [])
-        for comp_ref in analog_comps:
-            if comp_ref in positions:
-                x, y = positions[comp_ref]
-                if x > self.CANVAS_WIDTH / 2:
-                    # Move to left side
-                    positions[comp_ref] = (x - 60.0, y)
-
-        # Move digital components to right side
-        digital_comps = separation_zones.get('digital', [])
-        for comp_ref in digital_comps:
-            if comp_ref in positions:
-                x, y = positions[comp_ref]
-                if x < self.CANVAS_WIDTH / 2:
-                    # Move to right side
-                    positions[comp_ref] = (x + 60.0, y)
-
-        # Move power components to top
-        power_comps = separation_zones.get('power', [])
-        for comp_ref in power_comps:
-            if comp_ref in positions:
-                x, y = positions[comp_ref]
-                if y > 50.0:
-                    # Move to top
-                    positions[comp_ref] = (x, 30.0)
+                if dist > target_dist * 3:
+                    # Too far — move comp2 close to comp1
+                    # Place slightly below-right of comp1
+                    positions[comp2] = (
+                        pos1[0] + target_dist,
+                        pos1[1] + 8.0
+                    )
 
     # -------------------------------------------------------------------------
     # Quality metrics

@@ -634,24 +634,89 @@ class SchematicFixApplicator:
         """Snap a coordinate to the default grid."""
         return round(value / self.DEFAULT_GRID) * self.DEFAULT_GRID
 
-    def _calculate_optimal_position(
-        self,
-        content: str,
-        reference: str
-    ) -> Tuple[float, float]:
-        """Calculate optimal position for a component based on signal flow."""
-        # Find current position
-        pattern = rf'\(property\s+"Reference"\s+"{re.escape(reference)}"[^)]+\(at\s+([\d.-]+)\s+([\d.-]+)'
-        match = re.search(pattern, content)
-
+    def _find_component_position(
+        self, content: str, reference: str
+    ) -> Optional[Tuple[float, float]]:
+        """Find the (at X Y) position of a symbol by its Reference property."""
+        # Match the symbol block that contains this reference, then extract its (at X Y)
+        symbol_pattern = (
+            r'\(symbol\s+\(lib_id\s+"[^"]*"\)\s+\(at\s+([\d.-]+)\s+([\d.-]+)\s+\d+\)'
+            r'.*?\(property\s+"Reference"\s+"' + re.escape(reference) + r'"'
+        )
+        match = re.search(symbol_pattern, content, re.DOTALL)
         if match:
-            # Slight offset to improve layout
-            x = float(match.group(1)) + self.DEFAULT_GRID
-            y = float(match.group(2))
-            return (self._snap_to_grid(x), self._snap_to_grid(y))
+            return (float(match.group(1)), float(match.group(2)))
+        return None
 
-        # Default position
-        return (100.0, 100.0)
+    def _extract_all_component_positions(self, content: str) -> Dict[str, Tuple[float, float]]:
+        """Extract all component positions from schematic S-expression."""
+        positions: Dict[str, Tuple[float, float]] = {}
+        # Match: (symbol (lib_id "...") (at X Y ROTATION) ... (property "Reference" "REF" ...))
+        # We need to find each symbol block and extract its reference and position
+        symbol_pattern = re.compile(
+            r'\(symbol\s+\(lib_id\s+"[^"]*"\)\s+\(at\s+([\d.-]+)\s+([\d.-]+)\s+\d+\)'
+        )
+        ref_pattern = re.compile(
+            r'\(property\s+"Reference"\s+"([^"]+)"'
+        )
+
+        # Find all symbol blocks
+        for match in re.finditer(r'\(symbol\s+\(lib_id\s+"[^"]*"\)', content):
+            start = match.start()
+            # Extract position from this symbol block
+            block_text = content[start:start + 500]  # Read enough to get reference
+
+            pos_match = symbol_pattern.match(content[start:])
+            ref_match = ref_pattern.search(block_text)
+
+            if pos_match and ref_match:
+                x = float(pos_match.group(1))
+                y = float(pos_match.group(2))
+                ref = ref_match.group(1)
+                positions[ref] = (x, y)
+
+        return positions
+
+    def _calculate_optimal_position(
+        self, content: str, reference: str
+    ) -> Tuple[float, float]:
+        """Find nearest non-overlapping grid position using spiral search."""
+        current_pos = self._find_component_position(content, reference)
+        if not current_pos:
+            return (100.0, 100.0)
+
+        all_positions = self._extract_all_component_positions(content)
+        all_positions.pop(reference, None)
+
+        if not all_positions:
+            return (current_pos[0] + self.DEFAULT_GRID * 4, current_pos[1])
+
+        grid = self.DEFAULT_GRID  # 2.54mm
+        min_sep = 15.0  # Minimum separation for readability
+
+        # Spiral outward from current position
+        for radius_mult in range(1, 30):
+            radius = radius_mult * grid * 3  # ~7.62mm increments
+            for dx_sign in [-1, 0, 1]:
+                for dy_sign in [-1, 0, 1]:
+                    if dx_sign == 0 and dy_sign == 0:
+                        continue
+                    candidate = (
+                        self._snap_to_grid(current_pos[0] + dx_sign * radius),
+                        self._snap_to_grid(current_pos[1] + dy_sign * radius),
+                    )
+                    # Check no overlap with any existing component
+                    overlaps = False
+                    for ref, pos in all_positions.items():
+                        dist = ((candidate[0] - pos[0]) ** 2 + (candidate[1] - pos[1]) ** 2) ** 0.5
+                        if dist < min_sep:
+                            overlaps = True
+                            break
+                    if not overlaps:
+                        return candidate
+
+        # Fallback: place 50mm to the right
+        return (self._snap_to_grid(current_pos[0] + 50.0), self._snap_to_grid(current_pos[1]))
 
     def _get_position_near_component(
         self,

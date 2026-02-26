@@ -181,6 +181,15 @@ class PipelineResult:
     nfs_synced: bool = False
     nfs_paths: Dict[str, str] = field(default_factory=dict)
 
+    # Quality metrics (populated by phases for loop runner)
+    visual_score: float = 0.0
+    smoke_test_score: float = 0.0
+    compliance_score: float = 0.0
+    center_fallback_ratio: float = 0.0
+    placeholder_ratio: float = 0.0
+    overlap_count: int = 0
+    connection_coverage: float = 0.0
+
     def to_dict(self) -> Dict:
         return {
             "success": self.success,
@@ -203,6 +212,14 @@ class PipelineResult:
             "png_path": str(self.png_path) if self.png_path else None,
             "nfs_synced": self.nfs_synced,
             "nfs_paths": self.nfs_paths,
+            # Quality metrics
+            "visual_score": self.visual_score,
+            "smoke_test_score": self.smoke_test_score,
+            "compliance_score": self.compliance_score,
+            "center_fallback_ratio": self.center_fallback_ratio,
+            "placeholder_ratio": self.placeholder_ratio,
+            "overlap_count": self.overlap_count,
+            "connection_coverage": self.connection_coverage,
         }
 
     def to_json(self) -> str:
@@ -476,6 +493,61 @@ class MAPOSchematicPipeline:
                     ),
                 )
 
+            # ========================================================
+            # Phase 2b: Resolve symbols BEFORE connection generation
+            # This gives the connection generator access to actual pin
+            # names instead of relying on LLM-inferred pin guesses.
+            # ========================================================
+            pre_resolved_symbols: Optional[Dict[str, Any]] = None
+            component_pins: Optional[Dict[str, List[Dict]]] = None
+
+            # Skip symbol pre-resolution if resuming from assembly checkpoint
+            # (symbols were already resolved and assembled in the prior run)
+            if "assembly" not in _completed_phases:
+                self._start_phase(
+                    SchematicPhase.SYMBOLS,
+                    "Resolving component symbols for pin-accurate connections..."
+                )
+                self._emit_progress(
+                    SchematicPhase.SYMBOLS, 10,
+                    f"Fetching symbols for {len(bom_items)} components...",
+                    event_type=SchematicEventType.SYMBOL_RESOLVING.value
+                )
+
+                try:
+                    pre_resolved_symbols, component_pins = (
+                        await self._assembler.resolve_symbols_only(bom_items)
+                    )
+
+                    pins_total = sum(len(p) for p in component_pins.values())
+                    logger.info(
+                        f"Phase 2b: Resolved {len(pre_resolved_symbols)} symbols, "
+                        f"{len(component_pins)} components with pin data "
+                        f"({pins_total} total pins available for connection validation)"
+                    )
+
+                    self._complete_phase(
+                        SchematicPhase.SYMBOLS,
+                        f"Resolved {len(pre_resolved_symbols)} symbols "
+                        f"({pins_total} pins extracted for connection validation)"
+                    )
+                except Exception as e:
+                    # Symbol pre-resolution failed — log warning but continue.
+                    # The assembler's assemble_schematic() will re-resolve internally
+                    # and connections will be generated without pin data (old behavior).
+                    logger.warning(
+                        f"Phase 2b symbol pre-resolution failed: {e}. "
+                        f"Falling back to legacy flow (connections without pin data)."
+                    )
+                    pre_resolved_symbols = None
+                    component_pins = None
+
+                    self._emit_progress(
+                        SchematicPhase.SYMBOLS, 100,
+                        f"Symbol pre-resolution failed — falling back to legacy flow",
+                        event_type=SchematicEventType.ERROR.value
+                    )
+
             # Convert connections if provided, otherwise auto-generate
             connection_objs = None
             if connections:
@@ -536,11 +608,31 @@ class MAPOSchematicPipeline:
                     event_type=SchematicEventType.CONNECTIONS_LLM_CALL.value
                 )
 
+                # Extract ideation connection hints (explicit connections, interfaces, power rails)
+                seed_connections = None
+                if ideation_context and ideation_context.has_connection_hints:
+                    seed_connections = ideation_context.connection_inference
+                    ci = seed_connections
+                    logger.info(
+                        f"IDEATION SEED DATA: {len(ci.explicit_connections)} explicit connections, "
+                        f"{len(ci.interfaces)} interfaces, {len(ci.power_rails)} power rails, "
+                        f"{len(ci.ground_nets)} ground nets, {len(ci.critical_signals)} critical signals. "
+                        f"Passing to connection generator as seed_connections."
+                    )
+                else:
+                    logger.warning(
+                        "NO ideation connection hints available — connection generator will rely "
+                        "entirely on LLM inference (lower quality). Ideation context: "
+                        f"{'present but no hints' if ideation_context else 'None'}"
+                    )
+
                 try:
                     generated_connections = await retry_phase(
                         self._connection_generator.generate_connections,
                         bom=bom,
                         design_intent=design_intent,
+                        component_pins=component_pins,
+                        seed_connections=seed_connections,
                         max_retries=3,
                         base_delay=10.0,
                         phase_name="connections",
@@ -645,7 +737,8 @@ class MAPOSchematicPipeline:
                     bom=bom_items,
                     block_diagram=block_diagram_obj,
                     connections=connection_objs,
-                    design_name=design_name
+                    design_name=design_name,
+                    pre_resolved_symbols=pre_resolved_symbols,
                 )
 
                 result.sheets = sheets
@@ -684,6 +777,17 @@ class MAPOSchematicPipeline:
                             result.symbols_from_cache += 1
                         elif symbol.quality in (SymbolQuality.LLM_GENERATED, SymbolQuality.PLACEHOLDER):
                             result.symbols_generated += 1
+
+                    # Compute placeholder ratio for quality tracking
+                    total_symbols = len(sheets[0].symbols)
+                    placeholder_count = len(placeholder_symbols)
+                    if total_symbols > 0:
+                        result.placeholder_ratio = placeholder_count / total_symbols
+                        if result.placeholder_ratio > 0.3:
+                            logger.warning(
+                                f"HIGH PLACEHOLDER RATIO: {result.placeholder_ratio:.0%} "
+                                f"({placeholder_count}/{total_symbols}) symbols are placeholders"
+                            )
 
                     # CRITICAL: Fail if ALL symbols are placeholders
                     if len(valid_symbols) == 0 and len(placeholder_symbols) > 0:
@@ -1003,6 +1107,9 @@ class MAPOSchematicPipeline:
                         schematic_content = output_path.read_text(encoding='utf-8')
                         logger.info(f"Applied {len(loop_result.fixes_applied)} fixes during validation")
 
+                    # Store visual validation score in result
+                    result.visual_score = loop_result.final_score
+
                     if loop_result.final_passed:
                         logger.info(
                             f"Visual validation: PASSED after {loop_result.iterations} iterations "
@@ -1024,6 +1131,20 @@ class MAPOSchematicPipeline:
                     logger.error(str(e))
                     # Continue with current schematic, but log the issue
                     result.errors.append(f"Validation stagnated: {e.reason.value}")
+
+                except (ValueError, RuntimeError, OSError, json.JSONDecodeError,
+                        asyncio.TimeoutError, ConnectionError) as e:
+                    logger.warning(
+                        "WARNING: Visual validation FAILED (non-fatal) and was SKIPPED. "
+                        "The schematic was already assembled and can be used, but visual "
+                        "quality was NOT validated by LLM. "
+                        "Error type: %s, Error: %s",
+                        type(e).__name__, e
+                    )
+                    result.errors.append(f"Visual validation skipped: {type(e).__name__}: {e}")
+                    # Continue with current schematic — visual validation is
+                    # an improvement step, not a gate. The schematic was already
+                    # assembled and can be used without validation.
 
             # Legacy validation (fallback if new validators unavailable)
             elif not skip_validation and self._validator:

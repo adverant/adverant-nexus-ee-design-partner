@@ -104,6 +104,7 @@ class RoutingResult:
     total_wire_length: float
     four_way_junctions_avoided: int
     warnings: List[str] = field(default_factory=list)
+    center_fallback_ratio: float = 0.0
 
 
 class EnhancedWireRouter:
@@ -165,6 +166,8 @@ class EnhancedWireRouter:
         self._crossing_count = 0
         self._four_way_avoided = 0
         self._warnings = []
+        self._center_fallback_count = 0
+        self._pin_match_count = 0
 
         # Build constraint lookup
         constraint_map: Dict[str, RoutingConstraint] = {}
@@ -272,6 +275,36 @@ class EnhancedWireRouter:
         else:
             logger.info("DRC PASSED: No electrical violations")
 
+        # Report pin matching statistics
+        total_pin_lookups = self._pin_match_count + self._center_fallback_count
+        if total_pin_lookups > 0:
+            match_rate = self._pin_match_count / total_pin_lookups
+            logger.info(
+                f"PIN MATCHING STATS: {self._pin_match_count}/{total_pin_lookups} pins matched "
+                f"({match_rate:.0%}), {self._center_fallback_count} fell back to component center."
+            )
+            if self._center_fallback_count > 0:
+                logger.error(
+                    f"PIN_MATCHING_DEGRADED: {self._center_fallback_count} wires routed to component "
+                    f"centers instead of actual pin positions. These will produce visually incorrect "
+                    f"wire endpoints. Fix: ensure symbol pin names match connection pin names."
+                )
+
+        # Quality metrics summary
+        total_attempts = self._center_fallback_count + self._pin_match_count
+        center_fallback_ratio = 0.0
+        if total_attempts > 0:
+            center_fallback_ratio = self._center_fallback_count / total_attempts
+            logger.info(
+                f"ROUTING QUALITY: {self._pin_match_count}/{total_attempts} pins matched "
+                f"({center_fallback_ratio * 100:.1f}% center fallbacks)"
+            )
+            if center_fallback_ratio > 0.20:
+                logger.error(
+                    f"ROUTING QUALITY ALERT: {center_fallback_ratio * 100:.1f}% of connections "
+                    f"used center fallback (threshold: 20%). Symbol quality is degraded."
+                )
+
         # Calculate statistics
         total_length = sum(w.length for w in self._wires)
 
@@ -282,7 +315,8 @@ class EnhancedWireRouter:
             crossings=self._crossing_count,
             total_wire_length=total_length,
             four_way_junctions_avoided=self._four_way_avoided,
-            warnings=self._warnings
+            warnings=self._warnings,
+            center_fallback_ratio=center_fallback_ratio,
         )
 
         logger.info(
@@ -481,6 +515,18 @@ class EnhancedWireRouter:
         wires = self._manhattan_route_enhanced(from_pos, to_pos, net_name, route_type)
         self._wires.extend(wires)
 
+    # Power pin equivalence groups for fuzzy matching
+    _POWER_PIN_EQUIVALENTS = {
+        "VCC": {"VCC", "VDD", "VCCIO", "V+", "AVCC", "AVDD", "DVCC", "DVDD"},
+        "GND": {"GND", "VSS", "GROUND", "AVSS", "DVSS", "AGND", "DGND", "V-", "PGND", "EPAD"},
+        "3V3": {"3V3", "3.3V", "+3V3", "+3.3V", "VCC_3V3"},
+        "5V":  {"5V", "+5V", "VCC_5V"},
+    }
+
+    # Track center-fallback statistics across the routing session
+    _center_fallback_count: int = 0
+    _pin_match_count: int = 0
+
     def _get_pin_position(
         self,
         ref: str,
@@ -488,11 +534,92 @@ class EnhancedWireRouter:
         component_positions: Dict[str, Tuple[float, float]],
         pin_positions: Dict[str, Dict[str, Tuple[float, float]]]
     ) -> Optional[Tuple[float, float]]:
-        """Get the position of a pin."""
+        """
+        Get pin position with fuzzy matching.
+
+        Match order:
+        1. Exact match
+        2. Case-insensitive match
+        3. Strip suffix match (pin name before '-' or '_')
+        4. Power pin equivalents (VCC↔VDD, GND↔VSS)
+        5. Prefix/partial match
+        6. Component center (LAST RESORT — logged as error)
+        """
+        # 1. Exact match
         if ref in pin_positions and pin in pin_positions[ref]:
+            self._pin_match_count += 1
             return pin_positions[ref][pin]
-        elif ref in component_positions:
+
+        # If ref has no pin data at all, log detailed error
+        if ref not in pin_positions:
+            if ref in component_positions:
+                self._center_fallback_count += 1
+                logger.error(
+                    f"PIN_FALLBACK_TO_CENTER: {ref}.{pin} — component has NO pin position data. "
+                    f"Symbol likely has no pin definitions (placeholder?). "
+                    f"Falling back to component center {component_positions[ref]}."
+                )
+                return component_positions[ref]
+            logger.error(
+                f"PIN_NOT_FOUND: {ref}.{pin} — component ref '{ref}' not in pin_positions "
+                f"AND not in component_positions. Available refs: "
+                f"{sorted(list(component_positions.keys()))[:20]}"
+            )
+            return None
+
+        available_pins = pin_positions[ref]
+        pin_upper = pin.upper().strip()
+
+        # 2. Case-insensitive match
+        for avail_pin, pos in available_pins.items():
+            if avail_pin.upper().strip() == pin_upper:
+                self._pin_match_count += 1
+                logger.debug(f"PIN_FUZZY_MATCH(case): {ref}.{pin} → {ref}.{avail_pin}")
+                return pos
+
+        # 3. Strip suffix match — match before '-' or '_' delimiter
+        pin_base = pin_upper.split("-")[0].split("_")[0]
+        if pin_base:
+            for avail_pin, pos in available_pins.items():
+                avail_base = avail_pin.upper().split("-")[0].split("_")[0]
+                if avail_base == pin_base:
+                    self._pin_match_count += 1
+                    logger.debug(f"PIN_FUZZY_MATCH(base): {ref}.{pin} → {ref}.{avail_pin} (base={pin_base})")
+                    return pos
+
+        # 4. Power pin equivalents (VCC↔VDD, GND↔VSS, etc.)
+        for _group_name, equivalents in self._POWER_PIN_EQUIVALENTS.items():
+            if pin_upper in equivalents:
+                for avail_pin, pos in available_pins.items():
+                    if avail_pin.upper() in equivalents:
+                        self._pin_match_count += 1
+                        logger.debug(f"PIN_FUZZY_MATCH(power_equiv): {ref}.{pin} → {ref}.{avail_pin}")
+                        return pos
+
+        # 5. Prefix/partial match — pin name starts with or contains the target
+        for avail_pin, pos in available_pins.items():
+            avail_upper = avail_pin.upper()
+            if avail_upper.startswith(pin_upper) or pin_upper.startswith(avail_upper):
+                self._pin_match_count += 1
+                logger.debug(f"PIN_FUZZY_MATCH(prefix): {ref}.{pin} → {ref}.{avail_pin}")
+                return pos
+
+        # 6. LAST RESORT: component center — detailed error for debugging
+        if ref in component_positions:
+            self._center_fallback_count += 1
+            avail_names = sorted(available_pins.keys())
+            logger.error(
+                f"PIN_FALLBACK_TO_CENTER: {ref}.{pin} — no fuzzy match found. "
+                f"Requested pin '{pin}' not in available pins: {avail_names}. "
+                f"Falling back to component center {component_positions[ref]}. "
+                f"Total center-fallbacks so far: {self._center_fallback_count}."
+            )
             return component_positions[ref]
+
+        logger.error(
+            f"PIN_NOT_FOUND: {ref}.{pin} — ref in pin_positions but NOT in component_positions. "
+            f"Available pins: {sorted(available_pins.keys())}."
+        )
         return None
 
     def _manhattan_route_enhanced(

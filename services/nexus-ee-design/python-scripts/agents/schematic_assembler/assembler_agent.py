@@ -123,6 +123,8 @@ class SymbolInstance:
     footprint: str = ""
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     pins: List[Pin] = field(default_factory=list)
+    width: float = 0.0   # Bounding box width in mm (computed from pins)
+    height: float = 0.0  # Bounding box height in mm (computed from pins)
     # Symbol quality tracking (added to detect degraded schematics)
     quality: SymbolQuality = SymbolQuality.PLACEHOLDER
     resolution_source: str = ""  # e.g., "kicad_worker", "local_cache", "snapeda"
@@ -354,7 +356,8 @@ class SchematicAssemblerAgent:
         bom: List[BOMItem],
         block_diagram: Optional[BlockDiagram] = None,
         connections: Optional[List[Connection]] = None,
-        design_name: str = "schematic"
+        design_name: str = "schematic",
+        pre_resolved_symbols: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[SchematicSheet]:
         """
         Main entry point for schematic assembly.
@@ -364,6 +367,10 @@ class SchematicAssemblerAgent:
             block_diagram: Optional block diagram structure
             connections: Net connections between components
             design_name: Name for the schematic
+            pre_resolved_symbols: Optional pre-resolved symbol data from
+                resolve_symbols_only(). When provided, skips the internal
+                _resolve_symbols() call to avoid duplicate fetching.
+                Dict keyed by part_number -> symbol data dict.
 
         Returns:
             List of SchematicSheet objects
@@ -373,8 +380,15 @@ class SchematicAssemblerAgent:
         # Reset reference counters
         self.ref_counters = {}
 
-        # Step 1: Resolve all symbols
-        resolved_symbols = await self._resolve_symbols(bom)
+        # Step 1: Resolve all symbols (skip if pre-resolved)
+        if pre_resolved_symbols is not None:
+            resolved_symbols = pre_resolved_symbols
+            logger.info(
+                f"Using {len(resolved_symbols)} pre-resolved symbols "
+                f"(skipping duplicate _resolve_symbols call)"
+            )
+        else:
+            resolved_symbols = await self._resolve_symbols(bom)
 
         # Step 2: Plan sheet hierarchy
         if block_diagram:
@@ -421,6 +435,97 @@ class SchematicAssemblerAgent:
 
         logger.info(f"Assembly complete: {len(sheets)} sheet(s)")
         return sheets
+
+    async def resolve_symbols_only(
+        self,
+        bom: List[BOMItem]
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict]]]:
+        """
+        Resolve symbols for all BOM items and extract pin information.
+
+        This is the public entry point for Phase 2b: symbol resolution happens
+        BEFORE connection generation so that actual pin names are available for
+        pin validation during connection inference.
+
+        Args:
+            bom: List of BOMItem objects from the pipeline BOM.
+
+        Returns:
+            Tuple of:
+                - resolved_symbols: Dict keyed by part_number -> symbol data dict
+                  (same structure as _resolve_symbols output: sexp, symbol_name,
+                  pins, source, metadata).
+                - component_pins: Dict keyed by component reference -> list of
+                  pin dicts, each with keys: name, number, pin_type. This is the
+                  format expected by ConnectionGeneratorAgent.generate_connections().
+        """
+        # Step 1: Resolve all symbols (fetches from KiCad worker, cache, SnapEDA, etc.)
+        resolved_symbols = await self._resolve_symbols(bom)
+
+        # Step 2: Build component_pins mapping (reference -> pin list)
+        # The connection generator expects Dict[str, List[Dict]] where each pin dict
+        # has at minimum: name, number, pin_type (as strings).
+        component_pins: Dict[str, List[Dict]] = {}
+
+        # We need to map BOM items to references. If BOM items have pre-assigned
+        # references, use those. Otherwise, generate references the same way
+        # _assign_components does (using _get_next_reference).
+        # IMPORTANT: We use a temporary counter so we don't pollute self.ref_counters
+        # (those will be reset when assemble_schematic runs later).
+        temp_ref_counters: Dict[str, int] = {}
+
+        for item in bom:
+            symbol_data = resolved_symbols.get(item.part_number)
+            if not symbol_data:
+                continue
+
+            # Determine reference for this BOM item
+            if item.reference:
+                reference = item.reference
+            else:
+                prefix = self.REF_PREFIXES.get(item.category, "U")
+                temp_ref_counters[prefix] = temp_ref_counters.get(prefix, 0) + 1
+                reference = f"{prefix}{temp_ref_counters[prefix]}"
+
+            # Extract pins from resolved symbol data
+            raw_pins = symbol_data.get("pins", [])
+            pin_dicts: List[Dict] = []
+
+            for pin in raw_pins:
+                if isinstance(pin, Pin):
+                    # Pin dataclass from _parse_pins_deterministic
+                    pin_dicts.append({
+                        "name": pin.name,
+                        "number": pin.number,
+                        "pin_type": pin.pin_type.value if isinstance(pin.pin_type, PinType) else str(pin.pin_type),
+                    })
+                elif isinstance(pin, dict):
+                    # Already a dict (from some resolution paths)
+                    pin_dicts.append({
+                        "name": pin.get("name", ""),
+                        "number": pin.get("number", ""),
+                        "pin_type": pin.get("pin_type", "unspecified"),
+                    })
+
+            if pin_dicts:
+                component_pins[reference] = pin_dicts
+                logger.debug(
+                    f"Extracted {len(pin_dicts)} pins for {reference} "
+                    f"({item.part_number})"
+                )
+            else:
+                logger.warning(
+                    f"No pins extracted for {reference} ({item.part_number}) "
+                    f"— connection generator will infer pins from category"
+                )
+
+        logger.info(
+            f"Symbol resolution complete: {len(resolved_symbols)} symbols resolved, "
+            f"{len(component_pins)} components with pin data "
+            f"({sum(len(p) for p in component_pins.values())} total pins)"
+        )
+
+        return resolved_symbols, component_pins
 
     async def _resolve_symbols(
         self,
@@ -855,18 +960,19 @@ JSON array of pins:"""
         """
         prefix = self.REF_PREFIXES.get(item.category, "U")
 
-        # Determine number of pins based on category
+        # Determine number of pins based on category (matches CATEGORY_PIN_TEMPLATES)
         pin_count = {
-            "Resistor": 2,
-            "Capacitor": 2,
-            "Inductor": 2,
-            "Diode": 2,
-            "LED": 2,
-            "MOSFET": 3,
-            "BJT": 3,
-            "Crystal": 2,
-            "Fuse": 2,
-        }.get(item.category, 4)
+            "Resistor": 2, "Capacitor": 2, "Inductor": 2,
+            "Diode": 2, "LED": 2, "Crystal": 2, "Fuse": 2,
+            "MOSFET": 3, "BJT": 3,
+            "OpAmp": 5, "Regulator": 5,
+            "Current_Sense": 6,
+            "CAN_Transceiver": 8,
+            "Gate_Driver": 10,
+            "MCU": 30,
+            "Connector": 4,
+            "ESD_Protection": 3,
+        }.get(item.category, 6)  # Default 6 instead of 4
 
         # Generate generic symbol S-expression
         pins_sexp = []
@@ -875,17 +981,30 @@ JSON array of pins:"""
         # Directly create Pin objects (no need to parse what we just generated)
         pins: List[Pin] = []
 
+        # Use category-appropriate pin names if available
+        from agents.symbol_fetcher.symbol_fetcher_agent import CATEGORY_PIN_TEMPLATES
+        template = CATEGORY_PIN_TEMPLATES.get(item.category, None)
+
         for i, (x, y, angle) in enumerate(pin_positions):
-            pin_name = f"P{i+1}"
-            pins_sexp.append(f'''      (pin passive line (at {x} {y} {angle}) (length 2.54)
+            if template and i < len(template):
+                pin_name = template[i][0]
+                pin_number = template[i][1]
+                pin_type_str = template[i][2]
+            else:
+                pin_name = f"P{i+1}"
+                pin_number = str(i + 1)
+                pin_type_str = "passive"
+
+            pin_type = PinType(pin_type_str) if pin_type_str in [e.value for e in PinType] else PinType.PASSIVE
+
+            pins_sexp.append(f'''      (pin {pin_type_str} line (at {x} {y} {angle}) (length 2.54)
         (name "{pin_name}" (effects (font (size 1.27 1.27))))
-        (number "{i+1}" (effects (font (size 1.27 1.27))))
+        (number "{pin_number}" (effects (font (size 1.27 1.27))))
       )''')
-            # Create Pin object directly
             pins.append(Pin(
                 name=pin_name,
-                number=str(i + 1),
-                pin_type=PinType.PASSIVE,
+                number=pin_number,
+                pin_type=pin_type,
                 position=(x, y),
                 orientation=angle
             ))

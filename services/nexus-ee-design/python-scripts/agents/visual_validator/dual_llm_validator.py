@@ -46,12 +46,20 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+import httpx
+
+# Centralized LLM provider configuration (supports Claude Code Max proxy + OpenRouter)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from llm_provider import get_llm_config, check_llm_available, log_provider_info
 
 # New imports for enhanced visual feedback loop
 from .image_extractor import SchematicImageExtractor, ImageExtractionError
@@ -422,75 +430,45 @@ RESPOND IN THIS JSON FORMAT:
 
     def __init__(
         self,
-        opus_client: Any = None,
-        kimi_client: Any = None,
         openrouter_api_key: Optional[str] = None
     ):
         """
-        Initialize the dual-LLM validator with OpenRouter support.
+        Initialize the dual-LLM validator using centralized llm_provider.
+
+        All LLM calls go through httpx POST to /v1/chat/completions
+        (OpenAI-compatible format). This works with both the Claude Code Max
+        proxy and OpenRouter.
 
         Args:
-            opus_client: Anthropic client for Opus 4.6 (optional, auto-configured)
-            kimi_client: Moonshot API client for Kimi K2.5 (optional)
-            openrouter_api_key: OpenRouter API key (recommended - can access both models)
+            openrouter_api_key: OpenRouter API key override (optional, env var used otherwise)
         """
-        self.kimi_client = kimi_client
-        self._ai_provider = os.environ.get("AI_PROVIDER", "claude_code_max")
-        self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        # Resolve LLM configuration from centralized provider
+        self._llm_config = get_llm_config()
+        self._llm_chat_url = self._llm_config["base_url"]  # Already points to /v1/chat/completions
+        self._llm_headers = self._llm_config["headers"]
+        self._ai_provider = self._llm_config["provider"]
 
-        # Resolve LLM base URL based on provider
-        if self._ai_provider == "claude_code_max":
-            proxy_url = os.environ.get(
-                "CLAUDE_CODE_PROXY_URL",
-                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+        # Allow explicit OpenRouter key override
+        if openrouter_api_key:
+            self._llm_headers["Authorization"] = f"Bearer {openrouter_api_key}"
+
+        # Model identifiers
+        self.opus_model = "anthropic/claude-opus-4.6"
+        self.kimi_model = "google/gemini-2.5-pro"  # Alternative vision model via OpenRouter
+
+        # Validate provider is available
+        if not check_llm_available():
+            raise RuntimeError(
+                f"LLM provider '{self._ai_provider}' is not available. "
+                f"For claude_code_max: ensure CLAUDE_CODE_PROXY_URL is reachable. "
+                f"For openrouter: set OPENROUTER_API_KEY environment variable."
             )
-            self._llm_base_url = f"{proxy_url}/v1"
-            self._llm_chat_url = f"{proxy_url}/v1/chat/completions"
-            logger.info(f"DualLLMVisualValidator: Using Claude Code Max proxy at {proxy_url}")
-        else:
-            self._llm_base_url = "https://openrouter.ai/api/v1"
-            self._llm_chat_url = "https://openrouter.ai/api/v1/chat/completions"
 
-        # Configure Opus client via Claude Code Max proxy, OpenRouter, or direct Anthropic API
-        if opus_client:
-            self.opus_client = opus_client
-            self.opus_model = "anthropic/claude-opus-4.6"
-        elif self._ai_provider == "claude_code_max":
-            try:
-                import anthropic
-                self.opus_client = anthropic.Anthropic(
-                    api_key="internal-proxy",
-                    base_url=self._llm_base_url,
-                )
-                self.opus_model = "anthropic/claude-opus-4.6"
-                logger.info("Opus client configured via Claude Code Max proxy")
-            except ImportError:
-                logger.warning("Anthropic client not available")
-                self.opus_client = None
-                self.opus_model = None
-        elif self.openrouter_api_key:
-            try:
-                import anthropic
-                self.opus_client = anthropic.Anthropic(
-                    api_key=self.openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-                self.opus_model = "anthropic/claude-opus-4.6"  # OpenRouter format
-                logger.info("Opus client configured via OpenRouter")
-            except ImportError:
-                logger.warning("Anthropic client not available")
-                self.opus_client = None
-                self.opus_model = None
-        else:
-            # Fallback to direct Anthropic API
-            try:
-                import anthropic
-                self.opus_client = anthropic.Anthropic()
-                self.opus_model = "anthropic/claude-opus-4.6"
-            except Exception as e:
-                logger.warning(f"Anthropic client not available: {e}")
-                self.opus_client = None
-                self.opus_model = None
+        log_provider_info("DualLLMVisualValidator")
+        logger.info(
+            f"DualLLMVisualValidator initialized: provider={self._ai_provider}, "
+            f"chat_url={self._llm_chat_url}, opus_model={self.opus_model}"
+        )
 
     async def validate(
         self,
@@ -574,63 +552,30 @@ RESPOND IN THIS JSON FORMAT:
         specification: str
     ) -> VisualAnalysis:
         """
-        Analyze schematic image with Claude Opus 4.6 (ultrathinking).
+        Analyze schematic image with Claude Opus 4.6 via OpenAI-compatible API.
 
         CRITICAL: This sends the actual rendered IMAGE to the LLM.
+        Uses httpx POST to /v1/chat/completions (works with Claude Code Max proxy
+        and OpenRouter).
         """
-        import time
         start_time = time.time()
+        prompt = self.OPUS_PROMPT + (
+            f"\n\nDesign Specification:\n{specification}" if specification else ""
+        )
+
+        logger.info(
+            f"Opus analysis: POST {self._llm_chat_url} "
+            f"model={self.opus_model} image_size={len(image_data)} bytes"
+        )
 
         try:
-            if self.opus_client:
-                # Use Anthropic client directly
-                response = self.opus_client.messages.create(
-                    model="claude-opus-4-6-20260206",
-                    max_tokens=4096,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/png",
-                                        "data": base64.b64encode(image_data).decode('utf-8')
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": self.OPUS_PROMPT + (
-                                        f"\n\nDesign Specification:\n{specification}" if specification else ""
-                                    )
-                                }
-                            ]
-                        }
-                    ]
-                )
-
-                return self._parse_llm_response(
-                    response.content[0].text,
-                    "Claude Opus 4.6",
-                    (time.time() - start_time) * 1000
-                )
-
-            elif self.openrouter_api_key:
-                # Use OpenRouter
-                return await self._call_openrouter(
-                    "anthropic/claude-opus-4.6",
-                    image_data,
-                    self.OPUS_PROMPT + (f"\n\nDesign Specification:\n{specification}" if specification else ""),
-                    start_time
-                )
-
-            else:
-                raise RuntimeError(
-                    "No Opus client available. "
-                    "Set OPENROUTER_API_KEY or configure Anthropic client."
-                )
-
+            return await self._call_chat_completions(
+                model=self.opus_model,
+                image_data=image_data,
+                prompt=prompt,
+                model_display_name="Claude Opus 4.6",
+                start_time=start_time
+            )
         except Exception as e:
             logger.error(f"Opus analysis error: {e}")
             raise  # NO FALLBACK - raise the error
@@ -645,56 +590,22 @@ RESPOND IN THIS JSON FORMAT:
         Analyze schematic image with Claude Opus 4.6 using enhanced prompt.
 
         This version accepts a pre-formatted prompt with progress context.
+        Uses httpx POST to /v1/chat/completions.
         NO FALLBACK - raises errors on failure.
         """
-        import time
+        logger.info(
+            f"Opus enhanced analysis: POST {self._llm_chat_url} "
+            f"model={self.opus_model} image_size={len(image_data)} bytes"
+        )
 
         try:
-            if self.opus_client:
-                response = self.opus_client.messages.create(
-                    model="claude-opus-4-6-20260206",
-                    max_tokens=4096,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/png",
-                                        "data": base64.b64encode(image_data).decode('utf-8')
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": prompt
-                                }
-                            ]
-                        }
-                    ]
-                )
-
-                return self._parse_llm_response(
-                    response.content[0].text,
-                    "Claude Opus 4.6",
-                    (time.time() - start_time) * 1000
-                )
-
-            elif self.openrouter_api_key:
-                return await self._call_openrouter(
-                    "anthropic/claude-opus-4.6",
-                    image_data,
-                    prompt,
-                    start_time
-                )
-
-            else:
-                raise RuntimeError(
-                    "No Opus client available. "
-                    "Set OPENROUTER_API_KEY or configure Anthropic client."
-                )
-
+            return await self._call_chat_completions(
+                model=self.opus_model,
+                image_data=image_data,
+                prompt=prompt,
+                model_display_name="Claude Opus 4.6",
+                start_time=start_time
+            )
         except Exception as e:
             logger.error(f"Opus enhanced analysis error: {e}")
             raise  # NO FALLBACK - raise the error
@@ -705,123 +616,172 @@ RESPOND IN THIS JSON FORMAT:
         specification: str
     ) -> VisualAnalysis:
         """
-        Analyze schematic image with Kimi K2.5.
+        Analyze schematic image with second LLM validator (Gemini 2.5 Pro or Kimi K2.5).
 
         CRITICAL: This sends the actual rendered IMAGE to the LLM.
+
+        For Claude Code Max proxy: uses Opus as the second validator (same proxy).
+        For OpenRouter: uses Gemini 2.5 Pro as an independent second opinion.
         """
-        import time
         start_time = time.time()
+        prompt = self.KIMI_PROMPT + (
+            f"\n\nDesign Specification:\n{specification}" if specification else ""
+        )
+
+        # Determine which model to use for the second validator
+        if self._ai_provider == "claude_code_max":
+            # Claude Code Max proxy only supports Anthropic models.
+            # Use the same Opus model but with the independent KIMI_PROMPT
+            # to get a different analytical perspective.
+            second_model = self.opus_model
+            display_name = "Claude Opus 4.6 (Second Validator)"
+        else:
+            # OpenRouter: use an independent vision model for true cross-validation
+            second_model = self.kimi_model
+            display_name = "Gemini 2.5 Pro (Second Validator)"
+
+        logger.info(
+            f"Second validator analysis: POST {self._llm_chat_url} "
+            f"model={second_model} image_size={len(image_data)} bytes"
+        )
 
         try:
-            if self.kimi_client:
-                # Use Moonshot client directly
-                response = self.kimi_client.chat.completions.create(
-                    model="moonshot-v1-vision",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{base64.b64encode(image_data).decode('utf-8')}"
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": self.KIMI_PROMPT + (
-                                        f"\n\nDesign Specification:\n{specification}" if specification else ""
-                                    )
-                                }
-                            ]
-                        }
-                    ]
-                )
-
-                return self._parse_llm_response(
-                    response.choices[0].message.content,
-                    "Kimi K2.5",
-                    (time.time() - start_time) * 1000
-                )
-
-            elif self.openrouter_api_key:
-                # Use OpenRouter - Kimi K2.5 may not be available, use alternative
-                return await self._call_openrouter(
-                    "google/gemini-2.5-pro",  # Alternative vision model
-                    image_data,
-                    self.KIMI_PROMPT + (f"\n\nDesign Specification:\n{specification}" if specification else ""),
-                    start_time
-                )
-
-            else:
-                raise RuntimeError(
-                    "No Kimi/alternative vision client available. "
-                    "Set OPENROUTER_API_KEY for alternative vision model access."
-                )
-
+            return await self._call_chat_completions(
+                model=second_model,
+                image_data=image_data,
+                prompt=prompt,
+                model_display_name=display_name,
+                start_time=start_time
+            )
         except Exception as e:
-            logger.error(f"Kimi analysis error: {e}")
+            logger.error(f"Second validator ({display_name}) analysis error: {e}")
             raise  # NO FALLBACK - raise the error
 
-    async def _call_openrouter(
+    async def _call_chat_completions(
         self,
         model: str,
         image_data: bytes,
         prompt: str,
-        start_time: float
+        model_display_name: str,
+        start_time: float,
+        max_tokens: int = 4096,
+        temperature: float = 0.0
     ) -> VisualAnalysis:
-        """Call OpenRouter API for LLM analysis."""
-        import time
-        import aiohttp
+        """
+        Call /v1/chat/completions endpoint with image data.
+
+        This is the single unified method for ALL LLM calls. Works with both
+        Claude Code Max proxy and OpenRouter.
+
+        Args:
+            model: Model identifier (e.g., "anthropic/claude-opus-4.6")
+            image_data: Raw image bytes (PNG)
+            prompt: Analysis prompt text
+            model_display_name: Human-readable model name for logs/results
+            start_time: time.time() when the call started
+            max_tokens: Maximum response tokens
+            temperature: Sampling temperature (0.0 for deterministic)
+
+        Returns:
+            VisualAnalysis parsed from the LLM response
+
+        Raises:
+            RuntimeError: If the API call fails or returns an error
+        """
+        img_b64 = base64.b64encode(image_data).decode('utf-8')
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert electronic schematic reviewer. Respond with valid JSON only."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_b64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                # Use provider-specific URL and headers
-                headers = {"Content-Type": "application/json"}
-                if self._ai_provider != "claude_code_max":
-                    headers["Authorization"] = f"Bearer {self.openrouter_api_key}"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+                logger.info(
+                    f"POST {self._llm_chat_url} | model={model} | "
+                    f"image={len(image_data)} bytes | max_tokens={max_tokens}"
+                )
 
-                async with session.post(
+                response = await client.post(
                     self._llm_chat_url,
-                    headers=headers,
-                    json={
-                        "model": model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/png;base64,{base64.b64encode(image_data).decode('utf-8')}"
-                                        }
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": prompt
-                                    }
-                                ]
-                            }
-                        ],
-                        "max_tokens": 4096
-                    }
-                ) as response:
-                    result = await response.json()
+                    headers=self._llm_headers,
+                    json=payload
+                )
 
-                    if "choices" in result:
-                        content = result["choices"][0]["message"]["content"]
-                        return self._parse_llm_response(
-                            content,
-                            model,
-                            (time.time() - start_time) * 1000
-                        )
-                    else:
-                        logger.error(f"OpenRouter error: {result}")
-                        return self._create_fallback_analysis(model)
+                elapsed_ms = (time.time() - start_time) * 1000
 
+                if response.status_code != 200:
+                    error_body = response.text[:500]
+                    raise RuntimeError(
+                        f"LLM API returned HTTP {response.status_code} from {self._llm_chat_url}. "
+                        f"Provider: {self._ai_provider}, Model: {model}. "
+                        f"Response body: {error_body}"
+                    )
+
+                result = response.json()
+
+                if "choices" not in result or not result["choices"]:
+                    raise RuntimeError(
+                        f"LLM API returned no choices. "
+                        f"Provider: {self._ai_provider}, Model: {model}. "
+                        f"Full response: {json.dumps(result)[:500]}"
+                    )
+
+                content = result["choices"][0]["message"]["content"]
+                logger.info(
+                    f"LLM response received: model={model_display_name}, "
+                    f"elapsed={elapsed_ms:.0f}ms, content_length={len(content)}"
+                )
+
+                return self._parse_llm_response(
+                    content,
+                    model_display_name,
+                    elapsed_ms
+                )
+
+        except httpx.TimeoutException as e:
+            raise RuntimeError(
+                f"LLM API call timed out after 180s. "
+                f"Provider: {self._ai_provider}, URL: {self._llm_chat_url}, Model: {model}. "
+                f"Error: {e}"
+            )
+        except httpx.ConnectError as e:
+            raise RuntimeError(
+                f"Cannot connect to LLM API at {self._llm_chat_url}. "
+                f"Provider: {self._ai_provider}, Model: {model}. "
+                f"Ensure the proxy/service is running and accessible. "
+                f"Error: {e}"
+            )
+        except RuntimeError:
+            raise  # Re-raise our own RuntimeErrors
         except Exception as e:
-            logger.error(f"OpenRouter call failed: {e}")
-            return self._create_fallback_analysis(model)
+            raise RuntimeError(
+                f"Unexpected error calling LLM API. "
+                f"Provider: {self._ai_provider}, URL: {self._llm_chat_url}, Model: {model}. "
+                f"Error type: {type(e).__name__}, Error: {e}"
+            )
 
     def _parse_llm_response(
         self,
@@ -1282,7 +1242,6 @@ class ValidationLoop:
             enhanced_prompt += f"\n\nDesign Specification:\n{specification}"
 
         # Run analysis with enhanced prompt
-        import time
         start_time = time.time()
 
         opus_result = await self.validator._analyze_with_opus_enhanced(

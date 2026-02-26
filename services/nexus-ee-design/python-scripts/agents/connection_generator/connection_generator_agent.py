@@ -220,6 +220,12 @@ class ConnectionGeneratorAgent:
         components = self._extract_component_info(bom, component_pins)
         logger.info(f"Extracted info for {len(components)} components")
 
+        # Step 1.5: Convert ideation seed connections to GeneratedConnection objects
+        seed_generated: List[GeneratedConnection] = []
+        if seed_connections is not None:
+            seed_generated = self._convert_seed_connections(seed_connections, components, component_pins)
+            logger.info(f"Converted {len(seed_generated)} seed connections from ideation data")
+
         # Step 2: Build connection generation context (voltage, current, signal types)
         context = self._build_wire_context(components, design_intent)
         logger.info(f"Built connection context: {len(context.voltage_map)} nets with voltage/current info")
@@ -241,7 +247,8 @@ class ConnectionGeneratorAgent:
             signal_connections = await self._generate_signal_connections_with_validation(
                 components,
                 design_intent,
-                context
+                context,
+                seed_connections=seed_connections,
             )
             logger.info(f"Generated {len(signal_connections)} logically validated signal connections")
         except Exception as e:
@@ -255,15 +262,20 @@ class ConnectionGeneratorAgent:
             raise RuntimeError(error_msg)
 
         # Validation: Check that signal connections were generated
-        if not signal_connections:
+        if not signal_connections and not seed_generated:
             error_msg = (
-                f"CRITICAL: LLM returned ZERO signal connections for {len(components)} components. "
-                f"This is FATAL - schematic would have no signal routing."
+                f"CRITICAL: LLM returned ZERO signal connections AND no seed connections "
+                f"for {len(components)} components. This is FATAL - schematic would have no signal routing."
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
         connections.extend(signal_connections)
+
+        # Step 5.5: Merge seed connections (higher priority, deduplicated)
+        if seed_generated:
+            connections = self._merge_seed_with_generated(seed_generated, connections)
+            logger.info(f"After merging seed connections: {len(connections)} total")
 
         # Step 6: Deduplicate and prioritize
         connections = self._deduplicate_connections(connections)
@@ -393,23 +405,28 @@ class ConnectionGeneratorAgent:
         self,
         components: List[ComponentInfo],
         design_intent: str,
-        context: WireGenerationContext
+        context: WireGenerationContext,
+        seed_connections: Optional[Any] = None,
     ) -> List[GeneratedConnection]:
         """
-        Generate signal connections with logical validation and retry.
+        Generate signal connections with logical validation.
 
-        Attempts up to MAX_WIRE_GENERATION_RETRIES times. If validation fails,
-        provides feedback to LLM for next attempt.
+        Uses a filter-based approach: invalid connections are removed rather
+        than rejecting the entire batch. Only retries if the LLM call itself
+        fails (network error, rate limit, etc.).
         """
+        best_connections: List[Dict] = []
+
         for attempt in range(1, MAX_WIRE_GENERATION_RETRIES + 1):
-            logger.info(f"🔄 Connection generation attempt {attempt}/{MAX_WIRE_GENERATION_RETRIES}")
+            logger.info(f"Connection generation attempt {attempt}/{MAX_WIRE_GENERATION_RETRIES}")
 
             # Build logical connection prompt
             prompt = self._build_ipc_2221_prompt(
                 components,
                 design_intent,
                 context,
-                attempt_number=attempt
+                attempt_number=attempt,
+                seed_connections=seed_connections,
             )
 
             # Call LLM (Opus 4.6)
@@ -427,37 +444,64 @@ class ConnectionGeneratorAgent:
             # Fill in default current_amps/voltage_volts where missing
             connections_data = self._fill_ipc_defaults(connections_data, context)
 
-            # Validate logical connections
-            validation_errors = self._validate_logical_connections(
-                connections_data,
-                components,
-                context
+            # Filter connections: keep valid ones, discard invalid ones
+            valid_connections, invalid_count = self._filter_valid_connections(
+                connections_data, components, context
             )
 
-            if not validation_errors:
-                logger.info(f"✅ Connection validation PASSED on attempt {attempt}")
-
-                # Convert validated connections to GeneratedConnection format
-                return self._convert_wires_to_connections(connections_data)
-
-            # Validation failed
-            logger.warning(
-                f"❌ Connection validation FAILED on attempt {attempt}: "
-                f"{len(validation_errors)} errors"
+            total = len(connections_data)
+            valid = len(valid_connections)
+            logger.info(
+                f"Connection validation: {valid}/{total} connections valid "
+                f"({invalid_count} filtered out)"
             )
-            for error in validation_errors[:10]:  # Log first 10 errors
-                logger.warning(f"  - {error}")
 
-            # If not last attempt, retry
+            # Accept if we have a meaningful number of valid connections
+            if valid > 0:
+                if valid > len(best_connections):
+                    best_connections = valid_connections
+                # If >70% are valid, accept immediately (no need to retry)
+                if valid >= total * 0.7:
+                    # Also require minimum absolute count
+                    min_connections = max(int(len(components) * 0.8), 3)
+                    if valid < min_connections:
+                        logger.warning(
+                            f"Valid connections ({valid}) below minimum threshold "
+                            f"({min_connections} = 80%% of {len(components)} components). "
+                            f"Retrying attempt {attempt + 1}..."
+                        )
+                        if valid > len(best_connections):
+                            best_connections = valid_connections
+                        continue
+                    logger.info(
+                        f"Accepting {valid} valid connections "
+                        f"({valid/total:.0%} pass rate)"
+                    )
+                    return self._convert_wires_to_connections(valid_connections)
+
+            pct = f"{valid/total:.0%}" if total > 0 else "0%"
             if attempt < MAX_WIRE_GENERATION_RETRIES:
-                logger.info(f"Retrying with validation feedback...")
-                continue
+                logger.warning(
+                    f"Low validation pass rate: {valid}/{total} ({pct}). Retrying..."
+                )
+            else:
+                logger.warning(
+                    f"Low validation pass rate: {valid}/{total} ({pct}). "
+                    f"Using best result with {len(best_connections)} connections."
+                )
 
-        # All attempts failed
+        # Use whatever valid connections we collected
+        if best_connections:
+            logger.warning(
+                f"Using best attempt with {len(best_connections)} valid connections "
+                f"(some validation errors were filtered out)"
+            )
+            return self._convert_wires_to_connections(best_connections)
+
+        # Truly no valid connections from any attempt
         raise ValidationError(
-            f"Failed to generate valid logical connections after "
-            f"{MAX_WIRE_GENERATION_RETRIES} attempts. Last errors: "
-            f"{validation_errors[:5]}"
+            f"Failed to generate any valid connections after "
+            f"{MAX_WIRE_GENERATION_RETRIES} attempts."
         )
 
     def _build_ipc_2221_prompt(
@@ -465,7 +509,8 @@ class ConnectionGeneratorAgent:
         components: List[ComponentInfo],
         design_intent: str,
         context: WireGenerationContext,
-        attempt_number: int = 1
+        attempt_number: int = 1,
+        seed_connections: Optional[Any] = None,
     ) -> str:
         """
         Build LLM prompt with strict IPC-2221 rules embedded.
@@ -500,6 +545,47 @@ class ConnectionGeneratorAgent:
             for comp in components
         )
         valid_refs = [comp.reference for comp in components]
+
+        # Build seed connections section for prompt (ground truth from ideation)
+        seed_section = ""
+        if seed_connections is not None:
+            seed_lines = []
+            for pc in getattr(seed_connections, "explicit_connections", []):
+                seed_lines.append(
+                    f"  {pc.from_component}.{pc.from_pin} → {pc.to_component}.{pc.to_pin} "
+                    f"({pc.signal_name}, {pc.signal_type})"
+                )
+            for iface in getattr(seed_connections, "interfaces", []):
+                slaves = ", ".join(iface.slave_components)
+                pins = ", ".join(f"{k}={v}" for k, v in iface.pin_mappings.items())
+                seed_lines.append(
+                    f"  {iface.interface_type}: {iface.master_component} → [{slaves}] "
+                    f"pins=[{pins}] speed={iface.speed}"
+                )
+            for rail in getattr(seed_connections, "power_rails", []):
+                consumers = ", ".join(rail.consumer_components)
+                seed_lines.append(
+                    f"  POWER: {rail.net_name} ({rail.voltage}V/{rail.current_max}A) "
+                    f"source={rail.source_component} → [{consumers}]"
+                )
+            if seed_lines:
+                num_components = len(components)
+                # Provide explicit connection count guidance to prevent LLM self-limiting
+                min_conns = max(num_components, 40)
+                typical_conns = int(num_components * 1.5)
+                seed_section = (
+                    "\n───────────────────────────────────────────────────────────────────\n"
+                    "REFERENCE CONNECTIONS (extracted from design specification)\n"
+                    "───────────────────────────────────────────────────────────────────\n"
+                    "The following connections were extracted from the design documents.\n"
+                    "Use these as a STARTING POINT — include them in your output, and then\n"
+                    "generate ALL ADDITIONAL connections needed for a complete, functional circuit.\n"
+                    f"These {len(seed_lines)} reference connections are only a partial list.\n"
+                    f"A complete schematic with {num_components} components typically requires "
+                    f"{min_conns}-{typical_conns} total signal connections (excluding power/ground).\n"
+                    "Generate every connection needed — do NOT stop at just the reference set.\n\n"
+                    + "\n".join(seed_lines) + "\n"
+                )
 
         # Truncate design_intent to avoid bloating the prompt (was 242KB in production!)
         # Connection generation only needs component list + brief design overview,
@@ -537,6 +623,7 @@ COMPONENTS (full detail):
 
 VOLTAGE MAP (V):
 {voltage_str}
+{seed_section}
 
 CURRENT MAP (A):
 {current_str}
@@ -608,6 +695,19 @@ VALIDATION CHECKLIST (Your output MUST pass all checks):
 □ High-speed signals are properly identified
 □ Net names are descriptive and follow conventions
 
+COMPLETENESS REQUIREMENT:
+You are generating connections for {len(components)} components. A complete, functional circuit
+of this size typically needs {max(len(components), 40)}-{int(len(components) * 1.5)} signal connections
+(not counting power/ground, which are handled separately). Generate ALL connections needed:
+- Every IC communication bus (SPI, I2C, UART, CAN, USB) with all signal lines
+- Every analog signal path (ADC inputs, DAC outputs, sensor signals)
+- Every feedback/control loop (enable pins, chip selects, reset lines)
+- Pull-up/pull-down resistors on open-drain/open-collector signals
+- Crystal/oscillator connections
+- LED indicator connections
+- Connector pinouts (every functional pin on every connector)
+Do NOT stop at a minimal set. Generate the COMPLETE netlist.
+
 Attempt: {attempt_number}/{MAX_WIRE_GENERATION_RETRIES}
 
 Generate ONLY the JSON output. No explanation, no markdown, just the JSON object."""
@@ -630,7 +730,7 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
 
         # Initialize HTTP client if needed
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(3600.0))
+            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(7200.0))
 
         # Build request payload (OpenAI-compatible format works with both providers)
         request_payload = {
@@ -945,6 +1045,203 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
 
         return errors
 
+    # Power pin equivalents for fuzzy matching
+    _POWER_PIN_EQUIVALENTS = {
+        "VCC": {"VCC", "VDD", "VCCIO", "V+", "AVCC", "AVDD", "DVCC", "DVDD"},
+        "GND": {"GND", "VSS", "GROUND", "AVSS", "DVSS", "AGND", "DGND", "V-", "PGND", "EPAD", "EP"},
+        "3V3": {"3V3", "3.3V", "+3V3", "+3.3V", "VCC_3V3"},
+        "5V": {"5V", "+5V", "VCC_5V"},
+    }
+
+    def _fuzzy_match_pin(self, pin_name: str, available_pins: set) -> Optional[str]:
+        """
+        Fuzzy match a pin name against available pins on a component.
+
+        Tries multiple strategies in order:
+        1. Exact match
+        2. Case-insensitive match
+        3. Strip suffix (before - or _) match
+        4. Power pin equivalents (VCC↔VDD, GND↔VSS)
+        5. Prefix match (pin starts with or available pin starts with)
+        6. Number-only match (strip alpha prefix)
+
+        Returns the matched pin name or None if no match found.
+        """
+        if not available_pins:
+            return None
+
+        # 1. Exact match
+        if pin_name in available_pins:
+            return pin_name
+
+        # 2. Case-insensitive
+        pin_upper = pin_name.upper()
+        for ap in available_pins:
+            if ap.upper() == pin_upper:
+                return ap
+
+        # 3. Strip suffix (before last - or _)
+        base_pin = pin_name.rsplit("-", 1)[0].rsplit("_", 1)[0]
+        if base_pin != pin_name:
+            for ap in available_pins:
+                if ap.upper() == base_pin.upper():
+                    return ap
+
+        # 4. Power pin equivalents
+        for group_name, equivalents in self._POWER_PIN_EQUIVALENTS.items():
+            if pin_upper in equivalents:
+                for ap in available_pins:
+                    if ap.upper() in equivalents:
+                        return ap
+
+        # 5. Prefix match
+        if len(pin_upper) >= 2:
+            for ap in available_pins:
+                ap_upper = ap.upper()
+                if ap_upper.startswith(pin_upper) or pin_upper.startswith(ap_upper):
+                    return ap
+
+        # 6. Number-only match (e.g., "1" matches "Pin_1" or "P1")
+        pin_digits = ''.join(c for c in pin_name if c.isdigit())
+        if pin_digits:
+            for ap in available_pins:
+                ap_digits = ''.join(c for c in ap if c.isdigit())
+                if ap_digits == pin_digits and len(pin_digits) >= 1:
+                    return ap
+
+        return None
+
+    def _filter_valid_connections(
+        self,
+        connections_data: List[Dict],
+        components: List[ComponentInfo],
+        context: WireGenerationContext
+    ) -> Tuple[List[Dict], int]:
+        """
+        Filter connections: keep valid ones, discard invalid ones.
+
+        Instead of rejecting the entire batch on any error, this evaluates
+        each connection independently and returns only the valid subset.
+        Performs fuzzy pin name matching and remaps pin names when possible.
+
+        Returns:
+            Tuple of (valid_connections, invalid_count)
+        """
+        valid = []
+        invalid_count = 0
+        pin_remapped_count = 0
+        pin_unmatched_count = 0
+
+        # Build component reference lookup
+        comp_refs = {c.reference for c in components}
+
+        # Build pin lookup per component (from all known pin sources)
+        comp_pins: Dict[str, set] = {}
+        for c in components:
+            all_pins = set()
+            for p in c.pins:
+                name = p.get("name", "")
+                num = p.get("number", "")
+                if name:
+                    all_pins.add(name)
+                if num:
+                    all_pins.add(num)
+            all_pins.update(c.power_pins)
+            all_pins.update(c.ground_pins)
+            all_pins.update(c.signal_pins)
+            comp_pins[c.reference] = all_pins
+
+        required_fields = [
+            "from_ref", "from_pin", "to_ref", "to_pin", "net_name", "signal_type"
+        ]
+
+        for i, conn in enumerate(connections_data):
+            # Check required fields
+            missing_fields = [
+                f for f in required_fields if f not in conn or not conn[f]
+            ]
+            if missing_fields:
+                logger.debug(
+                    f"Filtering connection {i}: missing fields: "
+                    f"{', '.join(missing_fields)}"
+                )
+                invalid_count += 1
+                continue
+
+            from_ref = conn["from_ref"]
+            to_ref = conn["to_ref"]
+
+            # Both component references must exist in BOM
+            if from_ref not in comp_refs:
+                logger.debug(
+                    f"Filtering connection {i}: from_ref '{from_ref}' "
+                    f"not in component list"
+                )
+                invalid_count += 1
+                continue
+
+            if to_ref not in comp_refs:
+                logger.debug(
+                    f"Filtering connection {i}: to_ref '{to_ref}' "
+                    f"not in component list"
+                )
+                invalid_count += 1
+                continue
+
+            # Self-connections are invalid
+            if from_ref == to_ref and conn.get("from_pin") == conn.get("to_pin"):
+                logger.debug(
+                    f"Filtering connection {i}: self-connection on "
+                    f"{from_ref} pin {conn.get('from_pin')}"
+                )
+                invalid_count += 1
+                continue
+
+            # Pin validation with fuzzy matching (remap if possible, warn if not)
+            for ref_field, pin_field in [("from_ref", "from_pin"), ("to_ref", "to_pin")]:
+                ref = conn[ref_field]
+                pin = conn[pin_field]
+                available = comp_pins.get(ref, set())
+
+                if available and pin not in available:
+                    matched = self._fuzzy_match_pin(pin, available)
+                    if matched:
+                        logger.debug(
+                            f"Connection {i}: Remapped {ref}.{pin} → {ref}.{matched} "
+                            f"(fuzzy pin match)"
+                        )
+                        conn[pin_field] = matched
+                        pin_remapped_count += 1
+                    else:
+                        # Pin not found — log warning but DON'T reject the connection.
+                        # LLM often uses datasheet names that differ from symbol names.
+                        # The wire router has its own fuzzy matching as a second pass.
+                        logger.debug(
+                            f"Connection {i}: Pin '{pin}' not found on {ref}. "
+                            f"Available: {sorted(list(available))[:10]}. "
+                            f"Keeping connection (wire router will attempt match)."
+                        )
+                        pin_unmatched_count += 1
+
+            # Connection is valid — current_amps/voltage_volts already filled
+            # by _fill_ipc_defaults(), so we don't reject on those
+            valid.append(conn)
+
+        if invalid_count > 0:
+            logger.info(
+                f"Filtered {invalid_count}/{len(connections_data)} invalid connections. "
+                f"Keeping {len(valid)} valid connections."
+            )
+        if pin_remapped_count > 0:
+            logger.info(f"Fuzzy-matched and remapped {pin_remapped_count} pin names")
+        if pin_unmatched_count > 0:
+            logger.warning(
+                f"{pin_unmatched_count} pin names could not be matched to known symbol pins "
+                f"(will rely on wire router fuzzy matching)"
+            )
+
+        return valid, invalid_count
+
     def _remap_references(
         self,
         connections_data: List[Dict],
@@ -1126,6 +1423,180 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
                 seen[key] = conn
 
         return list(seen.values())
+
+    def _convert_seed_connections(
+        self,
+        seed: Any,
+        components: List[ComponentInfo],
+        component_pins: Optional[Dict[str, List[Dict]]] = None,
+    ) -> List[GeneratedConnection]:
+        """
+        Convert ConnectionInferenceContext from ideation into GeneratedConnection objects.
+
+        Processes:
+        1. explicit_connections (PinConnection) → direct GeneratedConnection
+        2. interfaces (InterfaceDefinition) → expanded per-signal connections
+        3. power_rails (PowerRail) → power topology connections
+
+        All seed connections get priority=15 (higher than LLM-generated priority=0-10).
+        """
+        result: List[GeneratedConnection] = []
+        comp_refs = {c.reference for c in components}
+
+        # --- 1. Explicit pin-to-pin connections ---
+        for pc in getattr(seed, "explicit_connections", []):
+            from_ref = pc.from_component
+            to_ref = pc.to_component
+            # Skip if component refs don't exist in BOM
+            if from_ref not in comp_refs:
+                logger.warning(f"SEED: Skipping explicit connection — from_ref '{from_ref}' not in BOM. Available: {sorted(comp_refs)[:10]}")
+                continue
+            if to_ref not in comp_refs:
+                logger.warning(f"SEED: Skipping explicit connection — to_ref '{to_ref}' not in BOM. Available: {sorted(comp_refs)[:10]}")
+                continue
+            conn = GeneratedConnection(
+                from_ref=from_ref,
+                from_pin=pc.from_pin,
+                to_ref=to_ref,
+                to_pin=pc.to_pin,
+                net_name=pc.signal_name or f"Net-({from_ref}-{pc.from_pin})",
+                connection_type=self._map_signal_type(pc.signal_type),
+                priority=15,
+                notes=f"SEED:explicit — {pc.notes}" if pc.notes else "SEED:explicit",
+            )
+            result.append(conn)
+            logger.debug(f"SEED explicit: {from_ref}.{pc.from_pin} → {to_ref}.{pc.to_pin} ({conn.net_name})")
+
+        # --- 2. Interface definitions (SPI, I2C, UART, etc.) ---
+        for iface in getattr(seed, "interfaces", []):
+            master = iface.master_component
+            if master not in comp_refs:
+                logger.warning(f"SEED: Interface '{iface.interface_type}' master '{master}' not in BOM")
+                continue
+            for slave in iface.slave_components:
+                if slave not in comp_refs:
+                    logger.warning(f"SEED: Interface '{iface.interface_type}' slave '{slave}' not in BOM")
+                    continue
+                # Expand pin_mappings into connections
+                for signal_name, pin_name in iface.pin_mappings.items():
+                    # For interfaces, signal_name is e.g. "MOSI", "SCK", "SDA"
+                    # pin_name is the physical pin on the master e.g. "PA7"
+                    # The slave typically has a matching signal pin name
+                    conn = GeneratedConnection(
+                        from_ref=master,
+                        from_pin=pin_name,
+                        to_ref=slave,
+                        to_pin=signal_name,  # Slave pin uses signal name (e.g., MOSI, SCK)
+                        net_name=f"{iface.interface_type}_{signal_name}",
+                        connection_type=ConnectionType.HIGH_SPEED if iface.interface_type in {"SPI", "USB"} else ConnectionType.DIGITAL,
+                        priority=15,
+                        notes=f"SEED:interface:{iface.interface_type} speed={iface.speed}",
+                    )
+                    result.append(conn)
+                    logger.debug(
+                        f"SEED interface {iface.interface_type}: {master}.{pin_name} → {slave}.{signal_name}"
+                    )
+
+        # --- 3. Power rails ---
+        for rail in getattr(seed, "power_rails", []):
+            source = rail.source_component
+            if source and source not in comp_refs:
+                logger.warning(f"SEED: Power rail '{rail.net_name}' source '{source}' not in BOM")
+                continue
+            for consumer in rail.consumer_components:
+                if consumer not in comp_refs:
+                    logger.warning(f"SEED: Power rail '{rail.net_name}' consumer '{consumer}' not in BOM")
+                    continue
+                if source:
+                    conn = GeneratedConnection(
+                        from_ref=source,
+                        from_pin=rail.net_name,  # Use net name as pin (e.g., VOUT)
+                        to_ref=consumer,
+                        to_pin=rail.net_name,  # Consumer power pin
+                        net_name=rail.net_name,
+                        connection_type=ConnectionType.POWER,
+                        priority=15,
+                        notes=f"SEED:power_rail {rail.voltage}V/{rail.current_max}A ({rail.regulator_type})",
+                    )
+                    result.append(conn)
+
+        # Validate seed connection pins against actual component pins
+        if component_pins:
+            for conn in result:
+                for attr, ref_attr in [("from_pin", "from_ref"), ("to_pin", "to_ref")]:
+                    pin = getattr(conn, attr)
+                    ref = getattr(conn, ref_attr)
+                    if ref in component_pins:
+                        available = {p.get("name", "") for p in component_pins[ref]}
+                        if pin not in available:
+                            matched = self._fuzzy_match_pin(pin, available)
+                            if matched:
+                                logger.debug(f"Seed connection: fuzzy-matched {ref}.{pin} -> {matched}")
+                                setattr(conn, attr, matched)
+
+        logger.info(
+            f"SEED CONVERSION COMPLETE: {len(result)} connections from ideation "
+            f"({len(getattr(seed, 'explicit_connections', []))} explicit, "
+            f"{len(getattr(seed, 'interfaces', []))} interfaces, "
+            f"{len(getattr(seed, 'power_rails', []))} power rails)"
+        )
+        return result
+
+    def _merge_seed_with_generated(
+        self,
+        seed_connections: List[GeneratedConnection],
+        generated_connections: List[GeneratedConnection],
+    ) -> List[GeneratedConnection]:
+        """
+        Merge seed connections (priority 15) with LLM-generated connections.
+
+        Seed connections win on conflict (same from_ref.from_pin → to_ref.to_pin).
+        """
+        # Build lookup of seed connections (include signal_type to allow
+        # different signal types on the same endpoint pair)
+        seed_keys = set()
+        for conn in seed_connections:
+            key = "|".join(sorted([
+                f"{conn.from_ref}.{conn.from_pin}",
+                f"{conn.to_ref}.{conn.to_pin}"
+            ])) + f"|{conn.connection_type.value}"
+            seed_keys.add(key)
+
+        # Filter out LLM connections that conflict with seeds
+        filtered = []
+        conflicts = 0
+        for conn in generated_connections:
+            key = "|".join(sorted([
+                f"{conn.from_ref}.{conn.from_pin}",
+                f"{conn.to_ref}.{conn.to_pin}"
+            ])) + f"|{conn.connection_type.value}"
+            if key in seed_keys:
+                conflicts += 1
+                logger.debug(f"MERGE: LLM connection {key} overridden by seed connection")
+            else:
+                filtered.append(conn)
+
+        if conflicts > 0:
+            logger.info(f"MERGE: {conflicts} LLM connections overridden by seed connections")
+
+        # Seeds first, then remaining LLM connections
+        merged = seed_connections + filtered
+        logger.info(f"MERGE RESULT: {len(seed_connections)} seed + {len(filtered)} LLM = {len(merged)} total")
+        return merged
+
+    def _map_signal_type(self, signal_type: str) -> ConnectionType:
+        """Map ideation signal_type string to ConnectionType enum."""
+        mapping = {
+            "signal": ConnectionType.SIGNAL,
+            "power": ConnectionType.POWER,
+            "ground": ConnectionType.POWER,
+            "clock": ConnectionType.CLOCK,
+            "analog": ConnectionType.ANALOG,
+            "digital": ConnectionType.DIGITAL,
+            "high_speed": ConnectionType.HIGH_SPEED,
+            "differential": ConnectionType.DIFFERENTIAL,
+        }
+        return mapping.get(signal_type.lower(), ConnectionType.SIGNAL)
 
     # Utility methods (inherited from v3.0)
 

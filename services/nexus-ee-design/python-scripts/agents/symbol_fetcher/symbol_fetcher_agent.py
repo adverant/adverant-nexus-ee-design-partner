@@ -118,6 +118,78 @@ KICAD_INSTALL_PATHS = {
 }
 
 
+# Category-appropriate pin templates for placeholder symbols
+# Each entry: (pin_name, pin_number, pin_type_str, side)
+# side: 'L'=left(input), 'R'=right(output), 'T'=top(power), 'B'=bottom(ground)
+CATEGORY_PIN_TEMPLATES = {
+    "MCU": [
+        ("VCC", "1", "power_in", "T"), ("VDD", "2", "power_in", "T"),
+        ("GND", "3", "power_in", "B"), ("VSS", "4", "power_in", "B"),
+        ("NRST", "5", "input", "L"), ("BOOT0", "6", "input", "L"),
+        ("OSC_IN", "7", "input", "L"), ("OSC_OUT", "8", "output", "R"),
+        ("PA0", "9", "bidirectional", "L"), ("PA1", "10", "bidirectional", "L"),
+        ("PA2", "11", "bidirectional", "L"), ("PA3", "12", "bidirectional", "L"),
+        ("PA4", "13", "bidirectional", "L"), ("PA5", "14", "bidirectional", "R"),
+        ("PA6", "15", "bidirectional", "R"), ("PA7", "16", "bidirectional", "R"),
+        ("PB0", "17", "bidirectional", "R"), ("PB1", "18", "bidirectional", "R"),
+        ("PB2", "19", "bidirectional", "R"), ("PB3", "20", "bidirectional", "R"),
+        ("PB4", "21", "bidirectional", "R"), ("PB5", "22", "bidirectional", "R"),
+        ("PB6", "23", "bidirectional", "R"), ("PB7", "24", "bidirectional", "R"),
+        ("SWD_IO", "25", "bidirectional", "L"), ("SWD_CLK", "26", "input", "L"),
+        ("VBAT", "27", "power_in", "T"), ("VSSA", "28", "power_in", "B"),
+        ("VDDA", "29", "power_in", "T"), ("VREF", "30", "passive", "T"),
+    ],
+    "Gate_Driver": [
+        ("VCC", "1", "power_in", "T"), ("GND", "2", "power_in", "B"),
+        ("INH", "3", "input", "L"), ("INL", "4", "input", "L"),
+        ("EN", "5", "input", "L"), ("HO", "6", "output", "R"),
+        ("LO", "7", "output", "R"), ("VB", "8", "power_in", "T"),
+        ("VS", "9", "power_in", "R"), ("DT", "10", "input", "L"),
+    ],
+    "MOSFET": [
+        ("G", "1", "input", "L"), ("D", "2", "passive", "T"),
+        ("S", "3", "passive", "B"),
+    ],
+    "CAN_Transceiver": [
+        ("VCC", "1", "power_in", "T"), ("GND", "2", "power_in", "B"),
+        ("TXD", "3", "input", "L"), ("RXD", "4", "output", "R"),
+        ("CANH", "5", "bidirectional", "R"), ("CANL", "6", "bidirectional", "R"),
+        ("S", "7", "input", "L"), ("VREF", "8", "passive", "R"),
+    ],
+    "OpAmp": [
+        ("V+", "1", "power_in", "T"), ("V-", "2", "power_in", "B"),
+        ("IN+", "3", "input", "L"), ("IN-", "4", "input", "L"),
+        ("OUT", "5", "output", "R"),
+    ],
+    "Regulator": [
+        ("VIN", "1", "power_in", "L"), ("GND", "2", "power_in", "B"),
+        ("VOUT", "3", "power_out", "R"), ("EN", "4", "input", "L"),
+        ("FB", "5", "input", "R"),
+    ],
+    "Capacitor": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "Resistor": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "Inductor": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "Diode": [("A", "1", "passive", "L"), ("K", "2", "passive", "R")],
+    "LED": [("A", "1", "passive", "L"), ("K", "2", "passive", "R")],
+    "Crystal": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "Fuse": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "Connector": [
+        ("1", "1", "passive", "L"), ("2", "2", "passive", "L"),
+        ("3", "3", "passive", "L"), ("4", "4", "passive", "L"),
+    ],
+    "BJT": [("B", "1", "input", "L"), ("C", "2", "passive", "T"), ("E", "3", "passive", "B")],
+    "Current_Sense": [
+        ("VCC", "1", "power_in", "T"), ("GND", "2", "power_in", "B"),
+        ("IN+", "3", "input", "L"), ("IN-", "4", "input", "L"),
+        ("OUT", "5", "output", "R"), ("REF", "6", "input", "L"),
+    ],
+    "ESD_Protection": [
+        ("IO1", "1", "bidirectional", "L"), ("IO2", "2", "bidirectional", "L"),
+        ("GND", "3", "power_in", "B"),
+    ],
+}
+
+
 @dataclass
 class SymbolSourceConfig:
     """Configuration for a symbol source."""
@@ -254,11 +326,21 @@ class SymbolFetcherAgent:
             raise ImportError("httpx package required. Install with: pip install httpx")
         self.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
 
-        # OpenRouter configuration for LLM-based symbol matching
-        # IMPORTANT: OpenRouter uses OpenAI-compatible API, NOT Anthropic API format
-        self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-        self._openrouter_base_url = "https://openrouter.ai/api/v1"
+        # LLM configuration: Claude Code Max proxy or OpenRouter
         self._openrouter_model = "anthropic/claude-opus-4.6"  # User directive: Opus 4.6 ONLY
+        if os.environ.get("AI_PROVIDER") == "claude_code_max":
+            proxy_url = os.environ.get(
+                "CLAUDE_CODE_PROXY_URL",
+                "http://claude-code-proxy.nexus.svc.cluster.local:3100"
+            )
+            self._openrouter_base_url = f"{proxy_url}/v1"
+            self._openrouter_api_key = "internal-proxy"
+            logger.info(f"SymbolFetcher: Using Claude Code Max proxy at {proxy_url}")
+        else:
+            # OpenRouter configuration (fallback)
+            # IMPORTANT: OpenRouter uses OpenAI-compatible API, NOT Anthropic API format
+            self._openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+            self._openrouter_base_url = "https://openrouter.ai/api/v1"
 
         # Direct Anthropic API (fallback)
         self.anthropic_client = None
@@ -2235,10 +2317,15 @@ No explanation or markdown formatting."""
         category: str
     ) -> FetchedSymbol:
         """
-        Create a minimal placeholder symbol when all else fails.
+        Create a category-appropriate placeholder symbol when all else fails.
 
         IMPORTANT: Placeholder symbols are NOT production-ready. The schematic
         validation pipeline should flag or reject schematics containing placeholders.
+
+        Unlike the old generic 4-pin box, this creates symbols with correct pin
+        names, types, and positions for each component category, which allows
+        downstream agents (connection generator, wire router) to make meaningful
+        connections.
 
         The placeholder is visually marked with "[PLACEHOLDER]" in the Value field
         to make it obvious in schematic editors that it needs replacement.
@@ -2246,18 +2333,80 @@ No explanation or markdown formatting."""
         ref_prefix = {
             'MCU': 'U', 'MOSFET': 'Q', 'Gate_Driver': 'U', 'OpAmp': 'U',
             'Capacitor': 'C', 'Resistor': 'R', 'Inductor': 'L',
-            'Connector': 'J', 'Power': 'U', 'Other': 'U'
+            'Connector': 'J', 'Power': 'U', 'Other': 'U',
+            'CAN_Transceiver': 'U', 'Regulator': 'U', 'Diode': 'D',
+            'LED': 'D', 'Crystal': 'Y', 'Fuse': 'F', 'BJT': 'Q',
+            'Current_Sense': 'U', 'ESD_Protection': 'U',
         }.get(category, 'U')
+
+        # Get category-appropriate pin template, fallback to generic 4-pin
+        default_pins = [
+            ("1", "1", "passive", "L"), ("2", "2", "passive", "L"),
+            ("3", "3", "passive", "R"), ("4", "4", "passive", "R"),
+        ]
+        pin_template = CATEGORY_PIN_TEMPLATES.get(category, default_pins)
+
+        # Group pins by side for sizing and positioning
+        sides: Dict[str, List[Tuple[str, str, str, str]]] = {
+            "L": [], "R": [], "T": [], "B": []
+        }
+        for pin_def in pin_template:
+            side = pin_def[3]
+            sides[side].append(pin_def)
+
+        # Calculate rectangle dimensions to fit all pins
+        max_lr = max(len(sides["L"]), len(sides["R"]), 1)
+        max_tb = max(len(sides["T"]), len(sides["B"]), 1)
+        spacing = 2.54
+
+        rect_half_h = max(max_lr * spacing / 2 + spacing, 5.08)
+        rect_half_w = max(max_tb * spacing / 2 + spacing, 5.08)
+
+        # Generate pin S-expressions with correct positions based on side
+        pins_sexp_lines = []
+        for pin_def in pin_template:
+            pin_name, pin_number, pin_type_str, side = pin_def
+
+            # Find this pin's index within its side group
+            side_pins = sides[side]
+            idx = next(j for j, p in enumerate(side_pins) if p[1] == pin_number)
+            count = len(side_pins)
+
+            if side == "L":
+                x = -(rect_half_w + 2.54)
+                y = (count - 1) * spacing / 2 - idx * spacing
+                angle = 0
+            elif side == "R":
+                x = (rect_half_w + 2.54)
+                y = (count - 1) * spacing / 2 - idx * spacing
+                angle = 180
+            elif side == "T":
+                x = -(count - 1) * spacing / 2 + idx * spacing
+                y = (rect_half_h + 2.54)
+                angle = 270
+            else:  # B
+                x = -(count - 1) * spacing / 2 + idx * spacing
+                y = -(rect_half_h + 2.54)
+                angle = 90
+
+            pins_sexp_lines.append(
+                f'      (pin {pin_type_str} line (at {x:.2f} {y:.2f} {angle}) (length 2.54)\n'
+                f'        (name "{pin_name}" (effects (font (size 1.27 1.27))))\n'
+                f'        (number "{pin_number}" (effects (font (size 1.27 1.27))))\n'
+                f'      )'
+            )
+
+        pins_str = "\n".join(pins_sexp_lines)
 
         # Mark the value clearly as a placeholder so it's visible in schematic editors
         placeholder_value = f"{part_number} [PLACEHOLDER]"
 
         placeholder_sexp = f'''(kicad_symbol_lib (version 20231120) (generator nexus_ee_design)
   (symbol "{part_number}" (in_bom yes) (on_board yes)
-    (property "Reference" "{ref_prefix}" (at 0 1.27 0)
+    (property "Reference" "{ref_prefix}" (at 0 {rect_half_h + 3.81:.2f} 0)
       (effects (font (size 1.27 1.27)))
     )
-    (property "Value" "{placeholder_value}" (at 0 -1.27 0)
+    (property "Value" "{placeholder_value}" (at 0 {-rect_half_h - 3.81:.2f} 0)
       (effects (font (size 1.27 1.27)))
     )
     (property "Footprint" "" (at 0 0 0)
@@ -2270,7 +2419,7 @@ No explanation or markdown formatting."""
       (effects (font (size 1.27 1.27)) hide)
     )
     (symbol "{part_number}_0_1"
-      (rectangle (start -5.08 5.08) (end 5.08 -5.08)
+      (rectangle (start {-rect_half_w:.2f} {rect_half_h:.2f}) (end {rect_half_w:.2f} {-rect_half_h:.2f})
         (stroke (width 0.254) (type default))
         (fill (type background))
       )
@@ -2279,28 +2428,14 @@ No explanation or markdown formatting."""
       )
     )
     (symbol "{part_number}_1_1"
-      (pin passive line (at -7.62 2.54 0) (length 2.54)
-        (name "1" (effects (font (size 1.27 1.27))))
-        (number "1" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at -7.62 0 0) (length 2.54)
-        (name "2" (effects (font (size 1.27 1.27))))
-        (number "2" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at 7.62 2.54 180) (length 2.54)
-        (name "3" (effects (font (size 1.27 1.27))))
-        (number "3" (effects (font (size 1.27 1.27))))
-      )
-      (pin passive line (at 7.62 0 180) (length 2.54)
-        (name "4" (effects (font (size 1.27 1.27))))
-        (number "4" (effects (font (size 1.27 1.27))))
-      )
+{pins_str}
     )
   )
 )'''
 
         logger.warning(
-            f"Created PLACEHOLDER symbol for {part_number} ({category}). "
+            f"Created PLACEHOLDER symbol for {part_number} ({category}) "
+            f"with {len(pin_template)} category-appropriate pins. "
             f"This symbol is NOT production-ready and should be replaced."
         )
 
@@ -2313,8 +2448,10 @@ No explanation or markdown formatting."""
             metadata={
                 "is_placeholder": True,
                 "is_generic": True,  # Flag for quality detection
+                "pin_template_used": True,
                 "category": category,
-                "reason": "All sources failed, created minimal placeholder",
+                "pin_count": len(pin_template),
+                "reason": "All sources failed, created category-appropriate placeholder",
                 "warning": "This placeholder must be replaced with a real symbol before production"
             }
         )

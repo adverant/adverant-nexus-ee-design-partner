@@ -175,10 +175,10 @@ class IssueToFixTransformer:
 
     # Priority order for issue categories (lower = higher priority)
     PRIORITY_ORDER = {
-        "missing_elements": 1,      # Missing components = broken circuit
-        "power_distribution": 2,    # Power issues = circuit won't work
-        "wire_routing": 3,          # Routing issues = incorrect connections
-        "overlapping": 4,           # Overlapping = hard to read
+        "overlapping": 1,           # Overlapping = blocks readability of everything else
+        "missing_elements": 2,      # Missing components = broken circuit
+        "power_distribution": 3,    # Power issues = circuit won't work
+        "wire_routing": 4,          # Routing issues = incorrect connections
         "component_placement": 5,   # Placement = readability
         "label_placement": 6,       # Labels = documentation
         "signal_flow": 7,           # Signal flow = convention
