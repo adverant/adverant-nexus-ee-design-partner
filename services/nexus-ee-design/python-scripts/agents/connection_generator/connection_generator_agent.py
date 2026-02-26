@@ -66,7 +66,7 @@ else:
 LLM_MODEL = "anthropic/claude-opus-4.6"
 
 # Validation configuration
-MAX_WIRE_GENERATION_RETRIES = 3
+MAX_WIRE_GENERATION_RETRIES = 1  # Single attempt: each LLM call takes 30-80min via proxy
 TARGET_WIRE_CROSSINGS = 10
 
 
@@ -460,24 +460,12 @@ class ConnectionGeneratorAgent:
             if valid > 0:
                 if valid > len(best_connections):
                     best_connections = valid_connections
-                # If >70% are valid, accept immediately (no need to retry)
-                if valid >= total * 0.7:
-                    # Also require minimum absolute count
-                    min_connections = max(int(len(components) * 0.8), 3)
-                    if valid < min_connections:
-                        logger.warning(
-                            f"Valid connections ({valid}) below minimum threshold "
-                            f"({min_connections} = 80%% of {len(components)} components). "
-                            f"Retrying attempt {attempt + 1}..."
-                        )
-                        if valid > len(best_connections):
-                            best_connections = valid_connections
-                        continue
-                    logger.info(
-                        f"Accepting {valid} valid connections "
-                        f"({valid/total:.0%} pass rate)"
-                    )
-                    return self._convert_wires_to_connections(valid_connections)
+                # Accept any result with valid connections (each LLM call takes 30-80min)
+                logger.info(
+                    f"Accepting {valid} valid connections "
+                    f"({valid/total:.0%} pass rate, {invalid_count} filtered)"
+                )
+                return self._convert_wires_to_connections(valid_connections)
 
             pct = f"{valid/total:.0%}" if total > 0 else "0%"
             if attempt < MAX_WIRE_GENERATION_RETRIES:

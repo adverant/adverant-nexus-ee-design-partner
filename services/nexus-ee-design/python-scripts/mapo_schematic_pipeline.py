@@ -633,7 +633,7 @@ class MAPOSchematicPipeline:
                         design_intent=design_intent,
                         component_pins=component_pins,
                         seed_connections=seed_connections,
-                        max_retries=3,
+                        max_retries=1,  # Single retry: each LLM call takes 30-80min via proxy
                         base_delay=10.0,
                         phase_name="connections",
                     )
