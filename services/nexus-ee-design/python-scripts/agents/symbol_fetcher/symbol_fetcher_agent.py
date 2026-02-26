@@ -677,25 +677,32 @@ class SymbolFetcherAgent:
                     )
 
         # Try fuzzy match using part number prefix
+        # Skip fuzzy matching for power symbols (VCC, GND, etc.) — these must
+        # match exactly, otherwise "GND" normalizes to "G" (stripping "ND" suffix)
+        # and falsely matches unrelated parts like "FG28X7R1E222K".
+        POWER_SYMBOLS = {"VCC", "GND", "VDD", "VSS", "VBUS", "3V3", "5V", "12V", "+3V3", "+5V", "+12V"}
         normalized = self._normalize_part_number(part_number)
-        for cat_dir in self.cache_path.iterdir():
-            if cat_dir.is_dir():
-                for symbol_file in cat_dir.glob("*.kicad_sym"):
-                    cached_normalized = self._normalize_part_number(symbol_file.stem)
-                    # Check if either contains the other (handles suffix variants)
-                    if normalized in cached_normalized or cached_normalized in normalized:
-                        logger.info(
-                            f"Fuzzy cache hit: '{part_number}' matched '{symbol_file.stem}' "
-                            f"(normalized: '{normalized}' in '{cached_normalized}')"
-                        )
-                        symbol_sexp = symbol_file.read_text()
-                        return FetchedSymbol(
-                            part_number=symbol_file.stem,
-                            manufacturer=manufacturer,
-                            symbol_sexp=symbol_sexp,
-                            source=SymbolSource.LOCAL_CACHE,
-                            metadata={'fuzzy_match': True, 'original_query': part_number}
-                        )
+        if part_number.upper() not in POWER_SYMBOLS and len(normalized) >= 4:
+            for cat_dir in self.cache_path.iterdir():
+                if cat_dir.is_dir():
+                    for symbol_file in cat_dir.glob("*.kicad_sym"):
+                        cached_normalized = self._normalize_part_number(symbol_file.stem)
+                        if len(cached_normalized) < 4:
+                            continue
+                        # Check if either contains the other (handles suffix variants)
+                        if normalized in cached_normalized or cached_normalized in normalized:
+                            logger.info(
+                                f"Fuzzy cache hit: '{part_number}' matched '{symbol_file.stem}' "
+                                f"(normalized: '{normalized}' in '{cached_normalized}')"
+                            )
+                            symbol_sexp = symbol_file.read_text()
+                            return FetchedSymbol(
+                                part_number=symbol_file.stem,
+                                manufacturer=manufacturer,
+                                symbol_sexp=symbol_sexp,
+                                source=SymbolSource.LOCAL_CACHE,
+                                metadata={'fuzzy_match': True, 'original_query': part_number}
+                            )
 
         # Try matching by base part family (strip trailing package/variant codes)
         # e.g., STM32G431CBT6 → STM32G431CB, TJA1051T/3 → TJA1051T
@@ -1991,8 +1998,10 @@ No explanation or markdown formatting."""
         # Remove common suffixes and normalize
         normalized = part_number.upper()
         normalized = re.sub(r'[-_\s/]', '', normalized)
-        # Remove packaging/ordering suffixes
-        normalized = re.sub(r'(TR|CT|ND|REEL|TAPE|CUT|BULK)$', '', normalized)
+        # Remove packaging/ordering suffixes — only if the remaining part is
+        # long enough (>= 4 chars) to prevent stripping "ND" from "GND" etc.
+        if len(normalized) > 5:
+            normalized = re.sub(r'(TR|CT|ND|REEL|TAPE|CUT|BULK)$', '', normalized)
         return normalized
 
     # Generic symbol mappings for passives

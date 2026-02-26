@@ -1,0 +1,7 @@
+{
+  "part_number": "GND",
+  "manufacturer": null,
+  "category": "Power",
+  "source": "local_cache",
+  "pins": [{"number": "1", "name": "~", "type": "power_in"}]
+}
