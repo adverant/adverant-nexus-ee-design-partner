@@ -251,7 +251,7 @@ class ContinuousLoopRunner:
         # Build BOM
         subsystem_dicts = [{"name": s} for s in self.subsystems]
         bom = create_foc_esc_bom(subsystem_dicts)
-        design_intent = create_design_intent(subsystem_dicts)
+        design_intent = create_design_intent(subsystem_dicts, self.design_name)
 
         # Pipeline config
         pipeline_config = PipelineConfig()
