@@ -242,10 +242,13 @@ class SchematicAssemblerAgent:
         "Gate_Driver": "U",
         "OpAmp": "U",
         "Amplifier": "U",
+        "CAN_Transceiver": "U",
         "Capacitor": "C",
         "Resistor": "R",
         "Inductor": "L",
+        "Thermistor": "R",
         "Diode": "D",
+        "TVS": "D",
         "LED": "D",
         "Connector": "J",
         "Power": "U",
@@ -476,16 +479,26 @@ class SchematicAssemblerAgent:
 
         for item in bom:
             symbol_data = resolved_symbols.get(item.part_number)
-            if not symbol_data:
-                continue
 
-            # Determine reference for this BOM item
+            # CRITICAL: Always advance the reference counter for every BOM item,
+            # even if symbol_data is None. This ensures reference numbering stays
+            # synchronized with _assign_components() which processes ALL items.
+            # Without this, items after an unresolved symbol get DIFFERENT references
+            # in resolve_symbols_only vs _assign_components, causing wire routing
+            # to fail (zero wires).
             if item.reference:
                 reference = item.reference
             else:
                 prefix = self.REF_PREFIXES.get(item.category, "U")
                 temp_ref_counters[prefix] = temp_ref_counters.get(prefix, 0) + 1
                 reference = f"{prefix}{temp_ref_counters[prefix]}"
+
+            if not symbol_data:
+                logger.debug(
+                    f"No symbol data for {reference} ({item.part_number}) "
+                    f"— reference counter advanced, no pins extracted"
+                )
+                continue
 
             # Extract pins from resolved symbol data
             raw_pins = symbol_data.get("pins", [])

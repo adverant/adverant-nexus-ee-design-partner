@@ -1647,13 +1647,20 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
     # Utility methods (inherited from v3.0)
 
     def _get_ref_prefix(self, category: str) -> str:
-        """Get reference designator prefix for category."""
+        """Get reference designator prefix for category.
+
+        MUST stay synchronized with assembler_agent.REF_PREFIXES to ensure
+        consistent reference numbering across resolve_symbols_only,
+        _extract_component_info, and _assign_components.
+        """
         prefixes = {
             "MCU": "U", "IC": "U", "MOSFET": "Q", "BJT": "Q",
-            "Gate_Driver": "U", "Amplifier": "U", "Capacitor": "C",
-            "Resistor": "R", "Inductor": "L", "Diode": "D",
-            "LED": "D", "Connector": "J", "Crystal": "Y",
-            "CAN_Transceiver": "U", "TVS": "D",
+            "Transistor": "Q", "Gate_Driver": "U", "OpAmp": "U",
+            "Amplifier": "U", "CAN_Transceiver": "U", "Capacitor": "C",
+            "Resistor": "R", "Inductor": "L", "Thermistor": "R",
+            "Diode": "D", "TVS": "D", "LED": "D", "Connector": "J",
+            "Power": "U", "Regulator": "U", "Crystal": "Y",
+            "Fuse": "F", "Relay": "K", "Transformer": "T",
         }
         return prefixes.get(category, "U")
 
