@@ -717,11 +717,7 @@ class MAPOSchematicPipeline:
                             from agents.connection_generator.connection_generator_agent import (
                                 ConnectionGeneratorAgent,
                             )
-                            fallback_gen = ConnectionGeneratorAgent(
-                                llm_base_url=self.config.llm_base_url,
-                                llm_api_key=self.config.llm_api_key,
-                                llm_model=self.config.llm_model,
-                            )
+                            fallback_gen = ConnectionGeneratorAgent()
                             components = fallback_gen._extract_component_info(
                                 bom, component_pins
                             )
