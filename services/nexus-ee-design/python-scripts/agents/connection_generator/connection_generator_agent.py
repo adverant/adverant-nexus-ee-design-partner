@@ -733,6 +733,8 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(7200.0))
 
         # Build request payload (OpenAI-compatible format works with both providers)
+        # Use streaming to avoid Claude CLI proxy hanging on large non-streaming requests
+        use_streaming = self._ai_provider == "claude_code_max"
         request_payload = {
             "model": LLM_MODEL,
             "messages": [
@@ -740,6 +742,7 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
             ],
             "max_tokens": 16384,  # Large enough for complex circuits
             "temperature": 0.1,   # Low temperature for structured output
+            "stream": use_streaming,
         }
 
         # Build headers based on provider
@@ -753,29 +756,61 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
             headers["X-Title"] = "Nexus EE Design Connection Generator v3.2"
 
         provider_label = "Claude Code Max proxy" if self._ai_provider == "claude_code_max" else "OpenRouter"
-        logger.info(f"Calling {provider_label} ({LLM_MODEL}) for logical connection generation...")
+        logger.info(f"Calling {provider_label} ({LLM_MODEL}) for logical connection generation (stream={use_streaming})...")
 
-        response = await self._http_client.post(
-            f"{self._llm_base_url}/chat/completions",
-            json=request_payload,
-            headers=headers,
-        )
-
-        # Check for HTTP errors
-        if response.status_code != 200:
-            raise ValueError(
-                f"LLM API Error ({provider_label}): Status {response.status_code}, "
-                f"Response: {response.text[:500]}"
+        if use_streaming:
+            # Streaming mode for Claude Code Max proxy to avoid hung CLI processes
+            response_text = ""
+            async with self._http_client.stream(
+                "POST",
+                f"{self._llm_base_url}/chat/completions",
+                json=request_payload,
+                headers=headers,
+            ) as stream_response:
+                if stream_response.status_code != 200:
+                    error_body = await stream_response.aread()
+                    raise ValueError(
+                        f"LLM API Error ({provider_label}): Status {stream_response.status_code}, "
+                        f"Response: {error_body.decode()[:500]}"
+                    )
+                async for line in stream_response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]  # strip "data: " prefix
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            response_text += content
+                    except (json.JSONDecodeError, IndexError, KeyError):
+                        continue
+            logger.info(f"Received {len(response_text)} chars from {provider_label} (streaming)")
+        else:
+            # Non-streaming mode for OpenRouter
+            response = await self._http_client.post(
+                f"{self._llm_base_url}/chat/completions",
+                json=request_payload,
+                headers=headers,
             )
 
-        # Parse response
-        response_data = response.json()
+            # Check for HTTP errors
+            if response.status_code != 200:
+                raise ValueError(
+                    f"LLM API Error ({provider_label}): Status {response.status_code}, "
+                    f"Response: {response.text[:500]}"
+                )
 
-        if "choices" not in response_data or len(response_data["choices"]) == 0:
-            raise ValueError(f"OpenRouter returned empty response: {response_data}")
+            # Parse response
+            response_data = response.json()
 
-        response_text = response_data["choices"][0]["message"]["content"].strip()
-        logger.info(f"Received {len(response_text)} chars from OpenRouter")
+            if "choices" not in response_data or len(response_data["choices"]) == 0:
+                raise ValueError(f"OpenRouter returned empty response: {response_data}")
+
+            response_text = response_data["choices"][0]["message"]["content"].strip()
+            logger.info(f"Received {len(response_text)} chars from {provider_label}")
 
         # Parse JSON (with cleanup)
         connections_json = self._parse_llm_json(response_text)
