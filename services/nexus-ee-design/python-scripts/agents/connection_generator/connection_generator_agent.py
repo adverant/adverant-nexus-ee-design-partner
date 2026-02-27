@@ -383,15 +383,22 @@ class ConnectionGeneratorAgent:
             if component_pins and reference in component_pins:
                 comp.pins = component_pins[reference]
 
-                # Classify pins
+                # Classify pins — check name patterns FIRST (more specific than pin_type)
+                # Bug fix: GND with pin_type="power_in" was matching the power branch
                 for pin in comp.pins:
                     pin_name = pin.get("name", "").upper()
                     pin_type = pin.get("pin_type", "")
 
-                    if self._is_power_pin(pin_name) or pin_type == "power_in":
-                        comp.power_pins.append(pin_name)
-                    elif self._is_ground_pin(pin_name) or pin_type == "power_in":
+                    if self._is_ground_pin(pin_name):
                         comp.ground_pins.append(pin_name)
+                    elif self._is_power_pin(pin_name):
+                        comp.power_pins.append(pin_name)
+                    elif pin_type == "power_in":
+                        # Ambiguous pin_type — classify by name heuristic
+                        if any(g in pin_name for g in ("GND", "VSS", "AGND", "DGND")):
+                            comp.ground_pins.append(pin_name)
+                        else:
+                            comp.power_pins.append(pin_name)
                     else:
                         comp.signal_pins.append(pin_name)
             else:

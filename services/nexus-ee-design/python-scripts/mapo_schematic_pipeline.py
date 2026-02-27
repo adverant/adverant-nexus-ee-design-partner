@@ -508,6 +508,7 @@ class MAPOSchematicPipeline:
         interfaces: List[InterfaceDefinition] = []
 
         # CAN bus: MCU → CAN transceiver
+        # pin_mappings keys are used as to_pin on the slave, so use slave's actual pin names
         if mcu_ref and can_transceiver_ref:
             pin_mappings: Dict[str, str] = {}
             mcu_can_tx = find_pin(mcu_ref, [
@@ -516,10 +517,17 @@ class MAPOSchematicPipeline:
             mcu_can_rx = find_pin(mcu_ref, [
                 r"^CAN_RX$", r"^CAN1_RX$", r"^FDCAN1_RX$", r"^PA11$", r"^PB8$",
             ])
-            if mcu_can_tx:
-                pin_mappings["CAN_TX"] = mcu_can_tx
-            if mcu_can_rx:
-                pin_mappings["CAN_RX"] = mcu_can_rx
+            # Find the actual pin names on the CAN transceiver (TXD/RXD, not CAN_TX/CAN_RX)
+            slave_txd = find_pin(can_transceiver_ref, [
+                r"^TXD$", r"^TX$", r"^CAN_TX$", r"^DI$",
+            ])
+            slave_rxd = find_pin(can_transceiver_ref, [
+                r"^RXD$", r"^RX$", r"^CAN_RX$", r"^RO$",
+            ])
+            if mcu_can_tx and slave_txd:
+                pin_mappings[slave_txd] = mcu_can_tx
+            if mcu_can_rx and slave_rxd:
+                pin_mappings[slave_rxd] = mcu_can_rx
             if pin_mappings:
                 interfaces.append(InterfaceDefinition(
                     interface_type="CAN",
@@ -595,9 +603,22 @@ class MAPOSchematicPipeline:
                     ))
 
         # Current sense amp inputs ← shunt resistor
+        # Helper: get actual pin names for 2-pin passives (resistors, crystals)
+        # KiCad Device:R uses "~" for unnamed pins, or "1"/"2", or "p1"/"p2"
+        def get_passive_pins(ref: str) -> tuple:
+            """Return (pin1, pin2) actual names for a 2-pin passive component."""
+            pins = component_pins.get(ref, [])
+            pin_names = [p.get("name", "") for p in pins]
+            if len(pin_names) >= 2:
+                return (pin_names[0], pin_names[1])
+            elif len(pin_names) == 1:
+                return (pin_names[0], pin_names[0])
+            return ("1", "2")  # Last resort fallback
+
         for i, amp_ref in enumerate(amplifier_refs):
             if i < len(shunt_refs):
                 shunt_ref = shunt_refs[i]
+                shunt_p1, shunt_p2 = get_passive_pins(shunt_ref)
                 amp_inp = find_pin(amp_ref, [
                     r"^INP$", r"^IN\+$", r"^VS\+$", r"^INP\+$",
                 ])
@@ -607,7 +628,7 @@ class MAPOSchematicPipeline:
                 if amp_inp:
                     explicit_connections.append(PinConnection(
                         from_component=shunt_ref,
-                        from_pin="1",
+                        from_pin=shunt_p1,
                         to_component=amp_ref,
                         to_pin=amp_inp,
                         signal_name=f"ISENSE_{i + 1}_P",
@@ -617,7 +638,7 @@ class MAPOSchematicPipeline:
                 if amp_inm:
                     explicit_connections.append(PinConnection(
                         from_component=shunt_ref,
-                        from_pin="2",
+                        from_pin=shunt_p2,
                         to_component=amp_ref,
                         to_pin=amp_inm,
                         signal_name=f"ISENSE_{i + 1}_N",
@@ -627,6 +648,7 @@ class MAPOSchematicPipeline:
 
         # Crystal → MCU oscillator pins
         if crystal_ref and mcu_ref:
+            crystal_p1, crystal_p2 = get_passive_pins(crystal_ref)
             osc_in = find_pin(mcu_ref, [
                 r"^OSC_IN$", r"^OSC32_IN$", r"^PF0$", r"^PD0$",
             ])
@@ -636,7 +658,7 @@ class MAPOSchematicPipeline:
             if osc_in:
                 explicit_connections.append(PinConnection(
                     from_component=crystal_ref,
-                    from_pin="1",
+                    from_pin=crystal_p1,
                     to_component=mcu_ref,
                     to_pin=osc_in,
                     signal_name="HSE_IN",
@@ -646,7 +668,7 @@ class MAPOSchematicPipeline:
             if osc_out:
                 explicit_connections.append(PinConnection(
                     from_component=crystal_ref,
-                    from_pin="2",
+                    from_pin=crystal_p2,
                     to_component=mcu_ref,
                     to_pin=osc_out,
                     signal_name="HSE_OUT",
