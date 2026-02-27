@@ -68,7 +68,7 @@ else:
 LLM_MODEL = "anthropic/claude-opus-4.6"
 
 # Validation configuration
-MAX_WIRE_GENERATION_RETRIES = 1  # Single attempt: each LLM call takes 30-80min via proxy
+MAX_WIRE_GENERATION_RETRIES = 3  # Retry on proxy CLI failures (exit code 1 → empty response)
 TARGET_WIRE_CROSSINGS = 10
 
 
@@ -435,9 +435,21 @@ class ConnectionGeneratorAgent:
             try:
                 connections_data = await self._call_llm_for_wires(prompt)
             except Exception as e:
+                error_msg = str(e).lower()
+                # Don't retry auth errors — token needs manual refresh
+                is_auth_error = any(
+                    kw in error_msg
+                    for kw in ["auth", "expired", "401", "unauthorized", "token"]
+                )
+                if is_auth_error:
+                    logger.error(f"Auth error on attempt {attempt} — not retrying: {e}")
+                    raise
                 logger.error(f"LLM call failed on attempt {attempt}: {e}")
                 if attempt == MAX_WIRE_GENERATION_RETRIES:
                     raise
+                backoff = min(30 * (2 ** (attempt - 1)), 120)
+                logger.info(f"Waiting {backoff}s before retry (exponential backoff)...")
+                await asyncio.sleep(backoff)
                 continue
 
             # Diagnostic: save raw LLM connection data to file for debugging
@@ -743,6 +755,40 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(7200.0))
 
+        # Pre-flight: check proxy auth before starting a 30-80min LLM call
+        if self._ai_provider == "claude_code_max":
+            try:
+                auth_resp = await self._http_client.get(
+                    f"{CLAUDE_CODE_PROXY_URL}/auth/status",
+                    timeout=10.0
+                )
+                if auth_resp.status_code == 200:
+                    auth_data = auth_resp.json()
+                    if not auth_data.get("authenticated") or auth_data.get("expired"):
+                        raise ValueError(
+                            "Claude Code proxy auth expired! Token needs manual refresh. "
+                            f"Auth status: {auth_data}"
+                        )
+                    # Warn if token expires within 2 hours (connection gen takes 30-80 min)
+                    expires_at = auth_data.get("expiresAt", "")
+                    if expires_at:
+                        from datetime import datetime, timezone
+                        try:
+                            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                            remaining = (exp_dt - datetime.now(timezone.utc)).total_seconds()
+                            if remaining < 7200:
+                                logger.warning(
+                                    f"Proxy token expires in {remaining/60:.0f}min — "
+                                    f"connection gen may fail mid-request"
+                                )
+                        except (ValueError, TypeError):
+                            pass
+            except httpx.ConnectError:
+                raise ValueError(
+                    f"Cannot reach Claude Code proxy at {CLAUDE_CODE_PROXY_URL}. "
+                    "Ensure proxy pod is running."
+                )
+
         # Build request payload (OpenAI-compatible format works with both providers)
         # Use streaming to avoid Claude CLI proxy hanging on large non-streaming requests
         use_streaming = self._ai_provider == "claude_code_max"
@@ -799,6 +845,12 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
                     except (json.JSONDecodeError, IndexError, KeyError):
                         continue
             logger.info(f"Received {len(response_text)} chars from {provider_label} (streaming)")
+            if len(response_text) < 10:
+                raise ValueError(
+                    f"Empty or near-empty response from {provider_label} "
+                    f"(streaming): {len(response_text)} chars. "
+                    f"Proxy CLI may have crashed (exit code 1)."
+                )
         else:
             # Non-streaming mode for OpenRouter
             response = await self._http_client.post(

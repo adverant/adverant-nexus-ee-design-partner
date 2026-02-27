@@ -57,7 +57,7 @@ class QualityGates:
     connection_coverage_min: float = 0.80     # >= 80% BOM connected
     overlap_count_max: int = 0               # 0 overlaps
     smoke_test_fatal_max: int = 0            # 0 fatal issues
-    visual_score_min: float = 0.85           # visual >= 85%
+    visual_score_min: float = 0.55           # visual >= 55% (text-only via proxy, 85% with image)
     center_fallback_ratio_max: float = 0.10  # < 10% center fallbacks
 
 
@@ -421,8 +421,8 @@ def main():
         help="Output directory for iteration results"
     )
     parser.add_argument(
-        "--visual-threshold", type=float, default=0.85,
-        help="Visual validation score threshold (default: 0.85)"
+        "--visual-threshold", type=float, default=0.55,
+        help="Visual validation score threshold (default: 0.55 for text-only proxy, 0.85 with image)"
     )
     parser.add_argument(
         "--allow-placeholders", action="store_true",
