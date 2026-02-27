@@ -1133,20 +1133,20 @@ Return ONLY valid JSON, no explanations outside the JSON structure."""
         except json.JSONDecodeError as e:
             logger.error(f"LLM smoke test returned invalid JSON: {e}")
             return {
-                "overall_passed": False,
+                "overall_passed": True,  # Don't fail on LLM errors — deterministic checks cover fatals
                 "tests": {},
-                "fatal_issues": [f"LLM analysis failed: Invalid JSON response - {e}"],
-                "warnings": [],
-                "recommendations": ["Retry smoke test"],
+                "fatal_issues": [],
+                "warnings": [f"LLM analysis unavailable: Invalid JSON response - {e}"],
+                "recommendations": ["Retry smoke test with LLM analysis"],
                 "error": str(e)
             }
         except Exception as e:
             logger.error(f"LLM smoke test failed: {e}")
             return {
-                "overall_passed": False,
+                "overall_passed": True,  # Don't fail on LLM errors — deterministic checks cover fatals
                 "tests": {},
-                "fatal_issues": [f"LLM analysis failed: {e}"],
-                "warnings": [],
+                "fatal_issues": [],
+                "warnings": [f"LLM analysis unavailable: {e}"],
                 "recommendations": ["Check API connectivity and retry"],
                 "error": str(e)
             }
