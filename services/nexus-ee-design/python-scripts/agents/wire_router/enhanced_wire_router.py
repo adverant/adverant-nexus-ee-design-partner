@@ -353,13 +353,19 @@ class EnhancedWireRouter:
 
         min_x, min_y, max_x, max_y = sheet_bounds
 
-        # Rail position
+        # Compute component bounding box for dynamic rail placement
+        # Place rails OUTSIDE all components to prevent signal wire crossings
+        comp_ys = [pos[1] for pos in component_positions.values()] if component_positions else []
+        comp_min_y = min(comp_ys) if comp_ys else min_y
+        comp_max_y = max(comp_ys) if comp_ys else max_y
+
+        # Rail position — outside component bounding box
         if is_ground:
-            rail_y = max_y - self.POWER_RAIL_MARGIN
+            rail_y = comp_max_y + self.POWER_RAIL_MARGIN + 5.0  # Below all components
             net_name = "GND"
             route_type = RouteType.GROUND
         else:
-            rail_y = min_y + self.POWER_RAIL_MARGIN
+            rail_y = comp_min_y - self.POWER_RAIL_MARGIN - 5.0  # Above all components
             net_name = connections[0].get("net_name", "VCC")
             route_type = RouteType.POWER
 
@@ -667,11 +673,39 @@ class EnhancedWireRouter:
             # Standard L-route
             wires = self._l_route(sx, sy, ex, ey, net_name, route_type)
 
+        # Check if proposed route crosses existing power/ground wires
+        # If so, try offset paths to avoid crossings
+        if self._has_power_crossing(wires, net_name):
+            for offset_mult in [1, -1, 2, -2]:
+                offset = offset_mult * self.GRID_UNIT
+                alt_wires = self._l_route(sx, sy + offset, ex, ey, net_name, route_type)
+                if not self._has_power_crossing(alt_wires, net_name):
+                    # Add short jog wire from original start to offset start
+                    jog = WireSegment(
+                        start=(sx, sy), end=(sx, sy + offset),
+                        net_name=net_name, route_type=route_type
+                    )
+                    wires = [jog] + alt_wires
+                    break
+
         # Register occupied points
         for wire in wires:
             self._register_wire(wire)
 
         return wires
+
+    def _has_power_crossing(self, candidate_wires: List[WireSegment], net_name: str) -> bool:
+        """Check if any candidate wire crosses an existing power/ground wire."""
+        power_types = {RouteType.POWER, RouteType.GROUND}
+        for cw in candidate_wires:
+            for existing in self._wires:
+                if existing.net_name == net_name:
+                    continue  # Same net, not a crossing
+                if existing.route_type not in power_types:
+                    continue  # Only avoid crossing power/ground rails
+                if self._wires_intersect(cw, existing):
+                    return True
+        return False
 
     def _l_route(
         self,

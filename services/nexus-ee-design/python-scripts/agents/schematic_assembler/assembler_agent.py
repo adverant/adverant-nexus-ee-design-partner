@@ -1462,14 +1462,21 @@ JSON array of pins:"""
                     pin_pos, resolved_pin = find_pin_position(from_ref, conn.from_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.to_pin or "VCC"
-                        # Place power label at the pin position
+                        label_pos = (pin_pos[0] + 2.54, pin_pos[1])
+                        # Stub wire from IC pin to label (required for connectivity)
+                        sheet.wires.append(Wire(
+                            start=(pin_pos[0], pin_pos[1]),
+                            end=label_pos,
+                        ))
+                        # Place power label at the wire endpoint
                         sheet.labels.append(Label(
                             text=label_text,
-                            position=(pin_pos[0] + 2.54, pin_pos[1]),
+                            position=label_pos,
                             rotation=0,
                             label_type="global_label"
                         ))
                         power_labels_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
+                        power_wires_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
                     else:
                         logger.warning(f"Power pin {conn.from_pin} not found on {from_ref} (tried normalization)")
                 elif is_power_from and to_ref in pin_positions:
@@ -1477,14 +1484,21 @@ JSON array of pins:"""
                     pin_pos, resolved_pin = find_pin_position(to_ref, conn.to_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.from_pin or "VCC"
-                        # Place power label at the pin position
+                        label_pos = (pin_pos[0] + 2.54, pin_pos[1])
+                        # Stub wire from IC pin to label (required for connectivity)
+                        sheet.wires.append(Wire(
+                            start=(pin_pos[0], pin_pos[1]),
+                            end=label_pos,
+                        ))
+                        # Place power label at the wire endpoint
                         sheet.labels.append(Label(
                             text=label_text,
-                            position=(pin_pos[0] + 2.54, pin_pos[1]),
+                            position=label_pos,
                             rotation=0,
                             label_type="global_label"
                         ))
                         power_labels_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
+                        power_wires_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
                     else:
                         logger.warning(f"Power pin {conn.to_pin} not found on {to_ref} (tried normalization)")
                 continue  # Don't try to route wire for power connections
@@ -1535,6 +1549,8 @@ JSON array of pins:"""
 
         if power_labels_added:
             logger.info(f"Added {len(power_labels_added)} power labels: {power_labels_added[:5]}")
+        if power_wires_added:
+            logger.info(f"Added {len(power_wires_added)} power stub wires (IC pin → label): {power_wires_added[:5]}")
 
         # VALIDATION: Check if any connections remain (allow if we added power labels)
         if not conn_dicts and not power_labels_added:

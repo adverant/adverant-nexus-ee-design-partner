@@ -129,6 +129,8 @@ spec:
             # the in-cluster Claude Code proxy; any other value uses OpenRouter
             - name: LLM_ANTHROPIC_ROUTE
               value: "claude_code_max"
+            - name: AI_PROVIDER
+              value: "claude_code_max"
             - name: LLM_CLAUDE_CODE_PROXY_URL
               value: "http://claude-code-proxy.nexus.svc.cluster.local:3100"
             - name: LLM_CLAUDE_CODE_PROXY_TIMEOUT_SECONDS
