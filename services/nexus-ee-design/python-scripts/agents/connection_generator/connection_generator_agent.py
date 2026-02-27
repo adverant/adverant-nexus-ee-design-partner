@@ -840,10 +840,23 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                         break
                     try:
                         chunk = json.loads(data_str)
+                        # Check for SSE error events from proxy
+                        if "error" in chunk and "choices" not in chunk:
+                            err_msg = chunk["error"].get("message", str(chunk["error"]))
+                            err_type = chunk["error"].get("type", "unknown")
+                            logger.error(
+                                f"Proxy SSE error event: type={err_type}, "
+                                f"message={err_msg[:500]}"
+                            )
+                            raise ValueError(
+                                f"Proxy returned error: [{err_type}] {err_msg[:500]}"
+                            )
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
                             response_text += content
+                    except ValueError:
+                        raise  # Re-raise proxy error
                     except (json.JSONDecodeError, IndexError, KeyError):
                         continue
             logger.info(f"Received {len(response_text)} chars from {provider_label} (streaming)")
