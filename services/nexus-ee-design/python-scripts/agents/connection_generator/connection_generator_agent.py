@@ -437,9 +437,10 @@ class ConnectionGeneratorAgent:
             except Exception as e:
                 error_msg = str(e).lower()
                 # Don't retry auth errors — token needs manual refresh
+                # Be specific to avoid false matches (e.g. "output token" != auth token)
                 is_auth_error = any(
                     kw in error_msg
-                    for kw in ["auth", "expired", "401", "unauthorized", "token"]
+                    for kw in ["auth expired", "401", "unauthorized", "token needs", "proxy auth"]
                 )
                 if is_auth_error:
                     logger.error(f"Auth error on attempt {attempt} — not retrying: {e}")
