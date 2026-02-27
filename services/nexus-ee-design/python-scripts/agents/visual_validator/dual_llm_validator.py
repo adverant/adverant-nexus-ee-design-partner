@@ -1137,11 +1137,11 @@ class ValidationLoop:
                     "combined_score": round(result.combined_score, 4),
                     "delta": round(result.combined_score - previous_score, 4),
                     "agreed_issues": [
-                        {"category": str(i.category), "message": i.message, "confidence": i.confidence}
+                        {"category": str(i.category), "message": i.description, "confidence": i.confidence}
                         for i in result.agreed_issues
                     ] if hasattr(result, 'agreed_issues') else [],
                     "opus_unique_issues": [
-                        {"category": str(i.category), "message": i.message, "confidence": i.confidence}
+                        {"category": str(i.category), "message": i.description, "confidence": i.confidence}
                         for i in result.unique_opus_issues
                     ] if hasattr(result, 'unique_opus_issues') else [],
                     "timestamp": datetime.now().isoformat(),

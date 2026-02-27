@@ -733,7 +733,9 @@ Do NOT stop at a minimal set. Generate the COMPLETE netlist.
 
 Attempt: {attempt_number}/{MAX_WIRE_GENERATION_RETRIES}
 
-Generate ONLY the JSON output. No explanation, no markdown, just the JSON object."""
+CRITICAL: Generate ONLY a single JSON object. Do NOT split into parts.
+Do NOT wrap in markdown code fences. Do NOT add explanations.
+Output EXACTLY one JSON object: {{"connections": [...]}}"""
 
         return prompt
 
@@ -922,6 +924,43 @@ Generate ONLY the JSON output. No explanation, no markdown, just the JSON object
                 return json.loads(json_match.group())
             except json.JSONDecodeError:
                 pass
+
+        # Handle multi-part responses: LLM sometimes splits JSON into
+        # "PART 1" and "PART 2" code blocks. Extract all code blocks and merge.
+        code_blocks = re.findall(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
+        if len(code_blocks) >= 2:
+            # Try to merge connection arrays from multiple parts
+            all_connections = []
+            for block in code_blocks:
+                block = block.strip()
+                # Try parsing the block as a complete JSON or as a partial array
+                for candidate in [block, '{"connections":' + block + '}']:
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict) and "connections" in parsed:
+                            all_connections.extend(parsed["connections"])
+                            break
+                        elif isinstance(parsed, list):
+                            all_connections.extend(parsed)
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    # Try extracting array portion from partial block
+                    arr_match = re.search(r'\[[\s\S]*\]', block)
+                    if arr_match:
+                        try:
+                            items = json.loads(arr_match.group())
+                            if isinstance(items, list):
+                                all_connections.extend(items)
+                        except json.JSONDecodeError:
+                            pass
+            if all_connections:
+                logger.info(
+                    f"Merged {len(all_connections)} connections from "
+                    f"{len(code_blocks)} code blocks"
+                )
+                return {"connections": all_connections}
 
         # Last resort: try to find a JSON array of connections
         array_match = re.search(r'\[[\s\S]*\]', clean_text)

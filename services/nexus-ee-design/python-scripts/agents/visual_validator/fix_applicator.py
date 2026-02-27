@@ -147,6 +147,7 @@ class SchematicFixApplicator:
         logger.info(f"Applying {len(fixes)} fixes to schematic")
 
         result = ApplyResult(
+            success=True,
             original_size=len(schematic_content),
         )
 
