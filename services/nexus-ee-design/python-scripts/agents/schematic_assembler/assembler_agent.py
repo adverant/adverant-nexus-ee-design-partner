@@ -564,12 +564,13 @@ class SchematicAssemblerAgent:
                     # Extract actual symbol name DETERMINISTICALLY first (no LLM)
                     actual_symbol_name = self._extract_symbol_name_deterministic(fetched.symbol_sexp)
                     if not actual_symbol_name:
-                        # Deterministic extraction failed — try LLM as fallback
+                        # Deterministic extraction failed — try LLM
                         actual_symbol_name = await self._extract_symbol_name(fetched.symbol_sexp)
                     if not actual_symbol_name:
-                        logger.warning(
-                            f"Could not extract symbol name from fetched sexp for {item.part_number} "
-                            f"(sexp length={len(fetched.symbol_sexp)}). Using part_number as name."
+                        logger.error(
+                            f"SYMBOL NAME EXTRACTION FAILED for {item.part_number}: "
+                            f"neither deterministic parser nor LLM could extract name "
+                            f"from sexp (length={len(fetched.symbol_sexp)}). Using part_number as name."
                         )
                         actual_symbol_name = fetched.part_number
                     symbol_data = {
@@ -584,10 +585,18 @@ class SchematicAssemblerAgent:
                         f"from {fetched.source.value} ({len(symbol_data['pins'])} pins)"
                     )
                 except Exception as e:
-                    logger.warning(f"Symbol fetch failed for {item.part_number}: {e}")
+                    logger.error(
+                        f"SYMBOL FETCH FAILED for {item.part_number} ({item.category}): "
+                        f"{type(e).__name__}: {e}"
+                    )
 
-            # Fallback: create generic symbol
+            # Generic symbol — symbol could not be fetched from any source
             if not symbol_data:
+                logger.error(
+                    f"NO REAL SYMBOL for {item.part_number} ({item.category}) — "
+                    f"creating generic placeholder. Pin names will be GENERIC "
+                    f"and connection routing may fail."
+                )
                 symbol_data = self._create_generic_symbol(item)
 
             resolved[item.part_number] = symbol_data
@@ -973,19 +982,29 @@ JSON array of pins:"""
         """
         prefix = self.REF_PREFIXES.get(item.category, "U")
 
+        # Refine category for subcategories with specialized pin templates
+        effective_category = item.category
+        if item.category == "Connector" and "USB" in item.part_number.upper():
+            effective_category = "USB_Connector"
+            logger.info(
+                f"Refined category for {item.part_number}: "
+                f"'{item.category}' → '{effective_category}' (USB connector detected)"
+            )
+
         # Determine number of pins based on category (matches CATEGORY_PIN_TEMPLATES)
         pin_count = {
             "Resistor": 2, "Capacitor": 2, "Inductor": 2,
             "Diode": 2, "LED": 2, "Crystal": 2, "Fuse": 2,
-            "MOSFET": 3, "BJT": 3,
+            "MOSFET": 3, "BJT": 3, "TVS": 3, "ESD_Protection": 3,
             "OpAmp": 5, "Regulator": 5,
-            "Current_Sense": 6,
+            "Amplifier": 6, "Current_Sense": 6, "IC": 6,
+            "Thermistor": 2,
             "CAN_Transceiver": 8,
+            "USB_Connector": 9,
             "Gate_Driver": 10,
             "MCU": 30,
             "Connector": 4,
-            "ESD_Protection": 3,
-        }.get(item.category, 6)  # Default 6 instead of 4
+        }.get(effective_category, 6)  # Default 6 instead of 4
 
         # Generate generic symbol S-expression
         pins_sexp = []
@@ -996,7 +1015,13 @@ JSON array of pins:"""
 
         # Use category-appropriate pin names if available
         from agents.symbol_fetcher.symbol_fetcher_agent import CATEGORY_PIN_TEMPLATES
-        template = CATEGORY_PIN_TEMPLATES.get(item.category, None)
+        template = CATEGORY_PIN_TEMPLATES.get(effective_category, None)
+        if template is None:
+            logger.error(
+                f"NO PIN TEMPLATE for category '{effective_category}' "
+                f"(part: {item.part_number}). Pins will have generic names P1, P2... "
+                f"Available categories: {sorted(CATEGORY_PIN_TEMPLATES.keys())}"
+            )
 
         for i, (x, y, angle) in enumerate(pin_positions):
             if template and i < len(template):
@@ -1150,6 +1175,14 @@ JSON array of pins:"""
                 resolution_source=source,
                 resolution_error=metadata.get("error") if quality == SymbolQuality.PLACEHOLDER else None
             )
+
+            # Compute bounding box dimensions from pin positions
+            if instance.pins:
+                xs = [p.position[0] for p in instance.pins if hasattr(p, 'position')]
+                ys = [p.position[1] for p in instance.pins if hasattr(p, 'position')]
+                if xs and ys:
+                    instance.width = max(max(xs) - min(xs) + 12.0, 10.0)
+                    instance.height = max(max(ys) - min(ys) + 10.0, 8.0)
 
             main_sheet.symbols.append(instance)
 
@@ -1528,6 +1561,8 @@ JSON array of pins:"""
                 pin_positions,
                 sheet_bounds=(0, 0, self.DEFAULT_SHEET_SIZE[0], self.DEFAULT_SHEET_SIZE[1])
             )
+            # Store routing result for pipeline quality metric extraction
+            self.last_routing_result = result
 
             # ========================================
             # POST-ROUTING VALIDATION

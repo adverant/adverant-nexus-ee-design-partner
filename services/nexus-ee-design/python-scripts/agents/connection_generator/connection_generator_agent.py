@@ -32,7 +32,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 import yaml
@@ -282,7 +282,75 @@ class ConnectionGeneratorAgent:
         # Step 6: Deduplicate and prioritize
         connections = self._deduplicate_connections(connections)
 
-        logger.info(f"✅ Total {len(connections)} logical connections generated (with IPC-2221 metadata)")
+        # Step 7: Power completeness check — ensure every IC has VCC + GND
+        ic_categories = {"mcu", "ic", "gate_driver", "can_transceiver", "regulator",
+                         "amplifier", "current_sense", "opamp"}
+        ic_components = [c for c in components if c.category.lower() in ic_categories]
+
+        # Build lookup: ref -> set of connected net_names
+        ic_power_nets: Dict[str, Set[str]] = {c.reference: set() for c in ic_components}
+        for conn in connections:
+            if conn.connection_type == ConnectionType.POWER:
+                if conn.from_ref in ic_power_nets:
+                    ic_power_nets[conn.from_ref].add(conn.net_name)
+                if conn.to_ref in ic_power_nets:
+                    ic_power_nets[conn.to_ref].add(conn.net_name)
+
+        missing_power_count = 0
+        added_power = []
+        for ic in ic_components:
+            nets = ic_power_nets.get(ic.reference, set())
+            has_vcc = any(n.upper() in {"VCC", "VDD", "3V3", "5V", "VDDA"} for n in nets)
+            has_gnd = any(n.upper() in {"GND", "VSS", "VSSA", "AGND"} for n in nets)
+
+            if not has_vcc and ic.power_pins:
+                logger.error(
+                    f"POWER CHECK: IC {ic.reference} ({ic.part_number}) has NO VCC connection. "
+                    f"Auto-adding VCC on pin {ic.power_pins[0]}."
+                )
+                added_power.append(GeneratedConnection(
+                    from_ref=ic.reference,
+                    from_pin=ic.power_pins[0],
+                    to_ref="PWR",
+                    to_pin="VCC",
+                    net_name="VCC",
+                    connection_type=ConnectionType.POWER,
+                    priority=10,
+                    notes="Auto-added: IC was missing VCC connection"
+                ))
+                missing_power_count += 1
+
+            if not has_gnd and ic.ground_pins:
+                logger.error(
+                    f"POWER CHECK: IC {ic.reference} ({ic.part_number}) has NO GND connection. "
+                    f"Auto-adding GND on pin {ic.ground_pins[0]}."
+                )
+                added_power.append(GeneratedConnection(
+                    from_ref=ic.reference,
+                    from_pin=ic.ground_pins[0],
+                    to_ref="PWR",
+                    to_pin="GND",
+                    net_name="GND",
+                    connection_type=ConnectionType.POWER,
+                    priority=10,
+                    notes="Auto-added: IC was missing GND connection"
+                ))
+                missing_power_count += 1
+
+        if added_power:
+            connections.extend(added_power)
+            connections = self._deduplicate_connections(connections)
+            logger.error(
+                f"POWER COMPLETENESS: {missing_power_count} missing power connections auto-added "
+                f"for {len([ic for ic in ic_components if not any(n.upper() in {'VCC','VDD','3V3','5V','VDDA'} for n in ic_power_nets.get(ic.reference, set())) or not any(n.upper() in {'GND','VSS','VSSA','AGND'} for n in ic_power_nets.get(ic.reference, set()))])} ICs. "
+                f"LLM or seed connections should have provided these."
+            )
+        else:
+            logger.info(
+                f"POWER COMPLETENESS: All {len(ic_components)} ICs have VCC+GND connections."
+            )
+
+        logger.info(f"Total {len(connections)} logical connections generated (with IPC-2221 metadata)")
 
         return connections
 
@@ -492,15 +560,23 @@ class ConnectionGeneratorAgent:
                 f"({invalid_count} filtered out)"
             )
 
-            # Accept if we have a meaningful number of valid connections
+            # Accept if we have valid connections
             if valid > 0:
                 if valid > len(best_connections):
                     best_connections = valid_connections
-                # Accept any result with valid connections (each LLM call takes 30-80min)
-                logger.info(
-                    f"Accepting {valid} valid connections "
-                    f"({valid/total:.0%} pass rate, {invalid_count} filtered)"
-                )
+
+                pass_rate = valid / total if total > 0 else 0
+                if pass_rate < 0.5:
+                    logger.error(
+                        f"LOW PASS RATE: Only {valid}/{total} ({pass_rate:.0%}) connections passed validation. "
+                        f"{invalid_count} rejected. This indicates pin name mismatches between "
+                        f"LLM output and actual symbol pins."
+                    )
+                else:
+                    logger.info(
+                        f"Accepting {valid} valid connections "
+                        f"({pass_rate:.0%} pass rate, {invalid_count} filtered)"
+                    )
                 return self._convert_wires_to_connections(valid_connections)
 
             pct = f"{valid/total:.0%}" if total > 0 else "0%"
@@ -931,11 +1007,16 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: find ANY JSON object
+        # Last resort: find ANY JSON object in response
         json_match = re.search(r'\{[\s\S]*\}', clean_text)
         if json_match:
             try:
-                return json.loads(json_match.group())
+                parsed = json.loads(json_match.group())
+                logger.warning(
+                    f"JSON extraction: 'connections' key not found, "
+                    f"parsed generic JSON object (keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'not a dict'})"
+                )
+                return parsed
             except json.JSONDecodeError:
                 pass
 
@@ -1348,7 +1429,8 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                 invalid_count += 1
                 continue
 
-            # Pin validation with fuzzy matching (remap if possible, warn if not)
+            # Pin validation with fuzzy matching (remap if possible, REJECT if not)
+            pin_valid = True
             for ref_field, pin_field in [("from_ref", "from_pin"), ("to_ref", "to_pin")]:
                 ref = conn[ref_field]
                 pin = conn[pin_field]
@@ -1364,18 +1446,18 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                         conn[pin_field] = matched
                         pin_remapped_count += 1
                     else:
-                        # Pin not found — log warning but DON'T reject the connection.
-                        # LLM often uses datasheet names that differ from symbol names.
-                        # The wire router has its own fuzzy matching as a second pass.
-                        logger.debug(
-                            f"Connection {i}: Pin '{pin}' not found on {ref}. "
-                            f"Available: {sorted(list(available))[:10]}. "
-                            f"Keeping connection (wire router will attempt match)."
+                        logger.error(
+                            f"PIN MISMATCH: Connection {i}: Pin '{pin}' NOT FOUND on {ref}. "
+                            f"Available pins: {sorted(list(available))[:10]}. "
+                            f"Connection REJECTED — unresolvable pin name."
                         )
                         pin_unmatched_count += 1
+                        pin_valid = False
 
-            # Connection is valid — current_amps/voltage_volts already filled
-            # by _fill_ipc_defaults(), so we don't reject on those
+            if not pin_valid:
+                invalid_count += 1
+                continue
+
             valid.append(conn)
 
         if invalid_count > 0:
@@ -1386,9 +1468,9 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
         if pin_remapped_count > 0:
             logger.info(f"Fuzzy-matched and remapped {pin_remapped_count} pin names")
         if pin_unmatched_count > 0:
-            logger.warning(
-                f"{pin_unmatched_count} pin names could not be matched to known symbol pins "
-                f"(will rely on wire router fuzzy matching)"
+            logger.error(
+                f"PIN VALIDATION: {pin_unmatched_count} pin names could NOT be matched "
+                f"to known symbol pins. These connections may fail during wire routing."
             )
 
         return valid, invalid_count
@@ -1541,6 +1623,12 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                         priority=8,
                         notes=f"Bypass cap for {ic.reference}"
                     ))
+                else:
+                    logger.error(
+                        f"IC {ic.reference} ({ic.part_number}) has NO power pins detected — "
+                        f"bypass cap {cap.reference} NOT connected to VCC. "
+                        f"Available pins: {[p.get('name', '') for p in (ic.pins or [])[:10]]}"
+                    )
 
                 if ic.ground_pins:
                     connections.append(GeneratedConnection(
@@ -1553,6 +1641,12 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                         priority=8,
                         notes=f"Bypass cap for {ic.reference}"
                     ))
+                else:
+                    logger.error(
+                        f"IC {ic.reference} ({ic.part_number}) has NO ground pins detected — "
+                        f"bypass cap {cap.reference} NOT connected to GND. "
+                        f"Available pins: {[p.get('name', '') for p in (ic.pins or [])[:10]]}"
+                    )
 
         return connections
 
@@ -1672,6 +1766,7 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                     result.append(conn)
 
         # Validate seed connection pins against actual component pins
+        seed_pin_errors = 0
         if component_pins:
             for conn in result:
                 for attr, ref_attr in [("from_pin", "from_ref"), ("to_pin", "to_ref")]:
@@ -1684,6 +1779,19 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                             if matched:
                                 logger.debug(f"Seed connection: fuzzy-matched {ref}.{pin} -> {matched}")
                                 setattr(conn, attr, matched)
+                            else:
+                                logger.error(
+                                    f"SEED PIN MISMATCH: Pin '{pin}' NOT FOUND on {ref}. "
+                                    f"Available pins: {sorted(list(available))[:10]}. "
+                                    f"Seed connection kept but wire routing may fail."
+                                )
+                                seed_pin_errors += 1
+
+        if seed_pin_errors > 0:
+            logger.error(
+                f"SEED VALIDATION: {seed_pin_errors} seed connection pins could not be "
+                f"matched to actual symbol pins. Check ideation context pin names."
+            )
 
         logger.info(
             f"SEED CONVERSION COMPLETE: {len(result)} connections from ideation "

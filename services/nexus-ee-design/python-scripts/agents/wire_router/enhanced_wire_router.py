@@ -241,7 +241,7 @@ class EnhancedWireRouter:
                 routed_count += 1
             except Exception as e:
                 skipped_count += 1
-                logger.warning(f"Skipping connection {conn.get('net_name', 'unknown')}: {e}")
+                logger.error(f"ROUTING FAILED for connection {conn.get('net_name', 'unknown')}: {type(e).__name__}: {e}")
                 self._warnings.append(str(e))
         logger.info(f"Signal routing complete: {routed_count} of {len(signal_conns)} routed, {skipped_count} skipped")
 
@@ -442,6 +442,7 @@ class EnhancedWireRouter:
                     idx = int(net.split("[")[1].split("]")[0])
                     signal_conns.append((idx, conn))
                 except ValueError:
+                    logger.error(f"BUS INDEX PARSE FAILED for net '{net}': expected format 'NAME[N]', defaulting to index 0")
                     signal_conns.append((0, conn))
 
         signal_conns.sort(key=lambda x: x[0])

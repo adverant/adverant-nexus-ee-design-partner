@@ -59,6 +59,7 @@ class QualityGates:
     smoke_test_fatal_max: int = 0            # 0 fatal issues
     visual_score_min: float = 0.55           # visual >= 55% (text-only via proxy, 85% with image)
     center_fallback_ratio_max: float = 0.10  # < 10% center fallbacks
+    functional_score_min: float = 0.60       # functional validation >= 60%
 
 
 @dataclass
@@ -75,6 +76,26 @@ class GateResult:
 # Iteration Config (tunable between attempts)
 # ---------------------------------------------------------------------------
 
+class EscalationLevel:
+    """Ralph-style progressive escalation for stagnating iterations."""
+    NONE = 0            # Normal operation
+    INCREASE_PARAMS = 1 # Increase spacing/retries aggressively
+    FULL_RESET = 2      # No checkpoint resume, fresh generation
+    ESCALATE = 3        # Log that human intervention may be needed
+
+    @staticmethod
+    def for_stagnation_count(count: int) -> int:
+        """Map consecutive stagnation count to escalation level."""
+        if count < 3:
+            return EscalationLevel.NONE
+        elif count < 5:
+            return EscalationLevel.INCREASE_PARAMS
+        elif count < 7:
+            return EscalationLevel.FULL_RESET
+        else:
+            return EscalationLevel.ESCALATE
+
+
 @dataclass
 class IterationConfig:
     """Parameters tuned between iterations based on failure analysis."""
@@ -82,6 +103,7 @@ class IterationConfig:
     connection_retry_count: int = 3
     max_visual_iterations: int = 5
     resume_from_checkpoint: bool = False
+    escalation_level: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -199,12 +221,185 @@ class ContinuousLoopRunner:
             message=f"{result.center_fallback_ratio:.1%} fallbacks (max {self.gates.center_fallback_ratio_max:.1%})",
         ))
 
+        # 7. Functional validation score (design-intent compliance)
+        functional_score = getattr(result, 'functional_score', 0.0)
+        checks.append(GateResult(
+            name="functional_score",
+            passed=functional_score >= self.gates.functional_score_min,
+            actual=functional_score,
+            threshold=self.gates.functional_score_min,
+            message=f"{functional_score:.1%} functional (min {self.gates.functional_score_min:.1%})",
+        ))
+
         return checks
 
-    # ----- Parameter adaptation -----
+    # ----- Reflection-based failure analysis -----
+
+    def _classify_failure(
+        self, gate_results: List[Dict[str, Any]], pipeline_result: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Classify the iteration failure into specific categories with root causes.
+
+        Returns a dict with:
+          - primary_failure: str (the most critical failure type)
+          - failure_types: set of all failure types detected
+          - details: human-readable analysis
+          - recommendations: list of specific parameter changes
+        """
+        failed_gates = {
+            g["name"]: g for g in gate_results if not g.get("passed", False)
+        }
+        passed_gates = {
+            g["name"]: g for g in gate_results if g.get("passed", False)
+        }
+
+        failure_types = set()
+        details = []
+        recommendations = []
+
+        # --- Power topology analysis ---
+        if "smoke_test_fatals" in failed_gates:
+            fatal_count = int(failed_gates["smoke_test_fatals"].get("actual", 0))
+            failure_types.add("power_topology_broken")
+            details.append(
+                f"POWER TOPOLOGY: {fatal_count} fatal smoke test issues. "
+                f"ICs are disconnected from power/ground rails."
+            )
+            recommendations.append("Ideation context needs better power rail definitions")
+
+        if "functional_score" in failed_gates:
+            score = failed_gates["functional_score"].get("actual", 0)
+            threshold = failed_gates["functional_score"].get("threshold", 0.6)
+            failure_types.add("design_intent_mismatch")
+            details.append(
+                f"DESIGN INTENT: Functional score {score:.1%} < {threshold:.1%}. "
+                f"Connections don't match the design specification."
+            )
+            if score < 0.3:
+                recommendations.append("Connection quality is critically low — "
+                                       "check if ideation context is being used")
+            else:
+                recommendations.append("Connection quality is partial — "
+                                       "some signal paths may be missing")
+
+        # --- Connection quality analysis ---
+        if "connection_coverage" in failed_gates:
+            coverage = failed_gates["connection_coverage"].get("actual", 0)
+            failure_types.add("missing_connections")
+            details.append(
+                f"CONNECTION COVERAGE: {coverage:.0%} of components connected. "
+                f"Multiple components are electrically isolated."
+            )
+            recommendations.append("LLM connection generation needs more context "
+                                   "or seed connections")
+
+        if "center_fallback_ratio" in failed_gates:
+            ratio = failed_gates["center_fallback_ratio"].get("actual", 0)
+            failure_types.add("pin_mismatch")
+            details.append(
+                f"PIN MATCHING: {ratio:.0%} of wires routed to component centers "
+                f"instead of actual pins. Pin names from connections don't match symbols."
+            )
+            recommendations.append("Pin name templates may need updating or "
+                                   "connection generator fuzzy matching is failing")
+
+        # --- Layout quality analysis ---
+        if "overlap_count" in failed_gates:
+            overlaps = int(failed_gates["overlap_count"].get("actual", 0))
+            failure_types.add("layout_collision")
+            details.append(
+                f"LAYOUT COLLISIONS: {overlaps} overlapping component pairs remain."
+            )
+            recommendations.append("Increase layout spacing multiplier and "
+                                   "collision resolution iterations")
+
+        if "visual_score" in failed_gates:
+            score = failed_gates["visual_score"].get("actual", 0)
+            failure_types.add("visual_quality_low")
+            details.append(
+                f"VISUAL QUALITY: Score {score:.1%}. Layout may be cluttered or "
+                f"wires may be poorly routed."
+            )
+
+        # --- Symbol quality ---
+        if "placeholder_ratio" in failed_gates:
+            ratio = failed_gates["placeholder_ratio"].get("actual", 0)
+            failure_types.add("symbol_resolution_failed")
+            details.append(
+                f"SYMBOLS: {ratio:.0%} are placeholders. Symbol fetching/caching failed."
+            )
+            recommendations.append("Check symbol fetcher API connectivity and cache")
+
+        # Determine primary failure (priority order)
+        priority_order = [
+            "power_topology_broken",
+            "missing_connections",
+            "design_intent_mismatch",
+            "pin_mismatch",
+            "symbol_resolution_failed",
+            "layout_collision",
+            "visual_quality_low",
+        ]
+        primary = "unknown"
+        for ft in priority_order:
+            if ft in failure_types:
+                primary = ft
+                break
+
+        # Stagnation detection: count consecutive iterations with same failures
+        stagnation_count = 0
+        current_failed_set = set(failed_gates.keys())
+        for prev_result in reversed(self.iteration_results):
+            prev_failed_set = {
+                g["name"] for g in prev_result.gate_results
+                if not g.get("passed", False)
+            }
+            if prev_failed_set == current_failed_set:
+                stagnation_count += 1
+            else:
+                break
+
+        stagnation = stagnation_count >= 2  # 3+ total (current + 2 prev)
+        escalation_level = EscalationLevel.for_stagnation_count(stagnation_count)
+
+        if stagnation:
+            level_names = {
+                EscalationLevel.NONE: "NONE",
+                EscalationLevel.INCREASE_PARAMS: "INCREASE_PARAMS",
+                EscalationLevel.FULL_RESET: "FULL_RESET",
+                EscalationLevel.ESCALATE: "ESCALATE",
+            }
+            details.append(
+                f"STAGNATION DETECTED: Same {len(current_failed_set)} gates failing for "
+                f"{stagnation_count + 1} consecutive iterations. "
+                f"Escalation level: {level_names.get(escalation_level, 'UNKNOWN')}"
+            )
+            if escalation_level == EscalationLevel.INCREASE_PARAMS:
+                recommendations.append("Dramatically increasing all parameters")
+            elif escalation_level == EscalationLevel.FULL_RESET:
+                recommendations.append("Full reset: no checkpoint resume, fresh generation")
+            elif escalation_level == EscalationLevel.ESCALATE:
+                recommendations.append(
+                    "HUMAN INTERVENTION RECOMMENDED: Pipeline has stagnated for "
+                    f"{stagnation_count + 1} iterations on the same failures. "
+                    "Check: symbol fetcher APIs, ideation context data, LLM prompt quality."
+                )
+
+        return {
+            "primary_failure": primary,
+            "failure_types": failure_types,
+            "details": details,
+            "recommendations": recommendations,
+            "stagnation": stagnation,
+            "stagnation_count": stagnation_count,
+            "escalation_level": escalation_level,
+            "failed_gate_count": len(failed_gates),
+            "passed_gate_count": len(passed_gates),
+        }
 
     def _compute_config(self, iteration: int) -> IterationConfig:
-        """Adjust parameters based on previous iteration failures."""
+        """Adjust parameters based on reflection analysis of previous failures."""
         config = IterationConfig()
 
         if iteration == 0:
@@ -214,33 +409,73 @@ class ContinuousLoopRunner:
         if not prev.gate_results:
             return config
 
-        failed_gates = {
-            g["name"] for g in prev.gate_results if not g["passed"]
-        }
+        # Run reflection analysis
+        analysis = self._classify_failure(prev.gate_results, prev.pipeline_result)
 
-        # If overlaps were an issue, increase spacing
-        if "overlap_count" in failed_gates:
-            config.layout_spacing_multiplier = 1.5 + (iteration * 0.2)
-            logger.info(f"Adapting: layout_spacing_multiplier={config.layout_spacing_multiplier:.1f}")
+        logger.info(
+            f"\n{'─'*50}\n"
+            f"  REFLECTION ANALYSIS (iteration {iteration})\n"
+            f"  Primary failure: {analysis['primary_failure']}\n"
+            f"  Failure types: {', '.join(sorted(analysis['failure_types']))}\n"
+            f"{'─'*50}"
+        )
+        for detail in analysis["details"]:
+            logger.info(f"  → {detail}")
+        for rec in analysis["recommendations"]:
+            logger.info(f"  REC: {rec}")
 
-        # If center fallback was high, retry more aggressively
-        if "center_fallback_ratio" in failed_gates:
+        # Apply targeted parameter adjustments based on failure classification
+        primary = analysis["primary_failure"]
+
+        if "layout_collision" in analysis["failure_types"]:
+            config.layout_spacing_multiplier = 1.5 + (iteration * 0.3)
+            logger.info(f"  ADJUST: layout_spacing_multiplier={config.layout_spacing_multiplier:.1f}")
+
+        if "pin_mismatch" in analysis["failure_types"]:
             config.connection_retry_count = min(5, 3 + iteration)
-            logger.info(f"Adapting: connection_retry_count={config.connection_retry_count}")
+            logger.info(f"  ADJUST: connection_retry_count={config.connection_retry_count}")
 
-        # If visual score was close, give more iterations
-        if "visual_score" in failed_gates:
+        if "visual_quality_low" in analysis["failure_types"]:
             prev_result = prev.pipeline_result or {}
             vs = prev_result.get("visual_score", 0)
-            if vs >= 0.7:
+            if vs >= 0.4:
                 config.max_visual_iterations = 10
-                logger.info("Adapting: max_visual_iterations=10 (score was close)")
+                logger.info("  ADJUST: max_visual_iterations=10 (visual score recoverable)")
 
-        # Resume from checkpoint if symbols and connections passed
-        passing = {g["name"] for g in prev.gate_results if g["passed"]}
-        if "placeholder_ratio" in passing and "connection_coverage" in passing:
-            config.resume_from_checkpoint = True
-            logger.info("Adapting: resume_from_checkpoint=True (symbols+connections OK)")
+        escalation = analysis.get("escalation_level", EscalationLevel.NONE)
+        config.escalation_level = escalation
+
+        if escalation == EscalationLevel.INCREASE_PARAMS:
+            config.layout_spacing_multiplier = 2.0 + iteration * 0.5
+            config.connection_retry_count = 5
+            config.max_visual_iterations = 10
+            logger.info(
+                "  ESCALATION [INCREASE_PARAMS]: Dramatically increasing all parameters"
+            )
+        elif escalation == EscalationLevel.FULL_RESET:
+            config.layout_spacing_multiplier = 2.5
+            config.connection_retry_count = 5
+            config.max_visual_iterations = 10
+            config.resume_from_checkpoint = False  # Force fresh generation
+            logger.info(
+                "  ESCALATION [FULL_RESET]: Fresh generation, no checkpoint resume"
+            )
+        elif escalation == EscalationLevel.ESCALATE:
+            config.layout_spacing_multiplier = 3.0
+            config.connection_retry_count = 5
+            config.max_visual_iterations = 15
+            config.resume_from_checkpoint = False
+            logger.error(
+                "  ESCALATION [ESCALATE]: Pipeline has stagnated. "
+                "HUMAN INTERVENTION MAY BE REQUIRED. "
+                "Check symbol APIs, ideation data, and LLM prompt quality."
+            )
+        else:
+            # No stagnation — resume from checkpoint if symbols and connections passed
+            passing = {g["name"] for g in prev.gate_results if g.get("passed", False)}
+            if "placeholder_ratio" in passing and "connection_coverage" in passing:
+                config.resume_from_checkpoint = True
+                logger.info("  ADJUST: resume_from_checkpoint=True (symbols+connections OK)")
 
         return config
 

@@ -59,6 +59,7 @@ class OptimizationResult:
     spacing_corrections: int
     analysis: Optional[SignalFlowAnalysis] = None
     metrics: Optional[Dict[str, float]] = None
+    remaining_overlaps: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +222,8 @@ class LayoutOptimizerAgent:
             grid_corrections=grid_corrections,
             spacing_corrections=spacing_corrections,
             analysis=analysis,
-            metrics=metrics
+            metrics=metrics,
+            remaining_overlaps=getattr(self, '_last_remaining_overlaps', 0) or 0
         )
 
     # -------------------------------------------------------------------------
@@ -315,13 +317,44 @@ class LayoutOptimizerAgent:
             sub_other = [r for r in subsys['components']
                          if not r.startswith(('U', 'R', 'C', 'L', 'J'))]
 
-            # Place ICs as anchors (centered in region, spaced 40mm apart)
-            ic_y = ry + rh * 0.35  # ICs in upper-middle of region
-            ic_spacing = min(40.0, rw / max(len(sub_ics), 1))
-            ic_start_x = rx + (rw - ic_spacing * max(len(sub_ics) - 1, 0)) / 2
+            # Sort ICs by connectivity centrality: most connected IC goes to center
+            if sub_ics:
+                ic_degree = {
+                    ref: len(connectivity.get(ref, set()))
+                    for ref in sub_ics
+                }
+                sub_ics_sorted = sorted(sub_ics, key=lambda r: ic_degree.get(r, 0), reverse=True)
 
-            for i, ic_ref in enumerate(sub_ics):
-                positions[ic_ref] = (ic_start_x + i * ic_spacing, ic_y)
+                # Place most connected IC in center, others radiate outward
+                ic_y = ry + rh * 0.35
+                ic_spacing = min(40.0, rw / max(len(sub_ics), 1))
+                center_x = rx + rw / 2
+
+                if len(sub_ics_sorted) == 1:
+                    positions[sub_ics_sorted[0]] = (center_x, ic_y)
+                else:
+                    # Center placement: [3rd, 1st(center), 2nd, 4th, ...]
+                    center_order = []
+                    left_idx = 0
+                    right_idx = 0
+                    for rank, ref in enumerate(sub_ics_sorted):
+                        if rank == 0:
+                            center_order.append((0, ref))  # Most connected → center
+                        elif rank % 2 == 1:
+                            right_idx += 1
+                            center_order.append((right_idx, ref))
+                        else:
+                            left_idx -= 1
+                            center_order.append((left_idx, ref))
+
+                    for offset_idx, ref in center_order:
+                        positions[ref] = (center_x + offset_idx * ic_spacing, ic_y)
+
+                if len(sub_ics) > 1:
+                    logger.debug(
+                        f"  {subsys_name}: IC centrality order: "
+                        + ", ".join(f"{r}({ic_degree.get(r,0)})" for r in sub_ics_sorted)
+                    )
 
             # Place connectors at region edges
             for i, conn_ref in enumerate(sub_connectors):
@@ -393,7 +426,7 @@ class LayoutOptimizerAgent:
                 )
 
         # --- Step 5: Collision resolution ---
-        self._resolve_collisions(positions, symbols=symbols)
+        self._last_remaining_overlaps = self._resolve_collisions(positions, symbols=symbols)
 
         # --- Step 6: Apply proximity constraints (bypass caps near ICs) ---
         self._apply_proximity_constraints(
@@ -744,6 +777,8 @@ class LayoutOptimizerAgent:
             logger.error(f"LAYOUT QUALITY: {remaining_overlaps} overlapping component pairs remain after collision resolution")
         else:
             logger.info("LAYOUT QUALITY: 0 overlapping component pairs - all collisions resolved")
+
+        return remaining_overlaps
 
     def _apply_proximity_constraints(
         self,

@@ -187,6 +187,28 @@ CATEGORY_PIN_TEMPLATES = {
         ("IO1", "1", "bidirectional", "L"), ("IO2", "2", "bidirectional", "L"),
         ("GND", "3", "power_in", "B"),
     ],
+    "Amplifier": [
+        ("VCC", "1", "power_in", "T"), ("GND", "2", "power_in", "B"),
+        ("IN+", "3", "input", "L"), ("IN-", "4", "input", "L"),
+        ("OUT", "5", "output", "R"), ("REF", "6", "input", "L"),
+    ],
+    "IC": [
+        ("VIN", "1", "power_in", "L"), ("VOUT", "2", "power_out", "R"),
+        ("GND", "3", "power_in", "B"), ("CTL", "4", "input", "L"),
+        ("STAT", "5", "output", "R"), ("SENSE", "6", "input", "L"),
+    ],
+    "TVS": [
+        ("IO1", "1", "bidirectional", "L"), ("IO2", "2", "bidirectional", "L"),
+        ("GND", "3", "power_in", "B"),
+    ],
+    "Thermistor": [("1", "1", "passive", "L"), ("2", "2", "passive", "R")],
+    "USB_Connector": [
+        ("VBUS", "1", "power_in", "T"), ("GND", "2", "power_in", "B"),
+        ("D+", "3", "bidirectional", "R"), ("D-", "4", "bidirectional", "R"),
+        ("CC1", "5", "bidirectional", "L"), ("CC2", "6", "bidirectional", "L"),
+        ("SBU1", "7", "bidirectional", "L"), ("SBU2", "8", "bidirectional", "L"),
+        ("SHIELD", "9", "passive", "B"),
+    ],
 }
 
 
@@ -2348,12 +2370,27 @@ No explanation or markdown formatting."""
             'Current_Sense': 'U', 'ESD_Protection': 'U',
         }.get(category, 'U')
 
-        # Get category-appropriate pin template, fallback to generic 4-pin
+        # Refine category for subcategories with specialized pin templates
+        effective_category = category
+        if category == "Connector" and "USB" in part_number.upper():
+            effective_category = "USB_Connector"
+            logger.info(
+                f"Refined category for {part_number}: "
+                f"'{category}' → '{effective_category}' (USB connector detected)"
+            )
+
+        # Get category-appropriate pin template
         default_pins = [
             ("1", "1", "passive", "L"), ("2", "2", "passive", "L"),
             ("3", "3", "passive", "R"), ("4", "4", "passive", "R"),
         ]
-        pin_template = CATEGORY_PIN_TEMPLATES.get(category, default_pins)
+        pin_template = CATEGORY_PIN_TEMPLATES.get(effective_category, default_pins)
+        if effective_category not in CATEGORY_PIN_TEMPLATES:
+            logger.error(
+                f"NO PIN TEMPLATE for category '{effective_category}' "
+                f"(part: {part_number}). Using generic 4-pin placeholder. "
+                f"Available categories: {sorted(CATEGORY_PIN_TEMPLATES.keys())}"
+            )
 
         # Group pins by side for sizing and positioning
         sides: Dict[str, List[Tuple[str, str, str, str]]] = {

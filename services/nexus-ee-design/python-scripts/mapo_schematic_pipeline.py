@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -68,6 +69,9 @@ from ideation_context import (
     IdeationContext,
     SymbolResolutionContext,
     ConnectionInferenceContext,
+    PinConnection,
+    InterfaceDefinition,
+    PowerRail,
     PlacementContext,
     ValidationContext,
 )
@@ -189,6 +193,7 @@ class PipelineResult:
     placeholder_ratio: float = 0.0
     overlap_count: int = 0
     connection_coverage: float = 0.0
+    functional_score: float = 0.0
 
     def to_dict(self) -> Dict:
         return {
@@ -385,6 +390,324 @@ class MAPOSchematicPipeline:
 
         logger.info("Pipeline initialization complete (all MAPO agents ready)")
 
+    # ----- Fallback ideation context builder -----
+
+    def _build_design_ideation_context(
+        self,
+        bom_items: List[BOMItem],
+        component_pins: Dict[str, List[Dict]],
+        design_name: str,
+    ) -> Optional[IdeationContext]:
+        """
+        Build structured ideation context from BOM and resolved component pins.
+
+        Analyzes component categories and actual pin names to create seed
+        connections (power rails, bus interfaces, pin-to-pin mappings) that
+        guide the connection generator. Built AFTER symbol resolution so
+        reference designators match the actual assigned refs.
+
+        Returns None if no useful context could be built (logs error).
+        """
+        if not component_pins:
+            return None
+
+        # Step 1: Build ref → BOM item mapping by replaying ref assignment
+        # (same logic as assembler_agent.resolve_symbols_only)
+        ref_to_bom: Dict[str, Dict[str, Any]] = {}
+        temp_counters: Dict[str, int] = {}
+        for item in bom_items:
+            if item.reference:
+                ref = item.reference
+            else:
+                prefix = self._assembler.REF_PREFIXES.get(item.category, "U")
+                temp_counters[prefix] = temp_counters.get(prefix, 0) + 1
+                ref = f"{prefix}{temp_counters[prefix]}"
+            ref_to_bom[ref] = {
+                "category": item.category,
+                "part_number": item.part_number,
+                "value": item.value,
+                "description": item.description,
+            }
+
+        # Step 2: Categorize components by role
+        mcu_ref: Optional[str] = None
+        gate_driver_refs: List[str] = []
+        mosfet_refs: List[str] = []
+        amplifier_refs: List[str] = []
+        can_transceiver_ref: Optional[str] = None
+        crystal_ref: Optional[str] = None
+        shunt_refs: List[str] = []
+        ic_refs: List[str] = []  # All ICs needing power
+
+        for ref, info in ref_to_bom.items():
+            cat = info["category"]
+            desc = info.get("description", "").lower()
+            if cat == "MCU":
+                mcu_ref = ref
+                ic_refs.append(ref)
+            elif cat == "Gate_Driver":
+                gate_driver_refs.append(ref)
+                ic_refs.append(ref)
+            elif cat == "MOSFET":
+                mosfet_refs.append(ref)
+            elif cat == "Amplifier":
+                amplifier_refs.append(ref)
+                ic_refs.append(ref)
+            elif cat == "CAN_Transceiver":
+                can_transceiver_ref = ref
+                ic_refs.append(ref)
+            elif cat == "Crystal":
+                crystal_ref = ref
+            elif cat == "IC":
+                ic_refs.append(ref)
+            elif cat == "Resistor" and "shunt" in desc:
+                shunt_refs.append(ref)
+
+        # Helper: find first pin on a component matching any pattern
+        def find_pin(ref: str, patterns: List[str]) -> Optional[str]:
+            if ref not in component_pins:
+                return None
+            for pin in component_pins[ref]:
+                name = pin.get("name", "")
+                for pat in patterns:
+                    if re.match(pat, name, re.IGNORECASE):
+                        return name
+            return None
+
+        # Step 3: Build power rails (appear as hints in LLM prompt)
+        power_rails: List[PowerRail] = []
+
+        # GND rail
+        gnd_consumers = [
+            ref for ref in component_pins
+            if find_pin(ref, [r"^GND$", r"^VSS$", r"^PGND$", r"^AGND$", r"^EP$"])
+        ]
+        if gnd_consumers:
+            power_rails.append(PowerRail(
+                net_name="GND",
+                voltage=0.0,
+                current_max=10.0,
+                consumer_components=gnd_consumers,
+            ))
+
+        # VCC rail for ICs
+        vcc_consumers = [
+            ref for ref in ic_refs
+            if ref in component_pins
+            and find_pin(ref, [r"^VCC$", r"^VDD$", r"^AVCC$", r"^DVCC$", r"^VCCIO$"])
+        ]
+        if vcc_consumers:
+            power_rails.append(PowerRail(
+                net_name="VCC",
+                voltage=3.3,
+                current_max=1.0,
+                consumer_components=vcc_consumers,
+            ))
+
+        # Step 4: Build interface definitions
+        interfaces: List[InterfaceDefinition] = []
+
+        # CAN bus: MCU → CAN transceiver
+        if mcu_ref and can_transceiver_ref:
+            pin_mappings: Dict[str, str] = {}
+            mcu_can_tx = find_pin(mcu_ref, [
+                r"^CAN_TX$", r"^CAN1_TX$", r"^FDCAN1_TX$", r"^PA12$", r"^PB9$",
+            ])
+            mcu_can_rx = find_pin(mcu_ref, [
+                r"^CAN_RX$", r"^CAN1_RX$", r"^FDCAN1_RX$", r"^PA11$", r"^PB8$",
+            ])
+            if mcu_can_tx:
+                pin_mappings["CAN_TX"] = mcu_can_tx
+            if mcu_can_rx:
+                pin_mappings["CAN_RX"] = mcu_can_rx
+            if pin_mappings:
+                interfaces.append(InterfaceDefinition(
+                    interface_type="CAN",
+                    master_component=mcu_ref,
+                    slave_components=[can_transceiver_ref],
+                    pin_mappings=pin_mappings,
+                    speed="1 Mbps",
+                    protocol_notes="CAN FD, 120R termination required",
+                ))
+
+        # PWM: MCU → Gate Drivers
+        if mcu_ref and gate_driver_refs:
+            pwm_pins: List[str] = []
+            for pin in component_pins.get(mcu_ref, []):
+                name = pin.get("name", "")
+                if re.match(r"^(TIM\d|PWM|CH\d)", name, re.IGNORECASE):
+                    pwm_pins.append(name)
+            if pwm_pins:
+                pin_mappings = {}
+                for i, pp in enumerate(pwm_pins[:len(gate_driver_refs) * 2]):
+                    pin_mappings[f"PWM_{i + 1}"] = pp
+                interfaces.append(InterfaceDefinition(
+                    interface_type="PWM",
+                    master_component=mcu_ref,
+                    slave_components=gate_driver_refs,
+                    pin_mappings=pin_mappings,
+                    speed="20 kHz",
+                    protocol_notes="3-phase FOC PWM, complementary pairs with dead time",
+                ))
+
+        # ADC: MCU ← Current Sense Amplifiers
+        if mcu_ref and amplifier_refs:
+            adc_pins: List[str] = []
+            for pin in component_pins.get(mcu_ref, []):
+                name = pin.get("name", "")
+                if re.match(r"^(ADC|AIN|AN\d)", name, re.IGNORECASE):
+                    adc_pins.append(name)
+            if adc_pins:
+                pin_mappings = {}
+                for i, ap in enumerate(adc_pins[:len(amplifier_refs)]):
+                    pin_mappings[f"ISENSE_{i + 1}"] = ap
+                interfaces.append(InterfaceDefinition(
+                    interface_type="ADC",
+                    master_component=mcu_ref,
+                    slave_components=amplifier_refs,
+                    pin_mappings=pin_mappings,
+                    speed="5 MSPS",
+                    protocol_notes="3-phase current sensing for FOC",
+                ))
+
+        # Step 5: Build explicit pin-to-pin connections
+        explicit_connections: List[PinConnection] = []
+
+        # Gate driver output → MOSFET gate
+        for i, gd_ref in enumerate(gate_driver_refs):
+            if i < len(mosfet_refs):
+                mosfet_ref = mosfet_refs[i]
+                gd_out = find_pin(gd_ref, [
+                    r"^OUTA$", r"^HO$", r"^OUT$", r"^OUTB$", r"^LO$",
+                ])
+                mosfet_gate = find_pin(mosfet_ref, [
+                    r"^G$", r"^Gate$", r"^GATE$",
+                ])
+                if gd_out and mosfet_gate:
+                    explicit_connections.append(PinConnection(
+                        from_component=gd_ref,
+                        from_pin=gd_out,
+                        to_component=mosfet_ref,
+                        to_pin=mosfet_gate,
+                        signal_name=f"GATE_DRIVE_{i + 1}",
+                        signal_type="signal",
+                        notes="Gate driver to MOSFET gate",
+                    ))
+
+        # Current sense amp inputs ← shunt resistor
+        for i, amp_ref in enumerate(amplifier_refs):
+            if i < len(shunt_refs):
+                shunt_ref = shunt_refs[i]
+                amp_inp = find_pin(amp_ref, [
+                    r"^INP$", r"^IN\+$", r"^VS\+$", r"^INP\+$",
+                ])
+                amp_inm = find_pin(amp_ref, [
+                    r"^INM$", r"^IN-$", r"^VS-$", r"^INP-$",
+                ])
+                if amp_inp:
+                    explicit_connections.append(PinConnection(
+                        from_component=shunt_ref,
+                        from_pin="1",
+                        to_component=amp_ref,
+                        to_pin=amp_inp,
+                        signal_name=f"ISENSE_{i + 1}_P",
+                        signal_type="analog",
+                        notes="Shunt high-side to sense amp +input",
+                    ))
+                if amp_inm:
+                    explicit_connections.append(PinConnection(
+                        from_component=shunt_ref,
+                        from_pin="2",
+                        to_component=amp_ref,
+                        to_pin=amp_inm,
+                        signal_name=f"ISENSE_{i + 1}_N",
+                        signal_type="analog",
+                        notes="Shunt low-side to sense amp -input",
+                    ))
+
+        # Crystal → MCU oscillator pins
+        if crystal_ref and mcu_ref:
+            osc_in = find_pin(mcu_ref, [
+                r"^OSC_IN$", r"^OSC32_IN$", r"^PF0$", r"^PD0$",
+            ])
+            osc_out = find_pin(mcu_ref, [
+                r"^OSC_OUT$", r"^OSC32_OUT$", r"^PF1$", r"^PD1$",
+            ])
+            if osc_in:
+                explicit_connections.append(PinConnection(
+                    from_component=crystal_ref,
+                    from_pin="1",
+                    to_component=mcu_ref,
+                    to_pin=osc_in,
+                    signal_name="HSE_IN",
+                    signal_type="clock",
+                    notes="8MHz crystal input",
+                ))
+            if osc_out:
+                explicit_connections.append(PinConnection(
+                    from_component=crystal_ref,
+                    from_pin="2",
+                    to_component=mcu_ref,
+                    to_pin=osc_out,
+                    signal_name="HSE_OUT",
+                    signal_type="clock",
+                    notes="8MHz crystal output",
+                ))
+
+        # If nothing was built, return None
+        if not explicit_connections and not interfaces and not power_rails:
+            logger.error(
+                f"IDEATION CONTEXT EMPTY for '{design_name}': "
+                f"could not infer ANY connections from BOM categories and pins. "
+                f"Refs found: {list(ref_to_bom.keys())}. "
+                f"Categories: {[v['category'] for v in ref_to_bom.values()]}. "
+                f"Pins available for: {list(component_pins.keys())}"
+            )
+            return None
+
+        # Build design intent text for the connection generator prompt
+        design_descriptions = {
+            "foc_esc": (
+                "FOC ESC (Field-Oriented Control Electronic Speed Controller) "
+                "for heavy-lift drones. 3-phase BLDC motor control using SiC MOSFETs. "
+                "Key signal paths: MCU PWM → Gate Drivers → MOSFETs (3 half-bridges), "
+                "Shunt Resistors → Current Sense Amps → MCU ADC (3 phases), "
+                "MCU → CAN Transceiver → CAN Bus. "
+                "All ICs MUST have VCC and GND connections."
+            ),
+        }
+        design_text = design_descriptions.get(
+            design_name,
+            f"{design_name} schematic. All ICs MUST have VCC and GND connections."
+        )
+
+        conn_ctx = ConnectionInferenceContext(
+            explicit_connections=explicit_connections,
+            interfaces=interfaces,
+            power_rails=power_rails,
+            ground_nets=["GND"],
+            critical_signals=[
+                c.signal_name for c in explicit_connections if c.signal_type != "power"
+            ],
+            design_intent_text=design_text,
+        )
+
+        ctx = IdeationContext(connection_inference=conn_ctx)
+
+        logger.info(
+            f"DESIGN IDEATION CONTEXT for '{design_name}': "
+            f"{len(explicit_connections)} explicit connections, "
+            f"{len(interfaces)} interfaces, "
+            f"{len(power_rails)} power rails, "
+            f"component roles: MCU={mcu_ref}, "
+            f"gate_drivers={gate_driver_refs}, "
+            f"MOSFETs={mosfet_refs}, "
+            f"amps={amplifier_refs}, "
+            f"CAN={can_transceiver_ref}"
+        )
+
+        return ctx
+
     async def generate(
         self,
         bom: List[Dict[str, Any]],
@@ -532,20 +855,38 @@ class MAPOSchematicPipeline:
                         f"({pins_total} pins extracted for connection validation)"
                     )
                 except Exception as e:
-                    # Symbol pre-resolution failed — log warning but continue.
-                    # The assembler's assemble_schematic() will re-resolve internally
-                    # and connections will be generated without pin data (old behavior).
-                    logger.warning(
-                        f"Phase 2b symbol pre-resolution failed: {e}. "
-                        f"Falling back to legacy flow (connections without pin data)."
+                    error_msg = (
+                        f"SYMBOL PRE-RESOLUTION FAILED: {type(e).__name__}: {e}. "
+                        f"Cannot proceed without resolved symbols and pin data. "
+                        f"BOM had {len(bom_items)} items."
                     )
-                    pre_resolved_symbols = None
-                    component_pins = None
+                    logger.error(error_msg)
+                    result.errors.append(error_msg)
+                    self._pipeline_errors.append(error_msg)
 
                     self._emit_progress(
                         SchematicPhase.SYMBOLS, 100,
-                        f"Symbol pre-resolution failed — falling back to legacy flow",
+                        f"Symbol pre-resolution FAILED: {e}",
                         event_type=SchematicEventType.ERROR.value
+                    )
+                    raise SchematicGenerationError(error_msg) from e
+
+            # Build design ideation context from resolved BOM + pin data.
+            # Uses component categories and actual pin names to create seed
+            # connections (power rails, interfaces, explicit pin mappings).
+            # Must happen AFTER symbol resolution (refs are assigned there).
+            if ideation_context is None and component_pins:
+                built_ctx = self._build_design_ideation_context(
+                    bom_items, component_pins, design_name
+                )
+                if built_ctx:
+                    ideation_context = built_ctx
+                else:
+                    logger.error(
+                        f"FAILED to build design ideation context for '{design_name}'. "
+                        f"Connection generator will receive NO seed connections. "
+                        f"component_pins has {len(component_pins)} entries. "
+                        f"BOM has {len(bom_items)} items."
                     )
 
             # Convert connections if provided, otherwise auto-generate
@@ -709,53 +1050,9 @@ class MAPOSchematicPipeline:
                         event_type=SchematicEventType.ERROR.value
                     )
 
-                    # FALLBACK: Try to build connections from seed data (ideation hints)
-                    # This gives us at least power connections and explicit signal paths
-                    connection_objs = []
-                    if seed_connections and hasattr(seed_connections, 'explicit_connections'):
-                        try:
-                            from agents.connection_generator.connection_generator_agent import (
-                                ConnectionGeneratorAgent,
-                            )
-                            fallback_gen = ConnectionGeneratorAgent()
-                            components = fallback_gen._extract_component_info(
-                                bom, component_pins
-                            )
-                            # Generate rule-based power + bypass connections
-                            power_conns = fallback_gen._generate_power_connections(components)
-                            bypass_conns = fallback_gen._generate_bypass_cap_connections(components)
-                            seed_conns = fallback_gen._convert_seed_connections(
-                                seed_connections, components, component_pins
-                            )
-                            all_fallback = power_conns + bypass_conns + seed_conns
-                            connection_objs = [
-                                Connection(
-                                    from_ref=gc.from_ref,
-                                    from_pin=gc.from_pin,
-                                    to_ref=gc.to_ref,
-                                    to_pin=gc.to_pin,
-                                    net_name=gc.net_name,
-                                )
-                                for gc in all_fallback
-                            ]
-                            logger.warning(
-                                f"FALLBACK: Using {len(connection_objs)} connections "
-                                f"from seed data + rule-based generation "
-                                f"({len(power_conns)} power, {len(bypass_conns)} bypass, "
-                                f"{len(seed_conns)} seed)"
-                            )
-                            result.errors.append(
-                                f"Using {len(connection_objs)} fallback connections "
-                                f"(no LLM signal connections)"
-                            )
-                        except Exception as fallback_err:
-                            logger.error(f"Seed connection fallback also failed: {fallback_err}")
-                            result.errors.append(f"Seed fallback failed: {fallback_err}")
-                    else:
-                        logger.error(
-                            "No seed connections available for fallback — "
-                            "schematic will have ZERO wires"
-                        )
+                    # NO FALLBACK — fail immediately. A schematic without
+                    # LLM-generated signal connections is non-functional.
+                    raise SchematicGenerationError(error_msg) from e
 
             # Convert block diagram if provided
             block_diagram_obj = None
@@ -933,6 +1230,8 @@ class MAPOSchematicPipeline:
                                 break
                     success_str = "PASSED" if optimization_result.success else "needs work"
                     logger.info(f"Layout optimization: {success_str}, {len(optimization_result.improvements)} improvements")
+                    # Capture overlap count for quality gate
+                    result.overlap_count = getattr(optimization_result, 'remaining_overlaps', 0)
                 self._complete_phase(
                     SchematicPhase.LAYOUT,
                     f"Layout optimized: {len(optimization_result.improvements) if optimization_result else 0} improvements"
@@ -983,6 +1282,12 @@ class MAPOSchematicPipeline:
                 output_path.write_text(schematic_content)
                 result.schematic_path = output_path
                 logger.info(f"Schematic assembled: {output_path}")
+
+                # Extract center_fallback_ratio from wire routing (done inside assembler)
+                routing_result = getattr(self._assembler, 'last_routing_result', None)
+                if routing_result and hasattr(routing_result, 'center_fallback_ratio'):
+                    result.center_fallback_ratio = routing_result.center_fallback_ratio
+                    logger.info(f"Wire routing center_fallback_ratio: {result.center_fallback_ratio:.1%}")
 
             # Validate: symbol instance count in output matches BOM
             import re as _re
@@ -1087,6 +1392,9 @@ class MAPOSchematicPipeline:
                     bom=bom,
                     connections=[vars(c) for c in connection_objs] if connection_objs else []
                 )
+
+                # Store functional score in PipelineResult for quality gate checking
+                result.functional_score = functional_result.overall_score
 
                 if not functional_result.passed:
                     logger.warning(
@@ -1197,23 +1505,20 @@ class MAPOSchematicPipeline:
 
                 except (ValueError, RuntimeError, OSError, json.JSONDecodeError,
                         asyncio.TimeoutError, ConnectionError) as e:
-                    logger.warning(
-                        "WARNING: Visual validation FAILED (non-fatal) and was SKIPPED. "
-                        "The schematic was already assembled and can be used, but visual "
-                        "quality was NOT validated by LLM. "
-                        "Error type: %s, Error: %s",
-                        type(e).__name__, e
+                    error_msg = (
+                        f"VISUAL VALIDATION FAILED: {type(e).__name__}: {e}. "
+                        f"Visual quality was NOT validated. "
+                        f"visual_score will be 0.0 (gate will FAIL)."
                     )
-                    # Capture best visual score achieved before error
+                    logger.error(error_msg)
+                    result.errors.append(error_msg)
+                    self._pipeline_errors.append(error_msg)
+                    # Capture best score if any was achieved before failure
                     if progress_tracker and progress_tracker.best_score > 0:
                         result.visual_score = progress_tracker.best_score
-                        logger.info(f"Visual score (before error): {result.visual_score:.1%}")
-                    result.errors.append(f"Visual validation skipped: {type(e).__name__}: {e}")
-                    # Continue with current schematic — visual validation is
-                    # an improvement step, not a gate. The schematic was already
-                    # assembled and can be used without validation.
+                        logger.info(f"Partial visual score (before failure): {result.visual_score:.1%}")
 
-            # Legacy validation (fallback if new validators unavailable)
+            # Legacy validation (when new validators unavailable)
             elif not skip_validation and self._validator:
                 logger.info("Starting legacy MAPO validation loop...")
 
@@ -1353,8 +1658,8 @@ class MAPOSchematicPipeline:
                 try:
                     self._checkpoint_mgr.cleanup()
                     logger.info("Pipeline succeeded — checkpoint cleaned up")
-                except Exception:
-                    pass  # Non-critical
+                except Exception as cleanup_err:
+                    logger.error(f"Checkpoint cleanup failed: {type(cleanup_err).__name__}: {cleanup_err}")
 
             # Emit completion if successful
             if result.success and self._progress:
@@ -1376,11 +1681,11 @@ class MAPOSchematicPipeline:
             if kicad_cli:
                 return await self._render_with_kicad_cli(schematic_content, kicad_cli)
 
-            # Fallback: Try using Puppeteer/KiCanvas
+            # Try using Puppeteer/KiCanvas
             return await self._render_with_kicanvas(schematic_content)
 
         except Exception as e:
-            logger.warning(f"Schematic rendering failed: {e}")
+            logger.error(f"SCHEMATIC RENDERING FAILED: {type(e).__name__}: {e}")
             return None
 
     def _find_kicad_cli(self) -> Optional[str]:
@@ -1428,7 +1733,7 @@ class MAPOSchematicPipeline:
                     import cairosvg
                     cairosvg.svg2png(url=svg_path, write_to=png_path)
                 except ImportError:
-                    logger.warning("cairosvg not available for SVG to PNG conversion")
+                    logger.error("cairosvg NOT INSTALLED — cannot convert SVG to PNG. Install with: pip install cairosvg")
                     return None
 
             if os.path.exists(png_path):
@@ -1436,28 +1741,26 @@ class MAPOSchematicPipeline:
                     return f.read()
 
         except Exception as e:
-            logger.warning(f"KiCad CLI render failed: {e}")
+            logger.error(f"KiCad CLI render FAILED: {type(e).__name__}: {e}")
 
         finally:
             # Cleanup
             for path in [sch_path, png_path, png_path.replace(".png", ".svg")]:
                 try:
                     os.unlink(path)
-                except OSError:
-                    pass
+                except OSError as unlink_err:
+                    logger.error(f"Failed to cleanup temp file {path}: {unlink_err}")
 
         return None
 
     async def _render_with_kicanvas(self, schematic_content: str) -> Optional[bytes]:
         """Render using KiCanvas via headless browser."""
         try:
-            # This would use Puppeteer/Playwright to render via KiCanvas
-            # For now, return None to indicate rendering not available
-            logger.info("KiCanvas rendering not implemented yet")
+            logger.error("KiCanvas rendering NOT IMPLEMENTED — no image available")
             return None
 
         except Exception as e:
-            logger.warning(f"KiCanvas render failed: {e}")
+            logger.error(f"KiCanvas render FAILED: {type(e).__name__}: {e}")
             return None
 
     async def _run_mapo_loop(
@@ -1546,7 +1849,7 @@ class MAPOSchematicPipeline:
                     pass
 
             except Exception as e:
-                logger.warning(f"Failed to apply fix: {e}")
+                logger.error(f"FIX APPLICATION FAILED for '{fix_type}': {type(e).__name__}: {e}")
 
         return modified_content
 

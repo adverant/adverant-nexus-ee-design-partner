@@ -472,7 +472,7 @@ class SmokeTestAgent:
 
             if not power_nets:
                 issues.append(SmokeTestIssue(
-                    severity=SmokeTestSeverity.ERROR,
+                    severity=SmokeTestSeverity.FATAL,
                     test_name="power_rail_connectivity",
                     message=f"IC {ic_ref} is NOT connected to any power net (VCC/VDD/3V3/5V/etc.).",
                     component=ic_ref,
@@ -481,7 +481,7 @@ class SmokeTestAgent:
 
             if not ground_nets:
                 issues.append(SmokeTestIssue(
-                    severity=SmokeTestSeverity.ERROR,
+                    severity=SmokeTestSeverity.FATAL,
                     test_name="ground_connectivity",
                     message=f"IC {ic_ref} is NOT connected to any ground net (GND/VSS/etc.).",
                     component=ic_ref,
