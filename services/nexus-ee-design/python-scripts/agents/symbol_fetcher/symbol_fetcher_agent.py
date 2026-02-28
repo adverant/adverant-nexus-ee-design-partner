@@ -425,6 +425,12 @@ class SymbolFetcherAgent:
             "UCC21530ADWRR": ("Driver_FET", "UCC21520DW"),
             "UCC21530DWR":   ("Driver_FET", "UCC21520DW"),
             "USB4110-GF-A":  ("Connector", "USB_C_Receptacle_USB2.0_16P"),
+            # SL22_10010: Murata NTC thermistor — LLM matches to 'L' (inductor), override to correct symbol
+            "SL22_10010":    ("Device", "Thermistor_NTC"),
+            # 0603WAF1200T5E: UniOhm 0603 single 120Ω resistor — LLM matches to R_Pack02 (dual), override to R
+            "0603WAF1200T5E": ("Device", "R"),
+            # LTC4412ES6: Linear Tech ideal diode controller — cache corrupts to 'L' in run 2, pin it to correct symbol
+            "LTC4412ES6":    ("Power_Management", "LTC4412xS6"),
         }
         if part_number in KNOWN_SYMBOL_OVERRIDES:
             lib_name, sym_name = KNOWN_SYMBOL_OVERRIDES[part_number]
@@ -769,6 +775,11 @@ class SymbolFetcherAgent:
                     if cat_dir.is_dir():
                         for symbol_file in cat_dir.glob("*.kicad_sym"):
                             stem_norm = re.sub(r'[-_\s]', '', symbol_file.stem).upper()
+                            # Require cached symbol name to be at least 4 chars to prevent
+                            # single-letter symbols (L, R, C, D) from matching any part
+                            # number starting with that letter (e.g. L matching LTC4412ES6)
+                            if len(stem_norm) < 4:
+                                continue
                             if stem_norm.startswith(prefix) or prefix.startswith(stem_norm):
                                 logger.info(
                                     f"Base-family cache hit: '{part_number}' matched "
