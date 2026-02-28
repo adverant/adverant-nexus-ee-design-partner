@@ -1250,6 +1250,24 @@ class MAPOSchematicPipeline:
                             if symbol.reference == comp_ref:
                                 symbol.position = position
                                 break
+
+                    # Re-route all wires using the updated symbol positions.
+                    # Power stubs are created inside assemble() before this second layout
+                    # call moves the ICs; without re-routing the stubs are orphaned
+                    # 50-100 mm from their ICs and the smoke-test BFS cannot reach them,
+                    # causing FATAL power-disconnection errors.
+                    if connection_objs:
+                        sheet.wires.clear()
+                        sheet.labels.clear()
+                        sheet.junctions.clear()
+                        await self._assembler._route_wires(sheet, connection_objs)
+                        self._assembler._add_power_symbols(sheet)
+                        logger.info(
+                            f"Re-routed wires after layout optimisation "
+                            f"(sheet {i + 1}): "
+                            f"wires={len(sheet.wires)}, labels={len(sheet.labels)}"
+                        )
+
                     success_str = "PASSED" if optimization_result.success else "needs work"
                     logger.info(f"Layout optimization: {success_str}, {len(optimization_result.improvements)} improvements")
                     # Capture overlap count for quality gate
