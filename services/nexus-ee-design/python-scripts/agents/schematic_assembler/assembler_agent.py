@@ -230,7 +230,7 @@ class SchematicAssemblerAgent:
     """
 
     GRID_UNIT = 2.54  # mm (100 mil standard KiCad grid)
-    DEFAULT_SHEET_SIZE = (297, 210)  # A4 landscape in mm
+    DEFAULT_SHEET_SIZE = (594, 420)  # A2 landscape in mm — matches layout optimizer canvas
 
     # Reference designator prefixes by category
     REF_PREFIXES = {
@@ -2311,7 +2311,7 @@ Return ONLY the extracted (symbol ...) block:"""
             "\t(generator \"nexus_ee_design\")",
             "\t(generator_version \"8.0\")",
             f"\t(uuid \"{sheet.uuid}\")",
-            "\t(paper \"A4\")",
+            "\t(paper \"A2\")",
         ]
 
         # Add lib_symbols section with tab indentation for KiCad 8.x compatibility

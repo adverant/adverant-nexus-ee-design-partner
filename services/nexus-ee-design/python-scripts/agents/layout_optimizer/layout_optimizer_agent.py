@@ -88,19 +88,21 @@ class LayoutOptimizerAgent:
     # Standard grid unit (100 mil = 2.54mm)
     GRID_UNIT = 2.54
 
-    # Canvas dimensions (mm)
-    CANVAS_WIDTH = 254.0   # 10 inches
-    CANVAS_HEIGHT = 190.5  # 7.5 inches
+    # Canvas dimensions (mm) — A2 sheet provides ample room for complex schematics.
+    # A4 (254×190.5) was too small for 20+ components: passives overlapped IC bodies.
+    # A2 (420×594mm landscape) gives ~3.5× the area, eliminating crowding.
+    CANVAS_WIDTH = 594.0   # A2 landscape width
+    CANVAS_HEIGHT = 420.0  # A2 landscape height
 
     # Spacing rules (mm)
     SPACING_RULES = {
-        "ic_to_ic": 40.0,           # 40mm between IC centers
-        "ic_to_passive": 15.0,       # 15mm IC to passive
-        "passive_to_passive": 10.0,  # 10mm between passives
-        "bypass_to_ic": 5.08,        # 200 mil bypass to IC
+        "ic_to_ic": 60.0,           # 60mm between IC centers (was 40mm — too tight with large ICs)
+        "ic_to_passive": 25.0,       # 25mm IC to passive (was 15mm — passives were on top of ICs)
+        "passive_to_passive": 15.0,  # 15mm between passives (was 10mm)
+        "bypass_to_ic": 15.0,        # 15mm bypass to IC (was 5mm — caused overlap with IC body)
         "connector_edge": 10.0,      # 10mm from edge for connectors
-        "layer_spacing": 60.0,       # Horizontal spacing between layers
-        "vertical_spacing": 20.0,    # Vertical spacing within layer
+        "layer_spacing": 80.0,       # Horizontal spacing between layers
+        "vertical_spacing": 40.0,    # Vertical spacing within layer
     }
 
     def __init__(self):
@@ -326,8 +328,10 @@ class LayoutOptimizerAgent:
                 sub_ics_sorted = sorted(sub_ics, key=lambda r: ic_degree.get(r, 0), reverse=True)
 
                 # Place most connected IC in center, others radiate outward
-                ic_y = ry + rh * 0.35
-                ic_spacing = min(40.0, rw / max(len(sub_ics), 1))
+                ic_y = ry + rh * 0.30
+                # Use the updated ic_to_ic spacing rule (60mm), not a hardcoded 40mm cap.
+                # The larger canvas provides room; don't shrink spacing below the rule minimum.
+                ic_spacing = max(self.SPACING_RULES["ic_to_ic"], rw / max(len(sub_ics), 1))
                 center_x = rx + rw / 2
 
                 if len(sub_ics_sorted) == 1:
@@ -365,38 +369,52 @@ class LayoutOptimizerAgent:
                 else:
                     positions[conn_ref] = (rx + 5.0, ry + 20.0 + i * 15.0)
 
-            # Place passives relative to their connected IC
+            # Place passives relative to their connected IC.
+            # Group passives by their primary IC, then lay them out in a horizontal
+            # row BELOW the IC.  This eliminates the column-stacking that caused
+            # passives to overlap IC bodies in the old algorithm.
             placed_passives = set()
+            ic_passive_groups: Dict[str, List[str]] = {}
+            passive_no_ic: List[str] = []
+
             for p_ref in sub_passives:
                 connected_ics = [r for r in connectivity.get(p_ref, set())
                                  if r in positions and r.startswith('U')]
                 if connected_ics:
-                    # Place near the first connected IC
-                    ic_pos = positions[connected_ics[0]]
-                    # Bypass caps: very close (5mm), other passives: 10-15mm
-                    is_bypass = p_ref.startswith('C')
-                    offset_x = self.SPACING_RULES["bypass_to_ic"] if is_bypass else 12.0
-                    offset_y = 10.0 + (len(placed_passives) % 4) * 8.0
-                    # Alternate left/right placement
-                    side = 1 if len(placed_passives) % 2 == 0 else -1
+                    primary_ic = connected_ics[0]
+                    ic_passive_groups.setdefault(primary_ic, []).append(p_ref)
+                else:
+                    passive_no_ic.append(p_ref)
+
+            # For each IC, place its passives in a row below
+            passive_row_spacing = self.SPACING_RULES["passive_to_passive"]
+            passive_row_offset_y = self.SPACING_RULES["bypass_to_ic"] + 10.0  # below IC center
+            for ic_ref, passives_for_ic in ic_passive_groups.items():
+                ic_pos = positions[ic_ref]
+                n = len(passives_for_ic)
+                # Center the row of passives below the IC
+                row_total_w = (n - 1) * passive_row_spacing
+                start_x = ic_pos[0] - row_total_w / 2.0
+                for idx, p_ref in enumerate(passives_for_ic):
                     positions[p_ref] = (
-                        ic_pos[0] + side * offset_x,
-                        ic_pos[1] + offset_y
+                        start_x + idx * passive_row_spacing,
+                        ic_pos[1] + passive_row_offset_y
                     )
                     placed_passives.add(p_ref)
 
             # Place remaining passives (not connected to any IC) in a grid below ICs
             unplaced_passives = [p for p in sub_passives if p not in placed_passives]
+            unplaced_passives.extend(passive_no_ic)
             if unplaced_passives:
-                passive_y = ry + rh * 0.7
-                cols = max(int(len(unplaced_passives) ** 0.5) + 1, 2)
-                p_spacing_x = min(12.0, rw / (cols + 1))
+                passive_y = ry + rh * 0.75
+                cols = max(int(len(unplaced_passives) ** 0.5) + 1, 3)
+                p_spacing_x = max(passive_row_spacing, rw / (cols + 1))
                 for idx, p_ref in enumerate(unplaced_passives):
                     col = idx % cols
                     row = idx // cols
                     positions[p_ref] = (
-                        rx + 10.0 + col * p_spacing_x,
-                        passive_y + row * 10.0
+                        rx + 15.0 + col * p_spacing_x,
+                        passive_y + row * passive_row_spacing
                     )
 
             # Place other components (diodes, transistors) near related ICs
