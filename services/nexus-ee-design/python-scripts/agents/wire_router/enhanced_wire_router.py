@@ -714,32 +714,69 @@ class EnhancedWireRouter:
         net_name: str,
         route_type: RouteType
     ) -> List[WireSegment]:
-        """Create simple L-route (horizontal then vertical)."""
-        wires = []
+        """Create L-route, choosing the direction that minimizes crossings.
 
-        # Horizontal segment
+        Tries both horizontal-first (H-V) and vertical-first (V-H) orientations,
+        picks the one with fewer crossings against existing wires.
+        """
+        # Option A: Horizontal-first (H then V)
+        wires_hv = []
         if abs(sx - ex) > 0.01:
-            wires.append(WireSegment(
-                start=(sx, sy),
-                end=(ex, sy),
-                net_name=net_name,
-                route_type=route_type
+            wires_hv.append(WireSegment(
+                start=(sx, sy), end=(ex, sy),
+                net_name=net_name, route_type=route_type
             ))
-
-        # Vertical segment
         if abs(sy - ey) > 0.01:
-            wires.append(WireSegment(
-                start=(ex, sy),
-                end=(ex, ey),
-                net_name=net_name,
-                route_type=route_type
+            wires_hv.append(WireSegment(
+                start=(ex, sy), end=(ex, ey),
+                net_name=net_name, route_type=route_type
             ))
 
-            # Add junction at corner if we have two segments
-            if len(wires) == 2:
-                self._add_junction((ex, sy), net_name)
+        # Option B: Vertical-first (V then H)
+        wires_vh = []
+        if abs(sy - ey) > 0.01:
+            wires_vh.append(WireSegment(
+                start=(sx, sy), end=(sx, ey),
+                net_name=net_name, route_type=route_type
+            ))
+        if abs(sx - ex) > 0.01:
+            wires_vh.append(WireSegment(
+                start=(sx, ey), end=(ex, ey),
+                net_name=net_name, route_type=route_type
+            ))
+
+        # Count crossings for each option
+        crossings_hv = self._count_crossings(wires_hv, net_name)
+        crossings_vh = self._count_crossings(wires_vh, net_name)
+
+        # Pick the option with fewer crossings (prefer H-V on tie for signal flow)
+        if crossings_vh < crossings_hv:
+            wires = wires_vh
+            corner = (sx, ey)
+        else:
+            wires = wires_hv
+            corner = (ex, sy)
+
+        # Add junction at corner if we have two segments
+        if len(wires) == 2:
+            self._add_junction(corner, net_name)
 
         return wires
+
+    def _count_crossings(
+        self,
+        candidate_wires: List[WireSegment],
+        net_name: str
+    ) -> int:
+        """Count how many existing wires the candidate segments would cross."""
+        count = 0
+        for cw in candidate_wires:
+            for existing in self._wires:
+                if existing.net_name == net_name:
+                    continue  # Same net, not a crossing
+                if self._wires_intersect(cw, existing):
+                    count += 1
+        return count
 
     def _z_route(
         self,

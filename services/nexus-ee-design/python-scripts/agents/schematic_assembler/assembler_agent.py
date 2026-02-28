@@ -1567,6 +1567,71 @@ JSON array of pins:"""
         logger.info(f"Connection validation: {valid_connections} valid of {len(connections)} total")
 
         # ========================================
+        # NET LABEL OPTIMIZATION: Long-distance connections use labels instead of wires
+        # Professional schematics NEVER route wires across the entire sheet.
+        # Connections >60mm Manhattan distance use paired global labels at both endpoints.
+        # ========================================
+        NET_LABEL_DISTANCE_THRESHOLD = 60.0  # mm — beyond this, use net labels
+        wire_connections = []
+        label_connections = []
+        net_label_names_added = set()
+
+        for conn in conn_dicts:
+            from_pos = pin_positions.get(conn["from_ref"], {}).get(conn["from_pin"])
+            to_pos = pin_positions.get(conn["to_ref"], {}).get(conn["to_pin"])
+
+            if from_pos and to_pos:
+                manhattan_dist = abs(from_pos[0] - to_pos[0]) + abs(from_pos[1] - to_pos[1])
+                if manhattan_dist > NET_LABEL_DISTANCE_THRESHOLD:
+                    label_connections.append(conn)
+                    continue
+
+            wire_connections.append(conn)
+
+        # Place global labels at both endpoints for long-distance connections
+        for conn in label_connections:
+            net_name = conn["net_name"]
+            from_ref = conn["from_ref"]
+            from_pin = conn["from_pin"]
+            to_ref = conn["to_ref"]
+            to_pin = conn["to_pin"]
+
+            from_pos = pin_positions[from_ref][from_pin]
+            to_pos = pin_positions[to_ref][to_pin]
+
+            # Label at source pin (stub wire + global label)
+            label_key_from = f"{from_ref}.{from_pin}.{net_name}"
+            if label_key_from not in net_label_names_added:
+                label_pos_from = (from_pos[0] + 2.54, from_pos[1])
+                sheet.wires.append(Wire(start=from_pos, end=label_pos_from))
+                sheet.labels.append(Label(
+                    text=net_name, position=label_pos_from,
+                    rotation=0, label_type="global_label"
+                ))
+                net_label_names_added.add(label_key_from)
+
+            # Label at destination pin (stub wire + global label)
+            label_key_to = f"{to_ref}.{to_pin}.{net_name}"
+            if label_key_to not in net_label_names_added:
+                label_pos_to = (to_pos[0] + 2.54, to_pos[1])
+                sheet.wires.append(Wire(start=to_pos, end=label_pos_to))
+                sheet.labels.append(Label(
+                    text=net_name, position=label_pos_to,
+                    rotation=0, label_type="global_label"
+                ))
+                net_label_names_added.add(label_key_to)
+
+        if label_connections:
+            logger.info(
+                f"NET LABEL OPTIMIZATION: {len(label_connections)} long-distance connections "
+                f"(>{NET_LABEL_DISTANCE_THRESHOLD}mm) converted to paired global labels. "
+                f"{len(wire_connections)} short connections routed as wires."
+            )
+
+        # Replace conn_dicts with only short-distance connections for wire routing
+        conn_dicts = wire_connections
+
+        # ========================================
         # ROUTE WIRES (only if we have non-power connections)
         # ========================================
 
@@ -1660,27 +1725,30 @@ JSON array of pins:"""
                 uuid=junc.uuid
             ))
 
-        # Add net labels for named nets
-        added_labels = set()
-        for conn in connections:
-            if conn.net_name and not conn.net_name.startswith("Net-"):
-                if conn.net_name in added_labels:
-                    continue
-                added_labels.add(conn.net_name)
+        # Add net name labels at wire source pins for readability
+        # Only for wired connections with named nets (not auto-generated "Net-..." names)
+        # Skip nets already labeled via the net label optimization above
+        wire_net_labels_added = set()
+        for conn_dict in wire_connections:
+            net_name = conn_dict["net_name"]
+            if net_name.startswith("Net-") or net_name in wire_net_labels_added:
+                continue
+            if net_name in net_label_names_added:
+                continue  # Already has global labels from long-distance optimization
 
-                from_sym = symbol_map.get(conn.from_ref)
-                to_sym = symbol_map.get(conn.to_ref)
-
-                if from_sym and to_sym:
-                    from_pos = from_sym.get_absolute_pin_position(conn.from_pin) or from_sym.position
-                    to_pos = to_sym.get_absolute_pin_position(conn.to_pin) or to_sym.position
-
-                    mid_x = (from_pos[0] + to_pos[0]) / 2
-                    mid_y = (from_pos[1] + to_pos[1]) / 2
-                    sheet.labels.append(Label(
-                        text=conn.net_name,
-                        position=(mid_x, mid_y)
-                    ))
+            from_ref = conn_dict["from_ref"]
+            from_pin = conn_dict["from_pin"]
+            from_pos = pin_positions.get(from_ref, {}).get(from_pin)
+            if from_pos:
+                # Place label slightly offset from wire start point
+                label_pos = (from_pos[0] + 2.54, from_pos[1] - 1.27)
+                sheet.labels.append(Label(
+                    text=net_name,
+                    position=label_pos,
+                    rotation=0,
+                    label_type="label"
+                ))
+                wire_net_labels_added.add(net_name)
 
         logger.info(
             f"Enhanced routing complete: {len(sheet.wires)} wires, "
