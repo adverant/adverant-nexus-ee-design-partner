@@ -422,8 +422,9 @@ class SymbolFetcherAgent:
         # Maps part_number -> (library, symbol_name).
         # UCC21530 is pin-compatible with UCC21520 (same TI isolated gate driver family).
         KNOWN_SYMBOL_OVERRIDES: Dict[str, Tuple[str, str]] = {
-            "UCC21530ADWRR": ("Driver_FET", "UCC21520ADW"),
+            "UCC21530ADWRR": ("Driver_FET", "UCC21520DW"),
             "UCC21530DWR":   ("Driver_FET", "UCC21520DW"),
+            "USB4110-GF-A":  ("Connector", "USB_C_Receptacle_USB2.0_16P"),
         }
         if part_number in KNOWN_SYMBOL_OVERRIDES:
             lib_name, sym_name = KNOWN_SYMBOL_OVERRIDES[part_number]
@@ -433,13 +434,15 @@ class SymbolFetcherAgent:
                 resp = await self.http_client.get(url, timeout=10.0)
                 if resp.status_code == 200:
                     data = resp.json()
-                    kicad_sym = data.get("content", "")
+                    # Individual symbol endpoint returns 'sexp', library endpoint returns 'content'
+                    kicad_sym = data.get("sexp", "") or data.get("content", "")
                     if kicad_sym:
                         result = FetchedSymbol(
                             part_number=part_number,
-                            symbol_name=sym_name,
-                            kicad_sym=kicad_sym,
-                            source="kicad_worker_override",
+                            manufacturer=manufacturer,
+                            symbol_sexp=kicad_sym,
+                            source=SymbolSource.KICAD_WORKER_INTERNAL,
+                            metadata={"override": True, "override_symbol": sym_name, "override_library": lib_name},
                         )
                         await self._cache_symbol(result, category)
                         await self._store_to_nexus_memory(
