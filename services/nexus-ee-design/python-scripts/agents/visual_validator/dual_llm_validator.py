@@ -211,6 +211,23 @@ def export_schematic_to_image(
                 convert_cmd = ["convert", "-density", str(dpi), svg_path, output_path]
                 subprocess.run(convert_cmd, capture_output=True, timeout=30)
                 os.remove(svg_path)
+
+                # Enforce a 4MB / 3500px max so large paper sizes (A2, A1) don't
+                # exceed Anthropic's 5MB per-image API limit.
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    if file_size > 4 * 1024 * 1024:
+                        resize_cmd = [
+                            "convert", output_path,
+                            "-resize", "3500x3500>",  # shrink only if larger
+                            output_path
+                        ]
+                        subprocess.run(resize_cmd, capture_output=True, timeout=30)
+                        new_size = os.path.getsize(output_path)
+                        logger.info(
+                            f"Image resized for API: {file_size // 1024}KB → "
+                            f"{new_size // 1024}KB (max 3500px)"
+                        )
             except Exception as e:
                 logger.warning(f"SVG to PNG conversion failed: {e}, using SVG directly")
                 os.rename(svg_path, output_path.replace(".png", ".svg"))
