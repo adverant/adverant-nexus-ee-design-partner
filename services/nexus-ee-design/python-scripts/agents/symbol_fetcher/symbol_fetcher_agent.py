@@ -418,6 +418,37 @@ class SymbolFetcherAgent:
             else:
                 logger.warning(f"Learned resolution for {part_number} failed, falling back to standard chain")
 
+        # STEP 0b: Hardcoded symbol overrides for parts that LLM consistently fails
+        # Maps part_number -> (library, symbol_name).
+        # UCC21530 is pin-compatible with UCC21520 (same TI isolated gate driver family).
+        KNOWN_SYMBOL_OVERRIDES: Dict[str, Tuple[str, str]] = {
+            "UCC21530ADWRR": ("Driver_FET", "UCC21520ADW"),
+            "UCC21530DWR":   ("Driver_FET", "UCC21520DW"),
+        }
+        if part_number in KNOWN_SYMBOL_OVERRIDES:
+            lib_name, sym_name = KNOWN_SYMBOL_OVERRIDES[part_number]
+            logger.info(f"Using hardcoded override: {part_number} -> {sym_name} in {lib_name}")
+            try:
+                url = f"{KICAD_WORKER_URL}/v1/symbols/{lib_name}/symbol/{sym_name}"
+                resp = await self.http_client.get(url, timeout=10.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    kicad_sym = data.get("content", "")
+                    if kicad_sym:
+                        result = FetchedSymbol(
+                            part_number=part_number,
+                            symbol_name=sym_name,
+                            kicad_sym=kicad_sym,
+                            source="kicad_worker_override",
+                        )
+                        await self._cache_symbol(result, category)
+                        await self._store_to_nexus_memory(
+                            part_number, manufacturer, sym_name, lib_name, "kicad_worker_override"
+                        )
+                        return result
+            except Exception as e:
+                logger.warning(f"Override fetch failed for {part_number}: {e}")
+
         # Track sources tried and errors for verbose error reporting
         sources_tried: List[str] = []
         errors: List[str] = []
@@ -1163,6 +1194,8 @@ DO NOT explain. Just output the symbol name or NO_MATCH."""
 
             result = response.json()
             matched_symbol = result['choices'][0]['message']['content'].strip()
+            # Strip markdown formatting (bold, italic, backticks) from LLM response
+            matched_symbol = re.sub(r'^[\*`]+|[\*`]+$', '', matched_symbol).strip()
 
             if matched_symbol == "NO_MATCH":
                 logger.debug(f"LLM found no match for {part_number} in {library_name}")
