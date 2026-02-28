@@ -253,8 +253,16 @@ class SmokeTestAgent:
             ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', block)
             reference = ref_match.group(1) if ref_match else "?"
 
-            # Skip power symbols (reference starts with #)
+            # Skip power symbols (reference starts with #) and power
+            # symbol lib_ids (e.g. VCC, GND assigned U-prefix references)
             if reference.startswith("#"):
+                continue
+            POWER_SYMBOL_LIB_IDS = {"VCC", "GND", "VDD", "VSS", "VDDA", "VSSA",
+                                     "+3V3", "+5V", "+12V", "GND_DIGITAL", "GND_ANALOG",
+                                     "power:VCC", "power:GND", "power:VDD", "power:VSS",
+                                     "power:+3V3", "power:+5V", "power:+12V"}
+            # Bare lib_id or prefixed with "power:"
+            if lib_id in POWER_SYMBOL_LIB_IDS or lib_id.split(":")[-1] in {"VCC", "GND", "VDD", "VSS", "VDDA", "VSSA"}:
                 continue
 
             components.append({
@@ -379,13 +387,36 @@ class SmokeTestAgent:
         ic_power_nets: Dict[str, Set[str]] = {}
         ic_ground_nets: Dict[str, Set[str]] = {}
 
+        # Build set of all graph positions for proximity seeding
+        all_graph_positions = set(adjacency.keys()) | set(pos_to_items.keys())
+
         for comp in components:
             ref = comp["reference"]
             if not ref.startswith("U"):
                 continue
 
             comp_pos = self._round_pos(comp["x"], comp["y"])
-            reachable = flood_fill(comp_pos)
+
+            # Proximity-based seeding: find all wire/label positions
+            # within the IC bounding box (±20mm from center).  IC pins
+            # are at offsets from the component center; the flood-fill
+            # must start from positions already in the adjacency graph.
+            PROXIMITY_RADIUS = 20.0  # mm — covers typical IC pin span
+            seed_positions: Set[Tuple[float, float]] = set()
+            for gpos in all_graph_positions:
+                dx = abs(gpos[0] - comp_pos[0])
+                dy = abs(gpos[1] - comp_pos[1])
+                if dx <= PROXIMITY_RADIUS and dy <= PROXIMITY_RADIUS:
+                    seed_positions.add(gpos)
+
+            # Also include the exact component position (in case it's in the graph)
+            seed_positions.add(comp_pos)
+
+            # Flood-fill from ALL seed positions to find reachable nets
+            reachable: Set[Tuple[float, float]] = set()
+            for seed in seed_positions:
+                if seed not in reachable:
+                    reachable.update(flood_fill(seed))
 
             # Collect all label names at reachable positions
             reachable_net_names: Set[str] = set()
