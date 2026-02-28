@@ -445,9 +445,6 @@ class SymbolFetcherAgent:
                             metadata={"override": True, "override_symbol": sym_name, "override_library": lib_name},
                         )
                         await self._cache_symbol(result, category)
-                        await self._store_to_nexus_memory(
-                            part_number, manufacturer, sym_name, lib_name, "kicad_worker_override"
-                        )
                         return result
             except Exception as e:
                 logger.warning(f"Override fetch failed for {part_number}: {e}")
