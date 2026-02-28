@@ -688,63 +688,40 @@ RESPOND IN THIS JSON FORMAT:
         Raises:
             RuntimeError: If the API call fails or returns an error
         """
-        # Claude Code Max proxy strips image_url from multimodal messages
-        # (messagesToPrompt only keeps type=text). Send text-only when using proxy.
-        if self._ai_provider == "claude_code_max":
-            logger.info(
-                f"Provider is claude_code_max — sending text-only prompt "
-                f"(proxy does not support image passthrough)"
-            )
-            text_prompt = (
-                prompt + "\n\nNOTE: The schematic image is not available in this request. "
-                "Based on the design specification above, provide your best assessment "
-                "of common schematic issues. Score conservatively (0.6-0.7 range) since "
-                "you cannot visually verify the actual layout. "
-                "Respond with valid JSON matching the requested format."
-            )
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an expert electronic schematic reviewer. Respond with valid JSON only."
-                    },
-                    {
-                        "role": "user",
-                        "content": text_prompt
-                    }
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature
-            }
-        else:
-            img_b64 = base64.b64encode(image_data).decode('utf-8')
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an expert electronic schematic reviewer. Respond with valid JSON only."
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{img_b64}"
-                                }
+        # Send image with prompt to LLM for real visual analysis.
+        # The Claude Code Max proxy now supports image passthrough via
+        # direct Anthropic API calls (oauth-2025-04-20 beta).
+        img_b64 = base64.b64encode(image_data).decode('utf-8')
+        logger.info(
+            f"Sending schematic image ({len(image_data)} bytes) for visual analysis "
+            f"via {self._ai_provider} provider"
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert electronic schematic reviewer. Respond with valid JSON only."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_b64}"
                             }
-                        ]
-                    }
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature
-            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
