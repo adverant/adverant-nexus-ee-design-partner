@@ -287,8 +287,10 @@ class SmokeTestAgent:
             })
 
         # ---- Parse labels (global_label and label) ----
+        # Note: global_label has a (shape ...) clause between name and (at ...):
+        #   (global_label "VCC" (shape input) (at 25.4 58.42 0) ...)
         glabel_re = re.compile(
-            r'\(global_label\s+"([^"]+)"\s+\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)'
+            r'\(global_label\s+"([^"]+)".*?\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)'
         )
         for m in glabel_re.finditer(kicad_sch):
             labels.append({
@@ -308,6 +310,14 @@ class SmokeTestAgent:
                 "y": float(m.group(3)),
                 "kind": "label",
             })
+
+        global_label_count = sum(1 for l in labels if l["kind"] == "global_label")
+        local_label_count = sum(1 for l in labels if l["kind"] == "label")
+        logger.info(
+            f"Smoke test parsed {global_label_count} global_labels, "
+            f"{local_label_count} local labels, {len(wires)} wires, "
+            f"{len(components)} components"
+        )
 
         # ---- Build connectivity graph ----
         # Map: rounded position -> set of connected item descriptions
@@ -398,10 +408,12 @@ class SmokeTestAgent:
             comp_pos = self._round_pos(comp["x"], comp["y"])
 
             # Proximity-based seeding: find all wire/label positions
-            # within the IC bounding box (±20mm from center).  IC pins
+            # within the IC bounding box (±40mm from center).  IC pins
             # are at offsets from the component center; the flood-fill
             # must start from positions already in the adjacency graph.
-            PROXIMITY_RADIUS = 20.0  # mm — covers typical IC pin span
+            # 40mm covers large ICs (48+ pin QFP) where power pins can
+            # be 30mm+ from the symbol center.
+            PROXIMITY_RADIUS = 40.0  # mm — covers large IC pin spans
             seed_positions: Set[Tuple[float, float]] = set()
             for gpos in all_graph_positions:
                 dx = abs(gpos[0] - comp_pos[0])
@@ -428,6 +440,12 @@ class SmokeTestAgent:
 
             power = {n for n in reachable_net_names if n.upper() in POWER_NET_NAMES}
             ground = {n for n in reachable_net_names if n.upper() in GROUND_NET_NAMES}
+
+            logger.info(
+                f"Smoke test BFS for {ref} at {comp_pos}: "
+                f"seeds={len(seed_positions)}, reachable={len(reachable)}, "
+                f"power={power or 'NONE'}, ground={ground or 'NONE'}"
+            )
 
             ic_power_nets[ref] = power
             ic_ground_nets[ref] = ground
