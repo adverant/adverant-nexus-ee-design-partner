@@ -329,8 +329,8 @@ class LayoutOptimizerAgent:
 
                 # Place most connected IC in center, others radiate outward
                 ic_y = ry + rh * 0.30
-                # Use the updated ic_to_ic spacing rule (60mm), not a hardcoded 40mm cap.
-                # The larger canvas provides room; don't shrink spacing below the rule minimum.
+                # Use the ic_to_ic spacing rule, but give each IC at least its fair share
+                # of the region width if the region is wider than num_ics × spacing.
                 ic_spacing = max(self.SPACING_RULES["ic_to_ic"], rw / max(len(sub_ics), 1))
                 center_x = rx + rw / 2
 
