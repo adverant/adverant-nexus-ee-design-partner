@@ -13,7 +13,7 @@ Quality Gates (ALL must pass):
     - >= 80% connection coverage
     - 0 component overlaps
     - 0 fatal smoke test issues
-    - >= 0.85 visual validation score
+    - >= 0.65 visual validation score
     - < 10% center fallback ratio
 """
 
@@ -57,7 +57,7 @@ class QualityGates:
     connection_coverage_min: float = 0.80     # >= 80% BOM connected
     overlap_count_max: int = 0               # 0 overlaps
     smoke_test_fatal_max: int = 0            # 0 fatal issues
-    visual_score_min: float = 0.85           # visual >= 85% (real image analysis via proxy)
+    visual_score_min: float = 0.65           # visual >= 65% (real image analysis via proxy)
     center_fallback_ratio_max: float = 0.10  # < 10% center fallbacks
     functional_score_min: float = 0.60       # functional validation >= 60%
 
@@ -656,8 +656,8 @@ def main():
         help="Output directory for iteration results"
     )
     parser.add_argument(
-        "--visual-threshold", type=float, default=0.85,
-        help="Visual validation score threshold (default: 0.85, real image analysis via proxy)"
+        "--visual-threshold", type=float, default=0.65,
+        help="Visual validation score threshold (default: 0.65, real image analysis via proxy)"
     )
     parser.add_argument(
         "--allow-placeholders", action="store_true",

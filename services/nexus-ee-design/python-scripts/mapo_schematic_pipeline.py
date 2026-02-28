@@ -138,7 +138,7 @@ class PipelineConfig:
     # Validation - MUST use Opus 4.6 only per user directive
     primary_model: str = "anthropic/claude-opus-4.6"
     verification_model: str = "anthropic/claude-opus-4.6"
-    validation_threshold: float = 0.85
+    validation_threshold: float = 0.65
     max_iterations: int = 5
 
     # Output

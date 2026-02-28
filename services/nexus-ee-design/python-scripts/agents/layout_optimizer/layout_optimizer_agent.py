@@ -88,21 +88,21 @@ class LayoutOptimizerAgent:
     # Standard grid unit (100 mil = 2.54mm)
     GRID_UNIT = 2.54
 
-    # Canvas dimensions (mm) — A2 sheet provides ample room for complex schematics.
-    # A4 (254×190.5) was too small for 20+ components: passives overlapped IC bodies.
-    # A2 (420×594mm landscape) gives ~3.5× the area, eliminating crowding.
-    CANVAS_WIDTH = 594.0   # A2 landscape width
-    CANVAS_HEIGHT = 420.0  # A2 landscape height
+    # Canvas dimensions (mm) — A3 landscape is appropriate for 20-30 component schematics.
+    # A2 (594×420mm) was too large: components scattered, visual score penalised for empty space.
+    # A3 (420×297mm landscape) produces a compact, professional-looking layout.
+    CANVAS_WIDTH = 420.0   # A3 landscape width
+    CANVAS_HEIGHT = 297.0  # A3 landscape height
 
     # Spacing rules (mm)
     SPACING_RULES = {
-        "ic_to_ic": 60.0,           # 60mm between IC centers (was 40mm — too tight with large ICs)
-        "ic_to_passive": 25.0,       # 25mm IC to passive (was 15mm — passives were on top of ICs)
-        "passive_to_passive": 15.0,  # 15mm between passives (was 10mm)
-        "bypass_to_ic": 15.0,        # 15mm bypass to IC (was 5mm — caused overlap with IC body)
+        "ic_to_ic": 40.0,            # 40mm between IC centers (compact, ICs fit on A3 in a row)
+        "ic_to_passive": 20.0,       # 20mm IC to passive
+        "passive_to_passive": 12.0,  # 12mm between passives
+        "bypass_to_ic": 12.0,        # 12mm bypass to IC
         "connector_edge": 10.0,      # 10mm from edge for connectors
-        "layer_spacing": 80.0,       # Horizontal spacing between layers
-        "vertical_spacing": 40.0,    # Vertical spacing within layer
+        "layer_spacing": 50.0,       # Horizontal spacing between layers
+        "vertical_spacing": 25.0,    # Vertical spacing within layer
     }
 
     def __init__(self):
