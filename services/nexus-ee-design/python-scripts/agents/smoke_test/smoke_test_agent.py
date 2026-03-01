@@ -261,8 +261,18 @@ class SmokeTestAgent:
                                      "+3V3", "+5V", "+12V", "GND_DIGITAL", "GND_ANALOG",
                                      "power:VCC", "power:GND", "power:VDD", "power:VSS",
                                      "power:+3V3", "power:+5V", "power:+12V"}
-            # Bare lib_id or prefixed with "power:"
-            if lib_id in POWER_SYMBOL_LIB_IDS or lib_id.split(":")[-1] in {"VCC", "GND", "VDD", "VSS", "VDDA", "VSSA"}:
+            # All recognised power symbol bare names (covers compound names like VCC_3V3)
+            POWER_BARE_NAMES = {
+                "VCC", "GND", "VDD", "VSS", "VDDA", "VSSA",
+                "VCC_3V3", "VCC_5V", "VCC_1V8", "VCC_2V5",
+                "VDD_3V3", "VDD_5V", "VDDA_3V3",
+                "+3V3", "+3.3V", "+5V", "+12V",
+                "GND_ANALOG", "GND_DIGITAL", "AGND", "DGND",
+                "VBUS", "VSYS", "VIN", "VBAT",
+                "PWR_FLAG",
+            }
+            # Bare lib_id, fully-qualified "power:…", or bare name after ":"
+            if lib_id in POWER_SYMBOL_LIB_IDS or lib_id.split(":")[-1] in POWER_BARE_NAMES:
                 continue
 
             components.append({
