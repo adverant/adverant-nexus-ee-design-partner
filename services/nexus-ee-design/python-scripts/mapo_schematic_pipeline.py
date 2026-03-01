@@ -490,18 +490,37 @@ class MAPOSchematicPipeline:
                 consumer_components=gnd_consumers,
             ))
 
-        # VCC rail for ICs
+        # Identify LDO regulator ref (source of VCC_3V3 rail)
+        ldo_ref: Optional[str] = next(
+            (ref for ref, info in ref_to_bom.items()
+             if info["category"] in ("LDO_Regulator", "LDO", "Regulator_Linear")),
+            None
+        )
+
+        # VCC rail for 5V ICs — MCU is explicitly excluded (it runs on VCC_3V3)
         vcc_consumers = [
             ref for ref in ic_refs
             if ref in component_pins
+            and ref != mcu_ref  # MCU uses VCC_3V3 (3.3V), NOT VCC (5V)
             and find_pin(ref, [r"^VCC$", r"^VDD$", r"^AVCC$", r"^DVCC$", r"^VCCIO$"])
         ]
         if vcc_consumers:
             power_rails.append(PowerRail(
                 net_name="VCC",
-                voltage=3.3,
+                voltage=5.0,
                 current_max=1.0,
                 consumer_components=vcc_consumers,
+            ))
+
+        # VCC_3V3 rail for MCU (3.3V regulated by MCP1700 LDO from VCC)
+        if mcu_ref and mcu_ref in component_pins:
+            power_rails.append(PowerRail(
+                net_name="VCC_3V3",
+                voltage=3.3,
+                current_max=0.25,
+                regulator_type="LDO",
+                source_component=ldo_ref or "U4",
+                consumer_components=[mcu_ref],
             ))
 
         # Step 4: Build interface definitions
@@ -688,6 +707,8 @@ class MAPOSchematicPipeline:
             return None
 
         # Build design intent text for the connection generator prompt
+        mcu_label = f"{mcu_ref} (STM32G431, MCU)" if mcu_ref else "the MCU"
+        ldo_label = f"{ldo_ref} (MCP1700 LDO)" if ldo_ref else "the LDO"
         design_descriptions = {
             "foc_esc": (
                 "FOC ESC (Field-Oriented Control Electronic Speed Controller) "
@@ -695,7 +716,11 @@ class MAPOSchematicPipeline:
                 "Key signal paths: MCU PWM → Gate Drivers → MOSFETs (3 half-bridges), "
                 "Shunt Resistors → Current Sense Amps → MCU ADC (3 phases), "
                 "MCU → CAN Transceiver → CAN Bus. "
-                "All ICs MUST have VCC and GND connections."
+                f"CRITICAL POWER RULE: {mcu_label} VDD/VBAT/VDDA pins MUST connect to "
+                f"VCC_3V3 (3.3V), NEVER to VCC (5V) — the MCU absolute max VDD is 3.6V. "
+                f"{ldo_label}: VIN→VCC (5V input), VOUT→VCC_3V3 (3.3V output). "
+                "Gate drivers, CAN transceiver, and other 5V logic ICs use VCC. "
+                "All ICs MUST have power and GND connections."
             ),
         }
         design_text = design_descriptions.get(
