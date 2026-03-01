@@ -1754,6 +1754,8 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                     )
 
         # --- 3. Power rails ---
+        # Build ref -> ComponentInfo lookup for actual pin resolution
+        ref_to_comp_info = {c.reference: c for c in components}
         for rail in getattr(seed, "power_rails", []):
             source = rail.source_component
             if source and source not in comp_refs:
@@ -1763,16 +1765,42 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                 if consumer not in comp_refs:
                     logger.warning(f"SEED: Power rail '{rail.net_name}' consumer '{consumer}' not in BOM")
                     continue
-                if source:
+                # Use actual component power pins (e.g., VDD, VBAT, VDDA for MCU)
+                # rather than the net name — this avoids SEED PIN MISMATCH and ensures
+                # the assembler places the correct label at the right pin position.
+                consumer_comp = ref_to_comp_info.get(consumer)
+                consumer_power_pins = (
+                    consumer_comp.power_pins
+                    if consumer_comp and consumer_comp.power_pins
+                    else [rail.net_name]  # fallback: net name (old behavior)
+                )
+                # Generate one connection per consumer power pin so all VDD/VBAT/VDDA
+                # get covered by VCC_3V3 (prevents _add_power_symbols fallback from
+                # incorrectly adding VCC to any uncovered power pin)
+                for consumer_pin in consumer_power_pins:
                     conn = GeneratedConnection(
-                        from_ref=source,
-                        from_pin=rail.net_name,  # Use net name as pin (e.g., VOUT)
+                        from_ref="PWR",
+                        from_pin=rail.net_name,
                         to_ref=consumer,
-                        to_pin=rail.net_name,  # Consumer power pin
+                        to_pin=consumer_pin,
                         net_name=rail.net_name,
                         connection_type=ConnectionType.POWER,
                         priority=15,
-                        notes=f"SEED:power_rail {rail.voltage}V/{rail.current_max}A ({rail.regulator_type})",
+                        notes=f"SEED:power_rail {rail.voltage}V/{rail.current_max}A ({rail.regulator_type}) pin={consumer_pin}",
+                    )
+                    result.append(conn)
+                    logger.debug(f"SEED power_rail: PWR.{rail.net_name} → {consumer}.{consumer_pin} ({rail.voltage}V)")
+                # Also add source component connection if source is specified
+                if source:
+                    conn = GeneratedConnection(
+                        from_ref=source,
+                        from_pin=rail.net_name,  # fuzzy-matched to VO/VOUT etc.
+                        to_ref="PWR",
+                        to_pin=rail.net_name,
+                        net_name=rail.net_name,
+                        connection_type=ConnectionType.POWER,
+                        priority=15,
+                        notes=f"SEED:power_rail {rail.voltage}V/{rail.current_max}A source={source}",
                     )
                     result.append(conn)
 
