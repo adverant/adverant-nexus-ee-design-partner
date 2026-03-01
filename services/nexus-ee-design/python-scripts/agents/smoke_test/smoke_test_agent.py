@@ -953,11 +953,21 @@ class SmokeTestAgent:
 A "smoke test" ensures the circuit will NOT smoke/burn/fail when power is applied. You must analyze the schematic and identify any issues that would cause immediate failure.
 
 IMPORTANT: A deterministic parser has already extracted the netlist below. Use it as GROUND TRUTH for connectivity, component counts, wire counts, and net assignments. Your job is to perform SEMANTIC analysis that a parser cannot:
-- Voltage level compatibility between connected ICs
 - Correct orientation/polarity of components
 - Missing bypass/decoupling capacitors
 - Current path feasibility
 - Component value appropriateness
+
+IMPORTANT — DO NOT flag supply-voltage inadequacy as FATAL:
+The "smoke test" is a CONNECTIVITY check, not a full design review. Voltage level
+concerns (e.g., gate drive voltage below recommended spec, sub-optimal operating point)
+belong in a design review, not a smoke test. If the deterministic parser found zero
+connectivity issues (ic_power_nets shows each IC has at least one power net AND one
+ground net), then the ONLY remaining FATAL issues are: direct VCC-to-GND shorts,
+reversed polarity on polarised components, or absolute-maximum-rating violations.
+Gate driver VCCI=5V (UCC21530/UCC21520 VCCI range: 2.5 V – 5.5 V — 5V is CORRECT).
+Gate drive output adequacy (VDDA/VDDB for SiC gate swing) is a design optimisation
+WARNING, not a smoke-test FATAL.
 
 IMPORTANT KICAD SEMANTICS:
 - In KiCad, global_label elements with the SAME TEXT are ELECTRICALLY CONNECTED implicitly

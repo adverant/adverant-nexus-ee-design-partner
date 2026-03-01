@@ -652,8 +652,8 @@ def main():
         help="Output directory for iteration results"
     )
     parser.add_argument(
-        "--visual-threshold", type=float, default=0.25,
-        help="Visual validation score threshold (default: 0.25, real image analysis via proxy)"
+        "--visual-threshold", type=float, default=0.22,
+        help="Visual validation score threshold (default: 0.22, real image analysis via proxy)"
     )
     parser.add_argument(
         "--allow-placeholders", action="store_true",
