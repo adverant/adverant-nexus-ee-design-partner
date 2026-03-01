@@ -408,12 +408,12 @@ class SmokeTestAgent:
             comp_pos = self._round_pos(comp["x"], comp["y"])
 
             # Proximity-based seeding: find all wire/label positions
-            # within the IC bounding box (±40mm from center).  IC pins
+            # within the IC bounding box (±60mm from center).  IC pins
             # are at offsets from the component center; the flood-fill
             # must start from positions already in the adjacency graph.
-            # 40mm covers large ICs (48+ pin QFP) where power pins can
-            # be 30mm+ from the symbol center.
-            PROXIMITY_RADIUS = 40.0  # mm — covers large IC pin spans
+            # 60mm covers very large ICs (64+ pin QFP, STM32 LQFP64)
+            # where power pins can be 40mm+ from the symbol center.
+            PROXIMITY_RADIUS = 60.0  # mm — covers large IC pin spans
             seed_positions: Set[Tuple[float, float]] = set()
             for gpos in all_graph_positions:
                 dx = abs(gpos[0] - comp_pos[0])
