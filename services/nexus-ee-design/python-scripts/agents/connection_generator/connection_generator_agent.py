@@ -1765,18 +1765,22 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                 if consumer not in comp_refs:
                     logger.warning(f"SEED: Power rail '{rail.net_name}' consumer '{consumer}' not in BOM")
                     continue
-                # Use actual component power pins (e.g., VDD, VBAT, VDDA for MCU)
-                # rather than the net name — this avoids SEED PIN MISMATCH and ensures
-                # the assembler places the correct label at the right pin position.
+                # Use actual component pins (VDD/VBAT/VDDA for VCC rails, GND/VSS for GND rails)
+                # rather than the net name — avoids SEED PIN MISMATCH and ensures labels
+                # land at the correct pin positions.
                 consumer_comp = ref_to_comp_info.get(consumer)
-                consumer_power_pins = (
-                    consumer_comp.power_pins
-                    if consumer_comp and consumer_comp.power_pins
-                    else [rail.net_name]  # fallback: net name (old behavior)
+                is_gnd_rail = any(
+                    g in rail.net_name.upper()
+                    for g in {"GND", "VSS", "VSSA", "AGND"}
                 )
-                # Generate one connection per consumer power pin so all VDD/VBAT/VDDA
-                # get covered by VCC_3V3 (prevents _add_power_symbols fallback from
-                # incorrectly adding VCC to any uncovered power pin)
+                if is_gnd_rail:
+                    raw_pins = consumer_comp.ground_pins if consumer_comp else []
+                else:
+                    raw_pins = consumer_comp.power_pins if consumer_comp else []
+                consumer_power_pins = raw_pins if raw_pins else [rail.net_name]
+                # Generate one connection per consumer pin so all VDD/VBAT/VDDA (or
+                # all GND/VSS) get covered, preventing _add_power_symbols from adding
+                # wrong-net fallback labels.
                 for consumer_pin in consumer_power_pins:
                     conn = GeneratedConnection(
                         from_ref="PWR",
