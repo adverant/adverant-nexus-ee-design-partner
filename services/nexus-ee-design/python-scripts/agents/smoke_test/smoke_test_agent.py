@@ -347,7 +347,9 @@ class SmokeTestAgent:
         # ---- Determine which nets each IC is connected to ----
         # Power net names (case-insensitive matching)
         POWER_NET_NAMES = {"VCC", "VDD", "VDDA", "VBAT", "3V3", "3.3V", "5V", "12V",
-                           "1V8", "1.8V", "2V5", "2.5V", "VBUS", "VSYS", "VIN"}
+                           "1V8", "1.8V", "2V5", "2.5V", "VBUS", "VSYS", "VIN",
+                           "VCC_3V3", "+3V3", "+3.3V", "+5V", "+12V", "VCC_5V",
+                           "VCC_1V8", "VCC_2V5", "VDD_3V3", "VDD_5V", "VDDA_3V3"}
         GROUND_NET_NAMES = {"GND", "VSS", "VSSA", "GNDA", "AGND", "DGND", "GROUND",
                             "GND_DIGITAL", "GND_ANALOG"}
 
@@ -393,62 +395,58 @@ class SmokeTestAgent:
                         queue.append(neighbor)
             return visited
 
-        # For each IC, find which net names are reachable from its position
-        ic_power_nets: Dict[str, Set[str]] = {}
-        ic_ground_nets: Dict[str, Set[str]] = {}
+        # ---- Nearest-IC label assignment (replaces BFS proximity seeding) ----
+        # For each power/ground global label position, assign it to the nearest IC
+        # within LABEL_IC_RADIUS mm.  This prevents cross-IC net pollution that
+        # occurs when the BFS proximity radius spans multiple adjacent ICs —
+        # e.g. U9's VCC label leaking into U3's power set via same-name adjacency.
+        LABEL_IC_RADIUS = 80.0  # mm — large enough to cover any IC pin offset
 
-        # Build set of all graph positions for proximity seeding
-        all_graph_positions = set(adjacency.keys()) | set(pos_to_items.keys())
+        ic_power_nets: Dict[str, Set[str]] = {ref: set() for ref in ic_refs}
+        ic_ground_nets: Dict[str, Set[str]] = {ref: set() for ref in ic_refs}
+
+        ic_positions_map: Dict[str, Tuple[float, float]] = {
+            comp["reference"]: (comp["x"], comp["y"])
+            for comp in components
+            if comp["reference"].startswith("U")
+        }
+
+        for net_name, positions in nets.items():
+            net_upper = net_name.upper()
+            is_power = net_upper in POWER_NET_NAMES
+            is_ground = net_upper in GROUND_NET_NAMES
+            if not is_power and not is_ground:
+                continue
+
+            for lbl_pos in positions:
+                lx, ly = lbl_pos
+                nearest_ic = None
+                min_dist_sq = LABEL_IC_RADIUS ** 2
+                for ic_ref, (cx, cy) in ic_positions_map.items():
+                    dist_sq = (lx - cx) ** 2 + (ly - cy) ** 2
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        nearest_ic = ic_ref
+                if nearest_ic:
+                    if is_power:
+                        ic_power_nets[nearest_ic].add(net_name)
+                    else:
+                        ic_ground_nets[nearest_ic].add(net_name)
+                    logger.debug(
+                        f"Label '{net_name}' at ({lx:.1f}, {ly:.1f}) → {nearest_ic} "
+                        f"(dist={min_dist_sq**0.5:.1f}mm)"
+                    )
 
         for comp in components:
             ref = comp["reference"]
             if not ref.startswith("U"):
                 continue
-
-            comp_pos = self._round_pos(comp["x"], comp["y"])
-
-            # Proximity-based seeding: find all wire/label positions
-            # within the IC bounding box (±60mm from center).  IC pins
-            # are at offsets from the component center; the flood-fill
-            # must start from positions already in the adjacency graph.
-            # 60mm covers very large ICs (64+ pin QFP, STM32 LQFP64)
-            # where power pins can be 40mm+ from the symbol center.
-            PROXIMITY_RADIUS = 60.0  # mm — covers large IC pin spans
-            seed_positions: Set[Tuple[float, float]] = set()
-            for gpos in all_graph_positions:
-                dx = abs(gpos[0] - comp_pos[0])
-                dy = abs(gpos[1] - comp_pos[1])
-                if dx <= PROXIMITY_RADIUS and dy <= PROXIMITY_RADIUS:
-                    seed_positions.add(gpos)
-
-            # Also include the exact component position (in case it's in the graph)
-            seed_positions.add(comp_pos)
-
-            # Flood-fill from ALL seed positions to find reachable nets
-            reachable: Set[Tuple[float, float]] = set()
-            for seed in seed_positions:
-                if seed not in reachable:
-                    reachable.update(flood_fill(seed))
-
-            # Collect all label names at reachable positions
-            reachable_net_names: Set[str] = set()
-            for pos in reachable:
-                for item in pos_to_items.get(pos, set()):
-                    if item.startswith("global_label:") or item.startswith("label:"):
-                        net_name = item.split(":", 1)[1]
-                        reachable_net_names.add(net_name)
-
-            power = {n for n in reachable_net_names if n.upper() in POWER_NET_NAMES}
-            ground = {n for n in reachable_net_names if n.upper() in GROUND_NET_NAMES}
-
+            power = ic_power_nets.get(ref, set())
+            ground = ic_ground_nets.get(ref, set())
             logger.info(
-                f"Smoke test BFS for {ref} at {comp_pos}: "
-                f"seeds={len(seed_positions)}, reachable={len(reachable)}, "
+                f"Smoke test nearest-IC for {ref} at ({comp['x']:.1f}, {comp['y']:.1f}): "
                 f"power={power or 'NONE'}, ground={ground or 'NONE'}"
             )
-
-            ic_power_nets[ref] = power
-            ic_ground_nets[ref] = ground
 
         # Count unique nets (each connected component with at least one label is a net)
         all_positions = set(pos_to_items.keys())
