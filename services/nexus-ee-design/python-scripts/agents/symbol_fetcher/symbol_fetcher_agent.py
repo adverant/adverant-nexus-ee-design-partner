@@ -424,6 +424,7 @@ class SymbolFetcherAgent:
         KNOWN_SYMBOL_OVERRIDES: Dict[str, Tuple[str, str]] = {
             "UCC21530ADWRR": ("Driver_FET", "UCC21520DW"),
             "UCC21530DWR":   ("Driver_FET", "UCC21520DW"),
+            "UCC21520ADWRR": ("Driver_FET", "UCC21520DW"),  # ADWRR = tape/reel variant of DW package
             "USB4110-GF-A":  ("Connector", "USB_C_Receptacle_USB2.0_16P"),
             # SL22_10010: Murata NTC thermistor — LLM matches to 'L' (inductor), override to correct symbol
             "SL22_10010":    ("Device", "Thermistor_NTC"),

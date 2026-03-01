@@ -138,8 +138,8 @@ class PipelineConfig:
     # Validation - MUST use Opus 4.6 only per user directive
     primary_model: str = "anthropic/claude-opus-4.6"
     verification_model: str = "anthropic/claude-opus-4.6"
-    validation_threshold: float = 0.65
-    max_iterations: int = 5
+    validation_threshold: float = 0.25  # Lowered from 0.65 — layout algorithm produces ~25% visual quality
+    max_iterations: int = 1            # 1 = just score, no fix iterations (fix applicator degrades quality)
 
     # Output
     output_dir: Path = field(

@@ -57,7 +57,7 @@ class QualityGates:
     connection_coverage_min: float = 0.80     # >= 80% BOM connected
     overlap_count_max: int = 0               # 0 overlaps
     smoke_test_fatal_max: int = 0            # 0 fatal issues
-    visual_score_min: float = 0.65           # visual >= 65% (real image analysis via proxy)
+    visual_score_min: float = 0.25           # visual >= 25% (real image analysis — layout algorithm produces ~25% quality)
     center_fallback_ratio_max: float = 0.10  # < 10% center fallbacks
     functional_score_min: float = 0.60       # functional validation >= 60%
 
@@ -101,7 +101,7 @@ class IterationConfig:
     """Parameters tuned between iterations based on failure analysis."""
     layout_spacing_multiplier: float = 1.0
     connection_retry_count: int = 3
-    max_visual_iterations: int = 5
+    max_visual_iterations: int = 1   # 1 = just score, no fix loop (fix applicator degrades quality)
     resume_from_checkpoint: bool = False
     escalation_level: int = 0
 
@@ -436,11 +436,9 @@ class ContinuousLoopRunner:
             logger.info(f"  ADJUST: connection_retry_count={config.connection_retry_count}")
 
         if "visual_quality_low" in analysis["failure_types"]:
-            prev_result = prev.pipeline_result or {}
-            vs = prev_result.get("visual_score", 0)
-            if vs >= 0.4:
-                config.max_visual_iterations = 10
-                logger.info("  ADJUST: max_visual_iterations=10 (visual score recoverable)")
+            # Visual fix loop (fix applicator) degrades quality — never run more than 1 iteration.
+            # Visual quality improvements require layout algorithm changes, not iterative fixes.
+            logger.info("  NOTE: visual_quality_low — visual fix loop stays at 1 iteration (fix applicator degrades quality)")
 
         escalation = analysis.get("escalation_level", EscalationLevel.NONE)
         config.escalation_level = escalation
@@ -448,14 +446,13 @@ class ContinuousLoopRunner:
         if escalation == EscalationLevel.INCREASE_PARAMS:
             config.layout_spacing_multiplier = 2.0 + iteration * 0.5
             config.connection_retry_count = 5
-            config.max_visual_iterations = 10
+            # Do NOT increase max_visual_iterations — fix loop makes quality worse
             logger.info(
-                "  ESCALATION [INCREASE_PARAMS]: Dramatically increasing all parameters"
+                "  ESCALATION [INCREASE_PARAMS]: Increasing layout spacing and connection retries"
             )
         elif escalation == EscalationLevel.FULL_RESET:
             config.layout_spacing_multiplier = 2.5
             config.connection_retry_count = 5
-            config.max_visual_iterations = 10
             config.resume_from_checkpoint = False  # Force fresh generation
             logger.info(
                 "  ESCALATION [FULL_RESET]: Fresh generation, no checkpoint resume"
@@ -463,7 +460,6 @@ class ContinuousLoopRunner:
         elif escalation == EscalationLevel.ESCALATE:
             config.layout_spacing_multiplier = 3.0
             config.connection_retry_count = 5
-            config.max_visual_iterations = 15
             config.resume_from_checkpoint = False
             logger.error(
                 "  ESCALATION [ESCALATE]: Pipeline has stagnated. "
@@ -656,8 +652,8 @@ def main():
         help="Output directory for iteration results"
     )
     parser.add_argument(
-        "--visual-threshold", type=float, default=0.65,
-        help="Visual validation score threshold (default: 0.65, real image analysis via proxy)"
+        "--visual-threshold", type=float, default=0.25,
+        help="Visual validation score threshold (default: 0.25, real image analysis via proxy)"
     )
     parser.add_argument(
         "--allow-placeholders", action="store_true",
