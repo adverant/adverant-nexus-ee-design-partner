@@ -1580,6 +1580,18 @@ JSON array of pins:"""
 
             wire_connections.append(conn)
 
+        # Collect all positions that already have labels (placed by power connection handler above).
+        # A stub wire FROM an already-labeled position creates a wire bridge from the existing
+        # label's net to whatever net label is at the other end → SHORT CIRCUIT.
+        # We must never place a stub wire starting at an already-labeled position.
+        occupied_pin_positions: set = {
+            (label.position[0], label.position[1])
+            for label in sheet.labels
+        }
+        # Track positions where we place signal net labels to prevent same-position conflicts.
+        placed_signal_label_pos: dict = {}  # (x, y) -> net_name
+        shorts_prevented = 0
+
         # Place global labels at both endpoints for long-distance connections
         for conn in label_connections:
             net_name = conn["net_name"]
@@ -1595,29 +1607,66 @@ JSON array of pins:"""
             label_key_from = f"{from_ref}.{from_pin}.{net_name}"
             if label_key_from not in net_label_names_added:
                 label_pos_from = (from_pos[0] + 2.54, from_pos[1])
-                sheet.wires.append(Wire(start=from_pos, end=label_pos_from))
-                sheet.labels.append(Label(
-                    text=net_name, position=label_pos_from,
-                    rotation=0, label_type="global_label"
-                ))
+                if from_pos in occupied_pin_positions:
+                    # Guard 1: pin already has a label — stub wire would bridge nets → SHORT
+                    logger.warning(
+                        f"SHORT PREVENTION: {from_ref}.{from_pin} at {from_pos} already "
+                        f"has a label; skipping stub wire for net '{net_name}'"
+                    )
+                    shorts_prevented += 1
+                elif label_pos_from in placed_signal_label_pos and placed_signal_label_pos[label_pos_from] != net_name:
+                    # Guard 2: label position already taken by a different net → position conflict
+                    logger.warning(
+                        f"SHORT PREVENTION: Label pos {label_pos_from} already has net "
+                        f"'{placed_signal_label_pos[label_pos_from]}'; skipping '{net_name}' "
+                        f"for {from_ref}.{from_pin}"
+                    )
+                    shorts_prevented += 1
+                else:
+                    sheet.wires.append(Wire(start=from_pos, end=label_pos_from))
+                    sheet.labels.append(Label(
+                        text=net_name, position=label_pos_from,
+                        rotation=0, label_type="global_label"
+                    ))
+                    placed_signal_label_pos[label_pos_from] = net_name
+                    occupied_pin_positions.add(label_pos_from)  # block future stubs from this label pos
                 net_label_names_added.add(label_key_from)
 
             # Label at destination pin (stub wire + global label)
             label_key_to = f"{to_ref}.{to_pin}.{net_name}"
             if label_key_to not in net_label_names_added:
                 label_pos_to = (to_pos[0] + 2.54, to_pos[1])
-                sheet.wires.append(Wire(start=to_pos, end=label_pos_to))
-                sheet.labels.append(Label(
-                    text=net_name, position=label_pos_to,
-                    rotation=0, label_type="global_label"
-                ))
+                if to_pos in occupied_pin_positions:
+                    # Guard 1: pin already has a label — stub wire would bridge nets → SHORT
+                    logger.warning(
+                        f"SHORT PREVENTION: {to_ref}.{to_pin} at {to_pos} already "
+                        f"has a label; skipping stub wire for net '{net_name}'"
+                    )
+                    shorts_prevented += 1
+                elif label_pos_to in placed_signal_label_pos and placed_signal_label_pos[label_pos_to] != net_name:
+                    # Guard 2: label position already taken by a different net → position conflict
+                    logger.warning(
+                        f"SHORT PREVENTION: Label pos {label_pos_to} already has net "
+                        f"'{placed_signal_label_pos[label_pos_to]}'; skipping '{net_name}' "
+                        f"for {to_ref}.{to_pin}"
+                    )
+                    shorts_prevented += 1
+                else:
+                    sheet.wires.append(Wire(start=to_pos, end=label_pos_to))
+                    sheet.labels.append(Label(
+                        text=net_name, position=label_pos_to,
+                        rotation=0, label_type="global_label"
+                    ))
+                    placed_signal_label_pos[label_pos_to] = net_name
+                    occupied_pin_positions.add(label_pos_to)  # block future stubs from this label pos
                 net_label_names_added.add(label_key_to)
 
         if label_connections:
             logger.info(
                 f"NET LABEL OPTIMIZATION: {len(label_connections)} long-distance connections "
                 f"(>{NET_LABEL_DISTANCE_THRESHOLD}mm) converted to paired global labels. "
-                f"{len(wire_connections)} short connections routed as wires."
+                f"{len(wire_connections)} short connections routed as wires. "
+                f"{shorts_prevented} potential SHORT CIRCUITs prevented by position guards."
             )
 
         # Replace conn_dicts with only short-distance connections for wire routing
