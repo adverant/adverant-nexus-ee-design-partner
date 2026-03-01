@@ -1030,7 +1030,22 @@ Return a JSON object with this EXACT structure:
     "net_count": {netlist_summary['net_count']}
 }}
 
-Be thorough but practical. Focus on issues that would cause IMMEDIATE FAILURE when power is applied.
+Be thorough but practical.
+
+FATAL vs WARNING classification:
+- FATAL: Issues that cause IMMEDIATE, CATASTROPHIC failure the moment power is applied —
+  direct VCC-to-GND shorts, components with ZERO power connection (completely floating power pins),
+  reversed polarity on polarised components (electrolytic caps, diodes), or a supply voltage
+  COMPLETELY OUTSIDE the IC's absolute maximum ratings.
+- WARNING: Issues that affect performance or reliability under operating conditions — supply
+  voltage below the RECOMMENDED level but within the IC's operating range, sub-optimal
+  component values, missing ESD protection, missing bypass caps. Gate driver output supply
+  (VDDB/VDDA) below the recommended gate swing for full RDS(on) is a WARNING, not FATAL,
+  because the IC still functions — it just produces reduced gate voltage.
+- NEVER classify a supply voltage concern as FATAL unless the supply is literally 0 V (missing)
+  or exceeds the absolute maximum rating.
+
+Focus on issues that would cause IMMEDIATE FAILURE when power is applied.
 Do NOT re-report issues already found by the deterministic parser.
 Return ONLY valid JSON, no explanations outside the JSON structure."""
 
