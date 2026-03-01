@@ -1391,7 +1391,7 @@ JSON array of pins:"""
 
         # Build connection list with validation
         # Handle power connections separately (they use virtual refs like "PWR", "GND")
-        POWER_REFS = {"PWR", "GND", "POWER", "GROUND", "VCC", "VDD", "VSS"}
+        POWER_REFS = {"PWR", "GND", "POWER", "GROUND", "VCC", "VDD", "VSS", "VCC_3V3", "+3V3", "VBUS", "VBAT"}
         valid_connections = 0
         invalid_connections = []
         power_labels_added = []

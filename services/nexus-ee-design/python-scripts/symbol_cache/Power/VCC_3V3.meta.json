@@ -1,0 +1,11 @@
+{
+  "part_number": "VCC_3V3",
+  "manufacturer": null,
+  "source": "kicad_local_install",
+  "datasheet_url": null,
+  "fetched_at": "2026-03-01T16:00:00.000000",
+  "needs_review": false,
+  "library": "power",
+  "library_path": "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/power.kicad_sym",
+  "match_type": "exact"
+}

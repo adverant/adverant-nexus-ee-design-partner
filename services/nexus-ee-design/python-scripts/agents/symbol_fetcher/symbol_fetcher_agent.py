@@ -432,6 +432,8 @@ class SymbolFetcherAgent:
             "0603WAF1200T5E": ("Device", "R"),
             # LTC4412ES6: Linear Tech ideal diode controller — cache corrupts to 'L' in run 2, pin it to correct symbol
             "LTC4412ES6":    ("Power_Management", "LTC4412xS6"),
+            # MCP1700T-3302E/TT: Microchip 3.3V LDO SOT-23-3 — maps to generic MCP1700 SOT-23 symbol
+            "MCP1700T-3302E/TT": ("Regulator_Linear", "MCP1700x-300xxTT"),
         }
         if part_number in KNOWN_SYMBOL_OVERRIDES:
             lib_name, sym_name = KNOWN_SYMBOL_OVERRIDES[part_number]
@@ -2196,7 +2198,7 @@ No explanation or markdown formatting."""
             libraries.extend(['Connector_Generic', 'Connector_USB'])
 
         # Power symbols
-        if pn_upper in ['VCC', 'GND', 'VDD', 'VSS', 'VBAT', '+3V3', '+5V', '+12V']:
+        if pn_upper in ['VCC', 'GND', 'VDD', 'VSS', 'VBAT', '+3V3', '+5V', '+12V', 'VCC_3V3', '+3.3V', 'VBUS']:
             libraries.append('power')
 
         # Manufacturer-based guessing
