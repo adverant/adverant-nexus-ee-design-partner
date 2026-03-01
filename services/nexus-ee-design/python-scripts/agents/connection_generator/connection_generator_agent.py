@@ -1829,9 +1829,14 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
         # Build lookup of seed connections (include signal_type to allow
         # different signal types on the same endpoint pair)
         seed_keys = set()
-        # Track component pins already claimed by seed power connections
-        # Key: "ref.pin" for any non-PWR endpoint in a seed POWER connection
-        seed_covered_power_pins: set = set()
+        # Track component refs covered by seed power connections, split by polarity.
+        # Seed VCC/VCC_3V3/etc. connections block rule-based VCC for same ref.
+        # Seed GND connections block rule-based GND for same ref.
+        # Tracking by ref (not pin) because _convert_seed_connections may use net_name
+        # as pin name (e.g. "VCC_3V3") which differs from the actual symbol pin ("VDD").
+        _GND_NETS = {"GND", "VSS", "VSSA", "AGND"}
+        seed_vcc_refs: set = set()  # Component refs with seed VCC/power connections
+        seed_gnd_refs: set = set()  # Component refs with seed GND connections
         for conn in seed_connections:
             key = "|".join(sorted([
                 f"{conn.from_ref}.{conn.from_pin}",
@@ -1839,15 +1844,18 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
             ])) + f"|{conn.connection_type.value}"
             seed_keys.add(key)
             if conn.connection_type == ConnectionType.POWER:
-                if conn.from_ref != "PWR":
-                    seed_covered_power_pins.add(f"{conn.from_ref}.{conn.from_pin}")
-                if conn.to_ref != "PWR":
-                    seed_covered_power_pins.add(f"{conn.to_ref}.{conn.to_pin}")
+                is_gnd = any(g in conn.net_name.upper() for g in _GND_NETS)
+                for ref in (conn.from_ref, conn.to_ref):
+                    if ref != "PWR":
+                        if is_gnd:
+                            seed_gnd_refs.add(ref)
+                        else:
+                            seed_vcc_refs.add(ref)
 
         # Filter out generated connections that conflict with seeds
         filtered = []
         conflicts = 0
-        power_pin_conflicts = 0
+        power_ref_conflicts = 0
         for conn in generated_connections:
             key = "|".join(sorted([
                 f"{conn.from_ref}.{conn.from_pin}",
@@ -1857,14 +1865,15 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
                 conflicts += 1
                 logger.debug(f"MERGE: connection {key} overridden by seed (exact match)")
             elif conn.connection_type == ConnectionType.POWER:
-                from_pin = f"{conn.from_ref}.{conn.from_pin}" if conn.from_ref != "PWR" else None
-                to_pin = f"{conn.to_ref}.{conn.to_pin}" if conn.to_ref != "PWR" else None
-                if (from_pin and from_pin in seed_covered_power_pins) or \
-                   (to_pin and to_pin in seed_covered_power_pins):
-                    power_pin_conflicts += 1
+                # Check if seed already covers one of this connection's component refs
+                is_gnd = any(g in conn.net_name.upper() for g in _GND_NETS)
+                covered_refs = seed_gnd_refs if is_gnd else seed_vcc_refs
+                comp_refs = {r for r in (conn.from_ref, conn.to_ref) if r != "PWR"}
+                if comp_refs & covered_refs:
+                    power_ref_conflicts += 1
                     logger.info(
                         f"MERGE: Power connection {conn.from_ref}.{conn.from_pin}→{conn.net_name} "
-                        f"dropped — pin already claimed by seed power connection"
+                        f"dropped — component already has seed {'GND' if is_gnd else 'VCC'} connection"
                     )
                 else:
                     filtered.append(conn)
@@ -1873,9 +1882,9 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
 
         if conflicts > 0:
             logger.info(f"MERGE: {conflicts} connections overridden by seed (exact match)")
-        if power_pin_conflicts > 0:
-            logger.info(f"MERGE: {power_pin_conflicts} rule-based power connections dropped "
-                        f"(seed already claims those pins)")
+        if power_ref_conflicts > 0:
+            logger.info(f"MERGE: {power_ref_conflicts} rule-based power connections dropped "
+                        f"(seed already covers those component refs)")
 
         # Seeds first, then remaining generated connections
         merged = seed_connections + filtered
