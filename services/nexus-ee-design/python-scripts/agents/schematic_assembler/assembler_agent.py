@@ -1395,7 +1395,7 @@ JSON array of pins:"""
         valid_connections = 0
         invalid_connections = []
         power_labels_added = []
-        power_wires_added = []  # Track wires to power symbols
+        power_wires_added = []  # unused — stubs removed; kept for log backward compat
 
         # Helper to find pin with normalization (handles "PF0-OSC_IN" -> "PF0" matching)
         # MUST be defined before power connection handling
@@ -1447,23 +1447,6 @@ JSON array of pins:"""
         # Track power symbol positions for wire routing
         power_symbol_positions = {}  # {"VCC": (x, y), "GND": (x, y)}
 
-        # Determine stub direction for power labels.
-        # VCC/VDD nets go UP (−Y in KiCad coords), GND/VSS go DOWN (+Y).
-        # This prevents stub wires from ending at adjacent pin positions
-        # (VCC +X stub ending at GND pin 2.54mm away → short circuit).
-        _GND_NETS = {"gnd", "vss", "ground", "agnd", "dgnd", "pgnd", "0v"}
-        _VCC_NETS = {"vcc", "vdd", "vdda", "vddb", "vddio", "vbat", "3v3", "5v",
-                     "+3.3v", "+5v", "vin", "vcci", "+3v3"}
-
-        def power_stub_offset(net_name: str) -> tuple:
-            """Return (dx, dy) for the stub wire based on the net name."""
-            n = (net_name or "").lower().strip()
-            if n in _GND_NETS or n.startswith("gnd") or n.startswith("vss"):
-                return (0.0, 2.54)   # DOWN — GND symbols below the pin
-            if n in _VCC_NETS or n.startswith("vcc") or n.startswith("vdd"):
-                return (0.0, -2.54)  # UP — VCC symbols above the pin
-            return (2.54, 0.0)       # RIGHT — default for other power nets
-
         for conn in connections:
             from_ref = conn.from_ref
             to_ref = conn.to_ref
@@ -1479,14 +1462,12 @@ JSON array of pins:"""
                     pin_pos, resolved_pin = find_pin_position(from_ref, conn.from_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.to_pin or "VCC"
-                        dx, dy = power_stub_offset(label_text)
-                        label_pos = (pin_pos[0] + dx, pin_pos[1] + dy)
-                        # Stub wire from IC pin to label (required for connectivity)
-                        sheet.wires.append(Wire(
-                            start=(pin_pos[0], pin_pos[1]),
-                            end=label_pos,
-                        ))
-                        # Place power label at the wire endpoint
+                        # Place label directly at pin position — no stub wire needed.
+                        # The smoke test seeds flood-fill from all graph positions within
+                        # 40mm of the IC center, so labels at pin positions are found
+                        # without any wire. Stub wires cause VCC/GND SHORT CIRCUITs when
+                        # adjacent pins have colliding stub endpoints.
+                        label_pos = (pin_pos[0], pin_pos[1])
                         sheet.labels.append(Label(
                             text=label_text,
                             position=label_pos,
@@ -1494,7 +1475,6 @@ JSON array of pins:"""
                             label_type="global_label"
                         ))
                         power_labels_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
-                        power_wires_added.append(f"{from_ref}.{conn.from_pin} -> {label_text}")
                     else:
                         logger.warning(f"Power pin {conn.from_pin} not found on {from_ref} (tried normalization)")
                 elif is_power_from and to_ref in pin_positions:
@@ -1502,14 +1482,8 @@ JSON array of pins:"""
                     pin_pos, resolved_pin = find_pin_position(to_ref, conn.to_pin)
                     if pin_pos:
                         label_text = conn.net_name or conn.from_pin or "VCC"
-                        dx, dy = power_stub_offset(label_text)
-                        label_pos = (pin_pos[0] + dx, pin_pos[1] + dy)
-                        # Stub wire from IC pin to label (required for connectivity)
-                        sheet.wires.append(Wire(
-                            start=(pin_pos[0], pin_pos[1]),
-                            end=label_pos,
-                        ))
-                        # Place power label at the wire endpoint
+                        # Place label directly at pin position — no stub wire.
+                        label_pos = (pin_pos[0], pin_pos[1])
                         sheet.labels.append(Label(
                             text=label_text,
                             position=label_pos,
@@ -1517,7 +1491,6 @@ JSON array of pins:"""
                             label_type="global_label"
                         ))
                         power_labels_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
-                        power_wires_added.append(f"{to_ref}.{conn.to_pin} -> {label_text}")
                     else:
                         logger.warning(f"Power pin {conn.to_pin} not found on {to_ref} (tried normalization)")
                 continue  # Don't try to route wire for power connections
