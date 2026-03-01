@@ -713,17 +713,18 @@ class SymbolFetcherAgent:
         category: str
     ) -> Optional[FetchedSymbol]:
         """Check local symbol cache."""
-        # Try exact match first
+        # Try exact match first (using sanitized filename to handle slashes in part numbers)
+        safe_name = self._safe_cache_filename(part_number)
         for cat_dir in self.cache_path.iterdir():
             if cat_dir.is_dir():
-                symbol_path = cat_dir / f"{part_number}.kicad_sym"
+                symbol_path = cat_dir / f"{safe_name}.kicad_sym"
                 if symbol_path.exists():
                     symbol_sexp = symbol_path.read_text()
-                    footprint_path = cat_dir / f"{part_number}.kicad_mod"
+                    footprint_path = cat_dir / f"{safe_name}.kicad_mod"
                     footprint_sexp = footprint_path.read_text() if footprint_path.exists() else None
 
                     # Load metadata if exists
-                    meta_path = cat_dir / f"{part_number}.meta.json"
+                    meta_path = cat_dir / f"{safe_name}.meta.json"
                     metadata = {}
                     if meta_path.exists():
                         metadata = json.loads(meta_path.read_text())
@@ -1731,22 +1732,29 @@ No explanation or markdown formatting."""
         except Exception:
             return ""
 
+    @staticmethod
+    def _safe_cache_filename(part_number: str) -> str:
+        """Sanitize part number for use as a filename (replace / with _)."""
+        return part_number.replace("/", "_")
+
     async def _cache_symbol(self, symbol: FetchedSymbol, category: str):
         """Cache symbol to local filesystem."""
         category_path = self.cache_path / category
         category_path.mkdir(exist_ok=True)
 
+        safe_name = self._safe_cache_filename(symbol.part_number)
+
         # Save symbol
-        symbol_path = category_path / f"{symbol.part_number}.kicad_sym"
+        symbol_path = category_path / f"{safe_name}.kicad_sym"
         symbol_path.write_text(symbol.symbol_sexp)
 
         # Save footprint if available
         if symbol.footprint_sexp:
-            footprint_path = category_path / f"{symbol.part_number}.kicad_mod"
+            footprint_path = category_path / f"{safe_name}.kicad_mod"
             footprint_path.write_text(symbol.footprint_sexp)
 
         # Save metadata
-        meta_path = category_path / f"{symbol.part_number}.meta.json"
+        meta_path = category_path / f"{safe_name}.meta.json"
         metadata = {
             "part_number": symbol.part_number,
             "manufacturer": symbol.manufacturer,

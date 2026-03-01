@@ -116,7 +116,7 @@ def create_foc_esc_bom(subsystems: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         "Power Stage": [
             {"part_number": "IMZA65R027M1H", "category": "MOSFET", "manufacturer": "Infineon", "value": "650V/31A SiC", "quantity": 6, "description": "Half-bridge switches"},
             {"part_number": "C5750X7R2A476M", "category": "Capacitor", "manufacturer": "TDK", "value": "47uF/100V", "quantity": 3, "description": "DC bus cap"},
-            {"part_number": "1N4148WS", "category": "Diode", "manufacturer": "ON Semi", "value": "100V Fast", "quantity": 6, "description": "Flyback protection"},
+            {"part_number": "1N4148WS", "category": "Diode", "manufacturer": "ON Semi", "value": "100V Fast", "quantity": 6, "description": "Bootstrap diode for UCC21520 high-side gate driver supply (anode=VCC, cathode=VSUPA or VSUPB)"},
         ],
         "MCU Core": [
             {"part_number": "STM32G431CBT6", "category": "MCU", "manufacturer": "ST", "value": "Cortex-M4 170MHz 3.3V", "description": "Main controller, VDD=3.3V (VCC_3V3), NOT 5V"},
@@ -284,6 +284,8 @@ def create_design_intent(
             "",
             "Key Connections:",
             "- Gate drivers (UCC21520) VCC pin -> VCC (5V)",
+            "- UCC21520 DIS_A and DIS_B pins -> GND (active-low disable; tie LOW for always-enabled normal operation)",
+            "- UCC21520 bootstrap circuit (per channel): 1N4148WS anode->VCC, cathode->VSUPA/VSUPB; C2012X7R1E104K (100nF) between VSUPA/VSUPB and OUTA/OUTB (phase node)",
             "- STM32G431 VDD/VBAT -> VCC_3V3 (3.3V from LDO)",
             "- MCP1700 LDO VIN -> VCC, VOUT -> VCC_3V3, GND -> GND",
             "- CAN transceiver VCC pin -> VCC (5V)",

@@ -1959,14 +1959,30 @@ Return ONLY the JSON, no explanations."""
                 sheet.junctions.append(Junction(position=point))
 
     def _add_power_symbols(self, sheet: SchematicSheet):
-        """Add power symbols (VCC, GND) as needed."""
-        # Find power pins and add appropriate symbols
+        """Add power symbols (VCC, GND) as fallback for unconnected power pins.
+
+        Skips any pin position that already has a label placed by the connection
+        generator. This prevents VCC from overriding VCC_3V3 on MCU pins.
+        """
+        # Build set of positions that already have labels (from connection generator)
+        existing_label_positions = set()
+        for label in sheet.labels:
+            existing_label_positions.add(
+                (round(label.position[0], 2), round(label.position[1], 2))
+            )
+
+        fallback_added = 0
+        fallback_skipped = 0
         for symbol in sheet.symbols:
             for pin in symbol.pins:
                 if pin.pin_type == PinType.POWER_IN:
-                    # Add power flag or symbol
                     pin_pos = symbol.get_absolute_pin_position(pin.name)
                     if pin_pos:
+                        pos_key = (round(pin_pos[0], 2), round(pin_pos[1], 2))
+                        # Skip if connection generator already placed a label here
+                        if pos_key in existing_label_positions:
+                            fallback_skipped += 1
+                            continue
                         name_lower = pin.name.lower()
                         if "gnd" in name_lower or "vss" in name_lower:
                             sheet.labels.append(Label(
@@ -1974,12 +1990,18 @@ Return ONLY the JSON, no explanations."""
                                 position=pin_pos,
                                 label_type="global_label"
                             ))
+                            existing_label_positions.add(pos_key)
+                            fallback_added += 1
                         elif "vcc" in name_lower or "vdd" in name_lower:
                             sheet.labels.append(Label(
                                 text="VCC",
                                 position=pin_pos,
                                 label_type="global_label"
                             ))
+                            existing_label_positions.add(pos_key)
+                            fallback_added += 1
+        logger.info(f"_add_power_symbols: {fallback_added} fallback labels added, "
+                    f"{fallback_skipped} skipped (already have labels)")
 
     def _generate_placeholder_lib_symbol(self, symbol_id: str) -> str:
         """
