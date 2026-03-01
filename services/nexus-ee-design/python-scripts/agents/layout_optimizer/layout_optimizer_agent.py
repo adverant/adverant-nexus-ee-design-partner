@@ -305,7 +305,7 @@ class LayoutOptimizerAgent:
         logger.info(f"Built {len(subsystems)} subsystem regions for placement")
 
         # --- Step 2: Allocate non-overlapping rectangular regions on canvas ---
-        region_allocations = self._allocate_regions(subsystems)
+        region_allocations = self._allocate_regions(subsystems, analysis.component_layers)
 
         # --- Step 3: Place components within their subsystem region ---
         for subsys_name, region in region_allocations.items():
@@ -582,6 +582,7 @@ class LayoutOptimizerAgent:
     def _allocate_regions(
         self,
         subsystems: Dict[str, Dict],
+        component_layers: Optional[List[ComponentLayer]] = None,
     ) -> Dict[str, Tuple[float, float, float, float]]:
         """
         Allocate non-overlapping rectangular regions on the canvas.
@@ -645,6 +646,32 @@ class LayoutOptimizerAgent:
         signal_h = usable_h - power_h - 10.0
 
         if signal_ss:
+            # Sort signal subsystems left-to-right by signal flow layer.
+            # ComponentLayer.x_position_hint is 0.0 (input/left) → 1.0 (output/right)
+            # derived from topological sort, so sorting by it enforces signal flow order.
+            if component_layers:
+                comp_to_hint: Dict[str, float] = {}
+                for layer in component_layers:
+                    for ref in layer.components:
+                        comp_to_hint[ref] = layer.x_position_hint
+
+                def _subsys_layer_key(item: Tuple[str, Dict]) -> float:
+                    _, ss = item
+                    # Prefer ICs for ordering signal flow
+                    ic_hints = [comp_to_hint[c] for c in ss['components']
+                                if c.startswith('U') and c in comp_to_hint]
+                    if ic_hints:
+                        return sum(ic_hints) / len(ic_hints)
+                    all_hints = [comp_to_hint[c] for c in ss['components']
+                                 if c in comp_to_hint]
+                    return sum(all_hints) / len(all_hints) if all_hints else 0.5
+
+                signal_ss = dict(sorted(signal_ss.items(), key=_subsys_layer_key))
+                logger.info(
+                    "Signal subsystem order (L→R by signal flow): "
+                    + " → ".join(signal_ss.keys())
+                )
+
             # Arrange signal subsystems in a grid, weighted by component count
             num_ss = len(signal_ss)
             cols = max(int(num_ss ** 0.5 + 0.5), 1)
