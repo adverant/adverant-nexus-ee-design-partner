@@ -300,7 +300,11 @@ class ConnectionGeneratorAgent:
         added_power = []
         for ic in ic_components:
             nets = ic_power_nets.get(ic.reference, set())
-            has_vcc = any(n.upper() in {"VCC", "VDD", "3V3", "5V", "VDDA"} for n in nets)
+            has_vcc = any(
+                n.upper() in {"VCC", "VDD", "3V3", "5V", "VDDA", "VCC_3V3", "+3V3", "+5V"}
+                or "3V3" in n.upper() or "VCC_" in n.upper()
+                for n in nets
+            )
             has_gnd = any(n.upper() in {"GND", "VSS", "VSSA", "AGND"} for n in nets)
 
             if not has_vcc and ic.power_pins:
@@ -1816,21 +1820,34 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
         """
         Merge seed connections (priority 15) with LLM-generated connections.
 
-        Seed connections win on conflict (same from_ref.from_pin → to_ref.to_pin).
+        Two conflict types:
+        1. Exact endpoint match (same from_ref.from_pin → to_ref.to_pin) — seed wins.
+        2. Power pin conflict: seed claims a component pin for one net (e.g. VCC_3V3),
+           but rule-based code added a different net (e.g. VCC) for the same physical pin.
+           The seed wins — prevents VCC from overriding VCC_3V3 on MCU power pins.
         """
         # Build lookup of seed connections (include signal_type to allow
         # different signal types on the same endpoint pair)
         seed_keys = set()
+        # Track component pins already claimed by seed power connections
+        # Key: "ref.pin" for any non-PWR endpoint in a seed POWER connection
+        seed_covered_power_pins: set = set()
         for conn in seed_connections:
             key = "|".join(sorted([
                 f"{conn.from_ref}.{conn.from_pin}",
                 f"{conn.to_ref}.{conn.to_pin}"
             ])) + f"|{conn.connection_type.value}"
             seed_keys.add(key)
+            if conn.connection_type == ConnectionType.POWER:
+                if conn.from_ref != "PWR":
+                    seed_covered_power_pins.add(f"{conn.from_ref}.{conn.from_pin}")
+                if conn.to_ref != "PWR":
+                    seed_covered_power_pins.add(f"{conn.to_ref}.{conn.to_pin}")
 
-        # Filter out LLM connections that conflict with seeds
+        # Filter out generated connections that conflict with seeds
         filtered = []
         conflicts = 0
+        power_pin_conflicts = 0
         for conn in generated_connections:
             key = "|".join(sorted([
                 f"{conn.from_ref}.{conn.from_pin}",
@@ -1838,16 +1855,31 @@ Output EXACTLY one JSON object: {{"connections": [...]}}"""
             ])) + f"|{conn.connection_type.value}"
             if key in seed_keys:
                 conflicts += 1
-                logger.debug(f"MERGE: LLM connection {key} overridden by seed connection")
+                logger.debug(f"MERGE: connection {key} overridden by seed (exact match)")
+            elif conn.connection_type == ConnectionType.POWER:
+                from_pin = f"{conn.from_ref}.{conn.from_pin}" if conn.from_ref != "PWR" else None
+                to_pin = f"{conn.to_ref}.{conn.to_pin}" if conn.to_ref != "PWR" else None
+                if (from_pin and from_pin in seed_covered_power_pins) or \
+                   (to_pin and to_pin in seed_covered_power_pins):
+                    power_pin_conflicts += 1
+                    logger.info(
+                        f"MERGE: Power connection {conn.from_ref}.{conn.from_pin}→{conn.net_name} "
+                        f"dropped — pin already claimed by seed power connection"
+                    )
+                else:
+                    filtered.append(conn)
             else:
                 filtered.append(conn)
 
         if conflicts > 0:
-            logger.info(f"MERGE: {conflicts} LLM connections overridden by seed connections")
+            logger.info(f"MERGE: {conflicts} connections overridden by seed (exact match)")
+        if power_pin_conflicts > 0:
+            logger.info(f"MERGE: {power_pin_conflicts} rule-based power connections dropped "
+                        f"(seed already claims those pins)")
 
-        # Seeds first, then remaining LLM connections
+        # Seeds first, then remaining generated connections
         merged = seed_connections + filtered
-        logger.info(f"MERGE RESULT: {len(seed_connections)} seed + {len(filtered)} LLM = {len(merged)} total")
+        logger.info(f"MERGE RESULT: {len(seed_connections)} seed + {len(filtered)} generated = {len(merged)} total")
         return merged
 
     def _map_signal_type(self, signal_type: str) -> ConnectionType:
