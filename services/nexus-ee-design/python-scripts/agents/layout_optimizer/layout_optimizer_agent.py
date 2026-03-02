@@ -19,6 +19,7 @@ Author: Nexus EE Design Team
 
 import asyncio
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -98,8 +99,8 @@ class LayoutOptimizerAgent:
     SPACING_RULES = {
         "ic_to_ic": 40.0,            # 40mm between IC centers (compact, ICs fit on A3 in a row)
         "ic_to_passive": 20.0,       # 20mm IC to passive
-        "passive_to_passive": 12.0,  # 12mm between passives
-        "bypass_to_ic": 12.0,        # 12mm bypass to IC
+        "passive_to_passive": 20.0,  # 20mm between passives — 8× grid, prevents pin-position overlap
+        "bypass_to_ic": 15.0,        # 15mm bypass to IC (+ 15mm fixed offset = 30mm below IC center)
         "connector_edge": 10.0,      # 10mm from edge for connectors
         "layer_spacing": 50.0,       # Horizontal spacing between layers
         "vertical_spacing": 25.0,    # Vertical spacing within layer
@@ -327,8 +328,8 @@ class LayoutOptimizerAgent:
                 }
                 sub_ics_sorted = sorted(sub_ics, key=lambda r: ic_degree.get(r, 0), reverse=True)
 
-                # Place most connected IC in center, others radiate outward
-                ic_y = ry + rh * 0.30
+                # Place most connected IC in upper third — leaves room for passive rows below
+                ic_y = ry + rh * 0.25
                 # Use the ic_to_ic spacing rule, but give each IC at least its fair share
                 # of the region width if the region is wider than num_ics × spacing.
                 ic_spacing = max(self.SPACING_RULES["ic_to_ic"], rw / max(len(sub_ics), 1))
@@ -386,21 +387,48 @@ class LayoutOptimizerAgent:
                 else:
                     passive_no_ic.append(p_ref)
 
-            # For each IC, place its passives in a row below
+            # For each IC, place its passives in rows below.
+            # Row 1 starts at bypass_to_ic + 15mm below IC center (= 30mm with current rules).
+            # When there are more than 4 passives, split into two rows to reduce horizontal
+            # spread and prevent pin positions of adjacent caps from coinciding on the grid.
             passive_row_spacing = self.SPACING_RULES["passive_to_passive"]
-            passive_row_offset_y = self.SPACING_RULES["bypass_to_ic"] + 10.0  # below IC center
+            passive_row_offset_y = self.SPACING_RULES["bypass_to_ic"] + 15.0  # 30mm below IC
+            passive_row2_extra_y = 20.0  # second row this far below first row
             for ic_ref, passives_for_ic in ic_passive_groups.items():
                 ic_pos = positions[ic_ref]
                 n = len(passives_for_ic)
-                # Center the row of passives below the IC
-                row_total_w = (n - 1) * passive_row_spacing
-                start_x = ic_pos[0] - row_total_w / 2.0
-                for idx, p_ref in enumerate(passives_for_ic):
-                    positions[p_ref] = (
-                        start_x + idx * passive_row_spacing,
-                        ic_pos[1] + passive_row_offset_y
-                    )
-                    placed_passives.add(p_ref)
+                if n <= 4:
+                    # Single row centered below IC
+                    row_total_w = (n - 1) * passive_row_spacing
+                    start_x = ic_pos[0] - row_total_w / 2.0
+                    for idx, p_ref in enumerate(passives_for_ic):
+                        positions[p_ref] = (
+                            start_x + idx * passive_row_spacing,
+                            ic_pos[1] + passive_row_offset_y,
+                        )
+                        placed_passives.add(p_ref)
+                else:
+                    # Two rows: ceil(n/2) in row1, rest in row2
+                    split = math.ceil(n / 2)
+                    row1 = passives_for_ic[:split]
+                    row2 = passives_for_ic[split:]
+                    for row_passives, row_y_offset in (
+                        (row1, passive_row_offset_y),
+                        (row2, passive_row_offset_y + passive_row2_extra_y),
+                    ):
+                        nr = len(row_passives)
+                        row_total_w = (nr - 1) * passive_row_spacing
+                        start_x = ic_pos[0] - row_total_w / 2.0
+                        for idx, p_ref in enumerate(row_passives):
+                            positions[p_ref] = (
+                                start_x + idx * passive_row_spacing,
+                                ic_pos[1] + row_y_offset,
+                            )
+                            placed_passives.add(p_ref)
+                logger.debug(
+                    f"  Passives for {ic_ref}: {len(passives_for_ic)} caps in "
+                    f"{'1 row' if n <= 4 else '2 rows'} below IC"
+                )
 
             # Place remaining passives (not connected to any IC) in a grid below ICs
             unplaced_passives = [p for p in sub_passives if p not in placed_passives]
