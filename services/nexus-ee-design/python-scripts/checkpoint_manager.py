@@ -6,7 +6,7 @@ resumed from the last completed phase rather than restarting from scratch.
 
 Checkpoint location (in order of preference):
   1. CHECKPOINT_DIR env var (explicit override)
-  2. /workspace/Exports/ee-design/_checkpoints (NFS — survives pod restarts)
+  2. /data/artifacts/_checkpoints (PVC — shared with Terminal Computer, survives restarts)
   3. /tmp/nexus-schematic-checkpoints (ephemeral fallback)
 """
 
@@ -28,12 +28,13 @@ def _resolve_checkpoint_base() -> Path:
     if env_dir:
         return Path(env_dir)
 
-    # 2. NFS mount (shared with Terminal Computer, survives restarts)
-    nfs_path = Path("/workspace/Exports/ee-design/_checkpoints")
-    if nfs_path.parent.exists():
-        nfs_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Using NFS checkpoint storage: {nfs_path}")
-        return nfs_path
+    # 2. PVC mount (shared with Terminal Computer via nexus-user-workspaces PVC)
+    # EE Design pod: /data/artifacts → Terminal Computer: /workspaces/ee-design/artifacts
+    pvc_path = Path("/data/artifacts/_checkpoints")
+    if pvc_path.parent.exists():
+        pvc_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using PVC checkpoint storage: {pvc_path}")
+        return pvc_path
 
     # 3. Ephemeral fallback
     fallback = Path("/tmp/nexus-schematic-checkpoints")
