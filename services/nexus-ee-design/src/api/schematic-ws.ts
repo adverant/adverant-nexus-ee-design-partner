@@ -30,6 +30,7 @@ import operationsRepo from '../database/repositories/operations-repository.js';
 interface SchematicOperation {
   operationId: string;
   projectId: string;
+  projectName?: string;
   startedAt: Date;
   status: 'running' | 'complete' | 'error';
   lastEvent?: SchematicProgressEvent;
@@ -121,11 +122,12 @@ export class SchematicWebSocketManager extends EventEmitter {
    * Call this when starting schematic generation.
    * Pass parameters to enable replay of interrupted/failed operations.
    */
-  createOperation(projectId: string, existingOperationId?: string, parameters?: Record<string, unknown>): string {
+  createOperation(projectId: string, existingOperationId?: string, parameters?: Record<string, unknown>, projectName?: string): string {
     const operationId = existingOperationId || uuidv4();
     const operation: SchematicOperation = {
       operationId,
       projectId,
+      projectName,
       startedAt: new Date(),
       status: 'running',
       eventCount: 0,
@@ -134,12 +136,13 @@ export class SchematicWebSocketManager extends EventEmitter {
     };
 
     this.operations.set(operationId, operation);
-    log.info('Created schematic operation', { operationId, projectId });
+    log.info('Created schematic operation', { operationId, projectId, projectName });
 
     // Persist to database (fire-and-forget, don't block pipeline)
     operationsRepo.create({
       id: operationId,
       project_id: projectId,
+      project_name: projectName,
       type: 'schematic',
       source: 'ee-design',
       started_at: operation.startedAt,
@@ -240,6 +243,7 @@ export class SchematicWebSocketManager extends EventEmitter {
       wireCount: number;
       validationScore?: number;
       smokeTestPassed?: boolean;
+      exportFiles?: Array<{ name: string; path: string; type: string; size?: number }>;
     }
   ): void {
     const event: SchematicProgressEvent = {
@@ -257,6 +261,7 @@ export class SchematicWebSocketManager extends EventEmitter {
         wireCount: result.wireCount,
         validationScore: result.validationScore,
         smokeTestPassed: result.smokeTestPassed,
+        exportFiles: result.exportFiles,
       },
     };
 

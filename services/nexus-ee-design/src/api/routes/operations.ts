@@ -151,6 +151,29 @@ interface UnifiedOperationDTO {
 }
 
 /**
+ * Build a human-readable operation name from type, project name, and ID.
+ */
+const TYPE_LABELS: Record<string, string> = {
+  schematic: 'Schematic Generation',
+  'pcb-layout': 'PCB Layout',
+  simulation: 'Simulation',
+  firmware: 'Firmware Build',
+  'symbol-assembly': 'Symbol Assembly',
+  validation: 'Validation',
+  export: 'Export',
+  custom: 'Custom Task',
+};
+
+function buildOperationName(type: string, projectName?: string, operationId?: string): string {
+  const typeLabel = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
+  const suffix = operationId ? ` #${operationId.slice(0, 6)}` : '';
+  if (projectName && !projectName.match(/^[0-9a-f]{8}-[0-9a-f]{4}-/)) {
+    return `${typeLabel}${suffix} — ${projectName}`;
+  }
+  return `${typeLabel}${suffix}`;
+}
+
+/**
  * Convert a BaseWebSocketManager Operation to UnifiedOperationDTO
  */
 function wsOperationToDTO(
@@ -167,12 +190,12 @@ function wsOperationToDTO(
 
   return {
     id: op.operationId,
-    name: `${operationType} — ${op.operationId.slice(0, 8)}`,
+    name: buildOperationName(operationType, projectName || op.projectName, op.operationId),
     type: operationType,
     source,
     sourceId: op.operationId,
     projectId: op.projectId,
-    projectName: projectName || op.projectId,
+    projectName: projectName || op.projectName || op.projectId,
     status: statusMap[op.status] || op.status,
     progress: op.lastEvent?.progress_percentage ?? null,
     currentStep: op.lastEvent?.current_step || '',
@@ -274,14 +297,26 @@ function dbRowToDTO(row: OperationRow): UnifiedOperationDTO {
     qualityGates = resultData.quality_gates;
   }
 
+  // Extract export files from result_data
+  let files: UnifiedOperationDTO['files'];
+  if (resultData?.exportFiles && Array.isArray(resultData.exportFiles)) {
+    files = resultData.exportFiles.map((f: any) => ({
+      name: f.name || 'unknown',
+      path: f.path || '',
+      type: f.type || 'output',
+      size: f.size,
+      createdAt: row.completed_at || row.started_at,
+    }));
+  }
+
   return {
     id: row.id,
-    name: `${row.type} — ${row.id.slice(0, 8)}`,
+    name: buildOperationName(row.type, row.project_name || undefined, row.id),
     type: row.type,
     source: row.source,
     sourceId: row.id,
     projectId: row.project_id,
-    projectName: row.project_id,
+    projectName: row.project_name || row.project_id,
     status: row.status,
     progress: row.progress,
     currentStep: row.current_step || '',
@@ -293,6 +328,7 @@ function dbRowToDTO(row: OperationRow): UnifiedOperationDTO {
     duration: row.duration_ms || undefined,
     error: row.error_message || undefined,
     output: resultData || undefined,
+    files,
     capabilities: {
       canCancel: false,
       canPause: false,
@@ -798,18 +834,26 @@ export function createOperationsRoutes(
         const dbRow = await operationsRepo.findById(operationId);
         if (dbRow && dbRow.source === 'ee-design') {
           const replayParams = dbRow.parameters as Record<string, unknown> | null;
+          const completedPhases = Array.isArray(dbRow.completed_phases) ? dbRow.completed_phases : [];
+          // Enable checkpoint resume if connections phase completed (saves 30-80 min of LLM work)
+          const canResumeFromCheckpoint = completedPhases.includes('connections');
           res.json({
             success: true,
             data: {
               operationId,
               replayType: 'ee-design',
-              action: 'restart',
+              action: canResumeFromCheckpoint ? 'resume' : 'restart',
               projectId: dbRow.project_id,
               // Return stored parameters so frontend can call POST /projects/:projectId/schematic/generate
               parameters: replayParams || {},
+              // Include resume info so frontend can pass resume_from_checkpoint flag
+              resumeFromCheckpoint: canResumeFromCheckpoint,
+              originalOperationId: operationId,
               interruptedPhase: dbRow.phase || null,
-              completedPhases: dbRow.completed_phases || [],
-              message: `Restart schematic generation for project ${dbRow.project_id}`,
+              completedPhases,
+              message: canResumeFromCheckpoint
+                ? `Resume from ${dbRow.phase || 'connections'} phase (skipping completed phases)`
+                : `Restart schematic generation for project ${dbRow.project_id}`,
             },
           });
           return;

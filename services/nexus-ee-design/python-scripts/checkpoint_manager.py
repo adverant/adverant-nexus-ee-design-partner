@@ -4,7 +4,10 @@ Checkpoint Manager for MAPO Schematic Pipeline.
 Saves and loads pipeline state to disk so that interrupted runs can be
 resumed from the last completed phase rather than restarting from scratch.
 
-Checkpoint location: /tmp/nexus-schematic-checkpoints/{operation_id}/checkpoint.json
+Checkpoint location (in order of preference):
+  1. CHECKPOINT_DIR env var (explicit override)
+  2. /workspace/Exports/ee-design/_checkpoints (NFS — survives pod restarts)
+  3. /tmp/nexus-schematic-checkpoints (ephemeral fallback)
 """
 
 import json
@@ -17,9 +20,28 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_BASE = Path(
-    os.environ.get("CHECKPOINT_DIR", "/tmp/nexus-schematic-checkpoints")
-)
+
+def _resolve_checkpoint_base() -> Path:
+    """Resolve checkpoint directory, preferring NFS over /tmp."""
+    # 1. Explicit env override
+    env_dir = os.environ.get("CHECKPOINT_DIR")
+    if env_dir:
+        return Path(env_dir)
+
+    # 2. NFS mount (shared with Terminal Computer, survives restarts)
+    nfs_path = Path("/workspace/Exports/ee-design/_checkpoints")
+    if nfs_path.parent.exists():
+        nfs_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using NFS checkpoint storage: {nfs_path}")
+        return nfs_path
+
+    # 3. Ephemeral fallback
+    fallback = Path("/tmp/nexus-schematic-checkpoints")
+    logger.warning(f"NFS not available, using ephemeral checkpoint storage: {fallback}")
+    return fallback
+
+
+CHECKPOINT_BASE = _resolve_checkpoint_base()
 
 
 class CheckpointManager:

@@ -1752,6 +1752,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
     architecture: z.record(z.unknown()),
     components: z.array(z.unknown()),
     name: z.string().optional(),
+    resume_from_checkpoint: z.boolean().optional(),
+    operation_id: z.string().optional(),
   })), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectId = req.params.projectId;
@@ -1798,13 +1800,16 @@ export function createApiRoutes(io: SocketIOServer): Router {
         });
 
         // Create operation ID for WebSocket streaming BEFORE starting generation
+        // Reuse operation ID when resuming from checkpoint (so Python finds the checkpoint dir)
+        const resumeFromCheckpoint = req.body.resume_from_checkpoint === true;
+        const existingOperationId = resumeFromCheckpoint ? req.body.operation_id : undefined;
         const schematicWsManager = getSchematicWsManager();
-        operationId = schematicWsManager.createOperation(projectId, undefined, {
+        operationId = schematicWsManager.createOperation(projectId, existingOperationId, {
           architecture: req.body.architecture,
           components: req.body.components,
           name: req.body.name,
-        });
-        log.info('Created schematic operation for streaming', { operationId, projectId });
+        }, project.name);
+        log.info('Created schematic operation for streaming', { operationId, projectId, resumeFromCheckpoint });
 
         // Fetch ideation artifacts to provide context for schematic generation
         const ideationArtifacts = await findIdeationArtifactsByProject(projectId);
@@ -1888,6 +1893,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
           // Track the last phase that completed successfully (replaces hardcoded 'symbols' as any)
           let lastSuccessfulPhase: string = 'init';
+          // Pipeline output — lifted to outer scope for export file extraction in success path
+          let pipelineOutput: Record<string, unknown> | undefined;
 
           try {
             // Use executeWithProgress to relay PROGRESS: events via WebSocket
@@ -1981,6 +1988,8 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
           // MAPO succeeded - process the result
           {
+            // Save raw output for export file extraction in success path
+            pipelineOutput = result.output as Record<string, unknown>;
             // Parse MAPO pipeline output
             const mapoResult = result.output as {
               success: boolean;
@@ -1988,6 +1997,23 @@ export function createApiRoutes(io: SocketIOServer): Router {
               sheets?: Array<{ name: string; uuid: string; component_count: number }>;
               component_count: number;
               errors: string[];
+              export?: {
+                success: boolean;
+                pdf_path?: string | null;
+                svg_path?: string | null;
+                png_path?: string | null;
+                nfs_synced?: boolean;
+                nfs_paths?: Record<string, string>;
+                errors?: string[];
+              };
+              quality_gates?: Array<{
+                name: string;
+                passed: boolean;
+                threshold: number;
+                actual: number;
+                unit?: string;
+                critical?: boolean;
+              }>;
             };
 
             if (mapoResult.success && mapoResult.schematic_content) {
@@ -2123,12 +2149,39 @@ export function createApiRoutes(io: SocketIOServer): Router {
             });
           }
 
+          // Build export files list from pipeline output
+          const exportFiles: Array<{ name: string; path: string; type: string }> = [];
+          const exportData = (pipelineOutput as any)?.export;
+          if (exportData) {
+            if (exportData.pdf_path) {
+              exportFiles.push({ name: `${project.name || projectId}_schematic.pdf`, path: exportData.pdf_path, type: 'output' });
+            }
+            if (exportData.svg_path) {
+              exportFiles.push({ name: `${project.name || projectId}_schematic.svg`, path: exportData.svg_path, type: 'output' });
+            }
+            if (exportData.png_path) {
+              exportFiles.push({ name: `${project.name || projectId}_schematic.png`, path: exportData.png_path, type: 'output' });
+            }
+            // Add NFS paths if different from local paths
+            if (exportData.nfs_paths && typeof exportData.nfs_paths === 'object') {
+              for (const [format, nfsPath] of Object.entries(exportData.nfs_paths)) {
+                if (typeof nfsPath === 'string' && !exportFiles.some((f) => f.path === nfsPath)) {
+                  exportFiles.push({ name: `${project.name || projectId}_schematic.${format}`, path: nfsPath, type: 'output' });
+                }
+              }
+            }
+          }
+          // Always include the KiCad schematic itself
+          exportFiles.push({ name: `${project.name || projectId}_schematic.kicad_sch`, path: `db://schematics/${schematic.id}`, type: 'output' });
+
           // Emit completion via WebSocket
           schematicWsManager.completeOperation(operationId!, {
             schematicId: schematic.id,
             componentCount: generatedSchematic!.components.length,
             connectionCount: generatedSchematic!.nets.length,
             wireCount: wireCount,
+            exportFiles,
+            smokeTestPassed: (pipelineOutput as any)?.quality_gates?.every((g: any) => g.passed) ?? undefined,
           });
 
           // Emit generation completed event (legacy)
