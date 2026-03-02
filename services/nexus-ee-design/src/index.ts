@@ -23,7 +23,7 @@ import { SkillsEngineClient } from './services/skills/skills-engine-client.js';
 import { getFileWatcherService, clearFileWatcherService } from './services/file-watcher/index.js';
 import { setSkillsEngineClient, getSkillsEngineClient, clearSkillsEngineClient } from './state.js';
 // WebSocket managers for real-time progress streaming
-import { initSchematicWebSocket } from './api/schematic-ws.js';
+import { initSchematicWebSocket, recoverInterruptedOperations } from './api/schematic-ws.js';
 import { initPCBWebSocket } from './api/websocket-pcb.js';
 import { initSimulationWebSocket } from './api/websocket-simulation.js';
 
@@ -63,6 +63,11 @@ async function startServer(): Promise<void> {
       simulationWsManager.getNamespacePath(),
     ],
   });
+
+  // Recover operations orphaned by previous pod restarts
+  recoverInterruptedOperations().catch((err) =>
+    log.warn('Operation recovery failed (non-fatal)', { error: (err as Error).message })
+  );
 
   // Middleware
   app.use(helmet({

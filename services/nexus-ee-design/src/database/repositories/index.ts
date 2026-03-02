@@ -166,6 +166,25 @@ export type {
 } from './ideation-artifact-repository.js';
 
 // ============================================================================
+// Operations Repository
+// ============================================================================
+
+export {
+  create as createOperation,
+  complete as completeOperation,
+  findById as findOperationById,
+  findAll as findAllOperations,
+  getStats as getOperationStats,
+  default as operationsRepository,
+} from './operations-repository.js';
+
+export type {
+  OperationRow,
+  CreateOperationInput,
+  CompleteOperationInput,
+} from './operations-repository.js';
+
+// ============================================================================
 // Repository Collection
 // ============================================================================
 

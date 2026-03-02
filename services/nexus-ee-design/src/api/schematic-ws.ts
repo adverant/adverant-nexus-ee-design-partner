@@ -22,6 +22,7 @@ import {
   createProgressEvent,
 } from './websocket-schematic.js';
 import { log } from '../utils/logger.js';
+import operationsRepo from '../database/repositories/operations-repository.js';
 
 /**
  * Operation tracking for in-flight schematic generations
@@ -48,6 +49,8 @@ const MAX_EVENT_HISTORY = 50;
 export class SchematicWebSocketManager extends EventEmitter {
   private namespace: Namespace;
   private operations: Map<string, SchematicOperation> = new Map();
+  // Debounce DB progress updates: only persist every 5 events per operation
+  private progressUpdateCounters: Map<string, number> = new Map();
 
   constructor(io: SocketIOServer) {
     super();
@@ -132,6 +135,15 @@ export class SchematicWebSocketManager extends EventEmitter {
     this.operations.set(operationId, operation);
     log.info('Created schematic operation', { operationId, projectId });
 
+    // Persist to database (fire-and-forget, don't block pipeline)
+    operationsRepo.create({
+      id: operationId,
+      project_id: projectId,
+      type: 'schematic',
+      source: 'ee-design',
+      started_at: operation.startedAt,
+    }).catch((err) => log.warn('Failed to persist operation create', { operationId, error: err instanceof Error ? err.message : err }));
+
     return operationId;
   }
 
@@ -175,6 +187,19 @@ export class SchematicWebSocketManager extends EventEmitter {
 
     // Also emit on EventEmitter for internal listeners
     this.emit('progress', operationId, event);
+
+    // Debounced DB progress update: every 5 events or on phase changes
+    const count = (this.progressUpdateCounters.get(operationId) || 0) + 1;
+    this.progressUpdateCounters.set(operationId, count);
+    const isPhaseEvent = eventTypeStr === SchematicEventType.PHASE_COMPLETE || eventTypeStr === SchematicEventType.PHASE_START;
+    if (count % 5 === 0 || isPhaseEvent) {
+      operationsRepo.updateProgress(
+        operationId,
+        event.progress_percentage,
+        event.current_step,
+        (event as any).phase
+      ).catch(() => {/* fire-and-forget */});
+    }
 
     log.debug('Emitted progress event', {
       operationId,
@@ -235,9 +260,27 @@ export class SchematicWebSocketManager extends EventEmitter {
 
     this.emitProgress(operationId, event);
 
+    // Persist final state to database
+    const op = this.operations.get(operationId);
+    if (op) {
+      operationsRepo.complete(operationId, {
+        status: 'completed',
+        progress: 100,
+        current_step: 'Schematic generation complete!',
+        phase: 'export',
+        completed_at: new Date(),
+        duration_ms: Date.now() - new Date(op.startedAt).getTime(),
+        completed_phases: op.completedPhases,
+        quality_gates: (op as any).qualityGates || null,
+        result_data: result,
+        event_history: op.eventHistory,
+      }).catch((err) => log.warn('Failed to persist operation completion', { operationId, error: err instanceof Error ? err.message : err }));
+    }
+
     // Clean up after delay (keep for reconnection)
     setTimeout(() => {
       this.operations.delete(operationId);
+      this.progressUpdateCounters.delete(operationId);
       log.debug('Cleaned up completed operation', { operationId });
     }, 60000); // Keep for 1 minute
   }
@@ -268,9 +311,27 @@ export class SchematicWebSocketManager extends EventEmitter {
 
     this.emitProgress(operationId, event);
 
+    // Persist failure state to database
+    const op = this.operations.get(operationId);
+    if (op) {
+      operationsRepo.complete(operationId, {
+        status: 'failed',
+        progress: op.lastEvent?.progress_percentage || 0,
+        current_step: `Error: ${errorMessage}`,
+        phase: op.lastEvent?.phase as string | undefined,
+        completed_at: new Date(),
+        duration_ms: Date.now() - new Date(op.startedAt).getTime(),
+        completed_phases: op.completedPhases,
+        error_message: errorMessage,
+        result_data: partialResult || null,
+        event_history: op.eventHistory,
+      }).catch((err) => log.warn('Failed to persist operation failure', { operationId, error: err instanceof Error ? err.message : err }));
+    }
+
     // Clean up after delay
     setTimeout(() => {
       this.operations.delete(operationId);
+      this.progressUpdateCounters.delete(operationId);
     }, 60000);
   }
 
@@ -329,6 +390,25 @@ export function getSchematicWsManager(): SchematicWebSocketManager {
     throw new Error('SchematicWebSocketManager not initialized. Call initSchematicWebSocket first.');
   }
   return schematicWsManager;
+}
+
+/**
+ * On server startup, mark any operations still in 'running' status (orphaned
+ * by a previous pod restart) as 'interrupted'. Should be called once from
+ * index.ts after the DB pool is ready.
+ */
+export async function recoverInterruptedOperations(): Promise<void> {
+  const orphaned = await operationsRepo.findOrphanedRunning(5 * 60 * 1000); // > 5 min old
+  if (orphaned.length === 0) {
+    log.info('[recovery] No interrupted operations found');
+    return;
+  }
+  log.warn(`[recovery] Marking ${orphaned.length} operation(s) as interrupted (server restarted while they were running)`, {
+    ids: orphaned.map((o) => o.id),
+  });
+  await Promise.all(orphaned.map((op) =>
+    operationsRepo.markInterrupted(op.id, 'Server restarted while operation was running')
+  ));
 }
 
 /**

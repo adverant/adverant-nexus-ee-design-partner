@@ -34,6 +34,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getSchematicWsManager } from '../schematic-ws.js';
 import { TriggerIntegrationService } from '../../services/trigger-integration.js';
 import { log as rootLog } from '../../utils/logger.js';
+import operationsRepo, { type OperationRow } from '../../database/repositories/operations-repository.js';
 
 const log = rootLog.child({ component: 'operations-routes' });
 
@@ -239,6 +240,77 @@ function buildPhasesFromWsOp(op: any): Array<{ id: string; label: string; status
 }
 
 /**
+ * Convert a DB OperationRow to UnifiedOperationDTO.
+ * Used for historical operations loaded from PostgreSQL.
+ */
+function dbRowToDTO(row: OperationRow): UnifiedOperationDTO {
+  const completedPhases = Array.isArray(row.completed_phases) ? row.completed_phases : [];
+  const isCompleted = row.status === 'completed' || row.status === 'failed' || row.status === 'cancelled';
+
+  // Build phases from completed_phases array
+  let phases: Array<{ id: string; label: string; status: string; progress: number }> | undefined;
+  if (row.type === 'schematic') {
+    phases = MAPO_PHASES.map((phaseId) => {
+      const phaseSet = new Set(completedPhases);
+      let status = 'pending';
+      let progress = 0;
+
+      if (phaseSet.has(phaseId)) {
+        status = 'completed';
+        progress = 100;
+      } else if (phaseId === row.phase) {
+        status = row.status === 'failed' ? 'failed' : (isCompleted ? 'completed' : 'running');
+        progress = isCompleted ? 100 : 0;
+      }
+
+      return { id: phaseId, label: MAPO_PHASE_LABELS[phaseId] || phaseId, status, progress };
+    });
+  }
+
+  // Parse quality gates from result_data if available
+  let qualityGates: UnifiedOperationDTO['qualityGates'];
+  const resultData = row.result_data as any;
+  if (resultData?.quality_gates && Array.isArray(resultData.quality_gates)) {
+    qualityGates = resultData.quality_gates;
+  }
+
+  return {
+    id: row.id,
+    name: `${row.type} — ${row.id.slice(0, 8)}`,
+    type: row.type,
+    source: row.source,
+    sourceId: row.id,
+    projectId: row.project_id,
+    projectName: row.project_id,
+    status: row.status,
+    progress: row.progress,
+    currentStep: row.current_step || '',
+    phase: row.phase || undefined,
+    phases,
+    createdAt: row.created_at || row.started_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at || undefined,
+    duration: row.duration_ms || undefined,
+    error: row.error_message || undefined,
+    output: resultData || undefined,
+    capabilities: {
+      canCancel: false,
+      canPause: false,
+      canResume: false,
+      canReplay: isCompleted,
+      canModifyParams: false,
+      canInjectFiles: false,
+      hasLogs: true,
+      hasQualityGates: row.type === 'schematic',
+      hasTerminal: false,
+      canOverrideGates: false,
+    },
+    qualityGates,
+    tags: [row.type, row.source],
+  };
+}
+
+/**
  * Get all operations from a WS manager.
  * Uses getProjectOperations with empty filter as a workaround since
  * BaseWebSocketManager doesn't expose a public getAllOperations() method.
@@ -308,6 +380,28 @@ export function createOperationsRoutes(
           }
         } catch {
           // WS manager may not be initialized yet
+        }
+      }
+
+      // ── Collect from DB (completed/historical operations) ───────────
+      if (filters.source === 'all' || filters.source === 'ee-design') {
+        try {
+          const dbResult = await operationsRepo.findAll({
+            status: filters.status !== 'all' ? filters.status : undefined,
+            source: filters.source !== 'all' ? filters.source : undefined,
+            projectId: filters.projectId,
+            type: filters.type !== 'all' ? filters.type : undefined,
+            limit: 500,
+          });
+          // Deduplicate: in-memory WS operations take priority over DB rows
+          const existingIds = new Set(allOperations.map((op) => op.id));
+          for (const row of dbResult.operations) {
+            if (!existingIds.has(row.id)) {
+              allOperations.push(dbRowToDTO(row));
+            }
+          }
+        } catch (err) {
+          log.warn('Failed to fetch DB operations', { error: err instanceof Error ? err.message : err });
         }
       }
 
@@ -396,6 +490,16 @@ export function createOperationsRoutes(
         // WS manager may not be initialized
       }
 
+      // Count from DB (completed/historical operations)
+      try {
+        const dbStats = await operationsRepo.getStats();
+        // DB active ops are already counted by WS manager — only add completed/failed from DB
+        failed += dbStats.failed;
+        completedToday += dbStats.completedToday;
+      } catch (err) {
+        log.warn('Failed to fetch DB operation stats', { error: err instanceof Error ? err.message : err });
+      }
+
       // Count from Trigger.dev
       if (triggerService) {
         try {
@@ -480,6 +584,17 @@ export function createOperationsRoutes(
         }
       }
 
+      // Check DB (completed/historical operations)
+      try {
+        const dbRow = await operationsRepo.findById(operationId);
+        if (dbRow) {
+          res.json({ success: true, data: dbRowToDTO(dbRow) });
+          return;
+        }
+      } catch (err) {
+        log.warn('Failed to fetch DB operation', { operationId, error: err instanceof Error ? err.message : err });
+      }
+
       res.status(404).json({
         success: false,
         error: { code: 'NOT_FOUND', message: `Operation ${operationId} not found` },
@@ -532,6 +647,27 @@ export function createOperationsRoutes(
           logs = await triggerService.getOperationLogs(operationId, { level, limit, offset });
         } catch (err) {
           log.warn('Failed to fetch Trigger.dev logs', { operationId, error: err instanceof Error ? err.message : err });
+        }
+      }
+
+      // Fetch from DB event_history (completed/historical operations)
+      if (logs.length === 0) {
+        try {
+          const dbRow = await operationsRepo.findById(operationId);
+          const eventHistory = dbRow?.event_history;
+          if (eventHistory && Array.isArray(eventHistory)) {
+            logs = eventHistory.map((evt: any, idx: number) => ({
+              id: `log-${operationId}-${idx}`,
+              operationId,
+              timestamp: evt.timestamp,
+              level: evt.type === 'error' ? 'error' : 'info',
+              message: evt.current_step || evt.type,
+              phase: evt.phase,
+              data: evt.data,
+            }));
+          }
+        } catch (err) {
+          log.warn('Failed to fetch DB operation logs', { operationId, error: err instanceof Error ? err.message : err });
         }
       }
 
