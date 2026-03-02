@@ -48,7 +48,7 @@ export interface UnifiedOperationDTO {
   progress: number | null;
   currentStep: string;
   phase?: string;
-  phases?: Array<{ id: string; name: string; status: string; progress: number }>;
+  phases?: Array<{ id: string; label: string; status: string; progress: number }>;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -66,6 +66,7 @@ export interface UnifiedOperationDTO {
     hasLogs: boolean;
     hasQualityGates: boolean;
     hasTerminal: boolean;
+    canOverrideGates: boolean;
   };
   qualityGates?: Array<{
     name: string;
@@ -297,6 +298,7 @@ export class TriggerIntegrationService {
         hasLogs: true,
         hasQualityGates: type === 'schematic',
         hasTerminal: false,
+        canOverrideGates: status === 'running',
       },
       triggerRunId: run.id,
       iteration: (run.payload?.iteration as number) ?? (run.output?.finalIteration as number) ?? undefined,

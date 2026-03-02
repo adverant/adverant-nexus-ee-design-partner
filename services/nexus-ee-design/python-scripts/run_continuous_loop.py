@@ -70,6 +70,7 @@ class GateResult:
     actual: float
     threshold: float
     message: str = ""
+    unit: str = ""  # "ratio" (0-1, display as %), "count" (integer)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,7 @@ class ContinuousLoopRunner:
             actual=result.placeholder_ratio,
             threshold=self.gates.placeholder_ratio_max,
             message=f"{result.placeholder_ratio:.0%} placeholders (max {self.gates.placeholder_ratio_max:.0%})",
+            unit="ratio",
         ))
 
         # 2. Connection coverage
@@ -177,6 +179,7 @@ class ContinuousLoopRunner:
             actual=result.connection_coverage,
             threshold=self.gates.connection_coverage_min,
             message=f"{result.connection_coverage:.0%} coverage (min {self.gates.connection_coverage_min:.0%})",
+            unit="ratio",
         ))
 
         # 3. Overlap count
@@ -186,6 +189,7 @@ class ContinuousLoopRunner:
             actual=float(result.overlap_count),
             threshold=float(self.gates.overlap_count_max),
             message=f"{result.overlap_count} overlaps (max {self.gates.overlap_count_max})",
+            unit="count",
         ))
 
         # 4. Smoke test fatals
@@ -201,6 +205,7 @@ class ContinuousLoopRunner:
             actual=float(fatal_count),
             threshold=float(self.gates.smoke_test_fatal_max),
             message=f"{fatal_count} fatal issues (max {self.gates.smoke_test_fatal_max})",
+            unit="count",
         ))
 
         # 5. Visual score
@@ -210,6 +215,7 @@ class ContinuousLoopRunner:
             actual=result.visual_score,
             threshold=self.gates.visual_score_min,
             message=f"{result.visual_score:.1%} visual (min {self.gates.visual_score_min:.1%})",
+            unit="ratio",
         ))
 
         # 6. Center fallback ratio
@@ -219,6 +225,7 @@ class ContinuousLoopRunner:
             actual=result.center_fallback_ratio,
             threshold=self.gates.center_fallback_ratio_max,
             message=f"{result.center_fallback_ratio:.1%} fallbacks (max {self.gates.center_fallback_ratio_max:.1%})",
+            unit="ratio",
         ))
 
         # 7. Functional validation score (design-intent compliance)
@@ -229,6 +236,7 @@ class ContinuousLoopRunner:
             actual=functional_score,
             threshold=self.gates.functional_score_min,
             message=f"{functional_score:.1%} functional (min {self.gates.functional_score_min:.1%})",
+            unit="ratio",
         ))
 
         return checks

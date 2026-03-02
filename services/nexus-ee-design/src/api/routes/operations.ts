@@ -108,7 +108,7 @@ interface UnifiedOperationDTO {
   progress: number | null;
   currentStep: string;
   phase?: string;
-  phases?: Array<{ id: string; name: string; status: string; progress: number }>;
+  phases?: Array<{ id: string; label: string; status: string; progress: number }>;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -126,6 +126,7 @@ interface UnifiedOperationDTO {
     hasLogs: boolean;
     hasQualityGates: boolean;
     hasTerminal: boolean;
+    canOverrideGates: boolean;
   };
   qualityGates?: Array<{
     name: string;
@@ -188,9 +189,53 @@ function wsOperationToDTO(
       hasLogs: true,
       hasQualityGates: operationType === 'schematic',
       hasTerminal: false,
+      canOverrideGates: false, // WS operations can't receive parameter overrides
     },
+    phases: operationType === 'schematic' ? buildPhasesFromWsOp(op) : undefined,
     tags: [operationType, source],
   };
+}
+
+/**
+ * Build phase progress array from SchematicOperation state.
+ * Uses completedPhases + lastEvent.phase/phase_progress to determine each phase's status.
+ */
+const MAPO_PHASES = ['symbols', 'connections', 'layout', 'wiring', 'assembly', 'smoke_test', 'gaming_ai', 'export'] as const;
+const MAPO_PHASE_LABELS: Record<string, string> = {
+  symbols: 'Symbols',
+  connections: 'Connections',
+  layout: 'Layout',
+  wiring: 'Wiring',
+  assembly: 'Assembly',
+  smoke_test: 'Smoke Test',
+  gaming_ai: 'Optimization',
+  export: 'Export',
+};
+
+function buildPhasesFromWsOp(op: any): Array<{ id: string; label: string; status: string; progress: number }> {
+  const completedSet = new Set<string>(op.completedPhases || []);
+  const currentPhase = op.lastEvent?.phase;
+  const isError = op.status === 'error';
+
+  return MAPO_PHASES.map((phaseId) => {
+    let status = 'pending';
+    let progress = 0;
+
+    if (completedSet.has(phaseId)) {
+      status = 'completed';
+      progress = 100;
+    } else if (phaseId === currentPhase) {
+      if (isError) {
+        status = 'failed';
+        progress = op.lastEvent?.phase_progress ?? 0;
+      } else {
+        status = 'running';
+        progress = op.lastEvent?.phase_progress ?? 0;
+      }
+    }
+
+    return { id: phaseId, label: MAPO_PHASE_LABELS[phaseId] || phaseId, status, progress };
+  });
 }
 
 /**
