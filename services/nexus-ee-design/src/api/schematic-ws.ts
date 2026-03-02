@@ -119,8 +119,9 @@ export class SchematicWebSocketManager extends EventEmitter {
   /**
    * Create a new operation and return its ID.
    * Call this when starting schematic generation.
+   * Pass parameters to enable replay of interrupted/failed operations.
    */
-  createOperation(projectId: string, existingOperationId?: string): string {
+  createOperation(projectId: string, existingOperationId?: string, parameters?: Record<string, unknown>): string {
     const operationId = existingOperationId || uuidv4();
     const operation: SchematicOperation = {
       operationId,
@@ -142,6 +143,7 @@ export class SchematicWebSocketManager extends EventEmitter {
       type: 'schematic',
       source: 'ee-design',
       started_at: operation.startedAt,
+      parameters,
     }).catch((err) => log.warn('Failed to persist operation create', { operationId, error: err instanceof Error ? err.message : err }));
 
     return operationId;

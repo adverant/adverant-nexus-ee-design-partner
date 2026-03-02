@@ -1799,7 +1799,11 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
         // Create operation ID for WebSocket streaming BEFORE starting generation
         const schematicWsManager = getSchematicWsManager();
-        operationId = schematicWsManager.createOperation(projectId);
+        operationId = schematicWsManager.createOperation(projectId, undefined, {
+          architecture: req.body.architecture,
+          components: req.body.components,
+          name: req.body.name,
+        });
         log.info('Created schematic operation for streaming', { operationId, projectId });
 
         // Fetch ideation artifacts to provide context for schematic generation

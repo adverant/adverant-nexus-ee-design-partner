@@ -41,7 +41,7 @@ const log = rootLog.child({ component: 'operations-routes' });
 // ─── Validation Schemas ──────────────────────────────────────────────────
 
 const listOperationsSchema = z.object({
-  status: z.enum(['all', 'queued', 'running', 'paused', 'waiting-approval', 'completed', 'failed', 'cancelled']).optional().default('all'),
+  status: z.enum(['all', 'queued', 'running', 'paused', 'waiting-approval', 'completed', 'failed', 'cancelled', 'interrupted']).optional().default('all'),
   source: z.enum(['all', 'ee-design', 'trigger', 'n8n', 'terminal-computer']).optional().default('all'),
   projectId: z.string().uuid().optional(),
   type: z.enum(['all', 'schematic', 'pcb-layout', 'simulation', 'symbol-assembly', 'compliance', 'custom']).optional().default('all'),
@@ -245,7 +245,7 @@ function buildPhasesFromWsOp(op: any): Array<{ id: string; label: string; status
  */
 function dbRowToDTO(row: OperationRow): UnifiedOperationDTO {
   const completedPhases = Array.isArray(row.completed_phases) ? row.completed_phases : [];
-  const isCompleted = row.status === 'completed' || row.status === 'failed' || row.status === 'cancelled';
+  const isCompleted = row.status === 'completed' || row.status === 'failed' || row.status === 'cancelled' || row.status === 'interrupted';
 
   // Build phases from completed_phases array
   let phases: Array<{ id: string; label: string; status: string; progress: number }> | undefined;
@@ -778,6 +778,47 @@ export function createOperationsRoutes(
       const userId = (req as any).userId;
       log.info('Replay operation requested', { operationId, userId });
 
+      // Check WS manager first (running operation — not replayable)
+      try {
+        const schematicWsManager = getSchematicWsManager();
+        const wsOp = schematicWsManager.getOperation(operationId);
+        if (wsOp) {
+          res.status(409).json({
+            success: false,
+            error: { code: 'CONFLICT', message: 'Operation is still running. Cancel it first before replaying.' },
+          });
+          return;
+        }
+      } catch {
+        // WS manager not initialized
+      }
+
+      // Check DB for EE Design operations (completed/failed/interrupted)
+      try {
+        const dbRow = await operationsRepo.findById(operationId);
+        if (dbRow && dbRow.source === 'ee-design') {
+          const replayParams = dbRow.parameters as Record<string, unknown> | null;
+          res.json({
+            success: true,
+            data: {
+              operationId,
+              replayType: 'ee-design',
+              action: 'restart',
+              projectId: dbRow.project_id,
+              // Return stored parameters so frontend can call POST /projects/:projectId/schematic/generate
+              parameters: replayParams || {},
+              interruptedPhase: dbRow.phase || null,
+              completedPhases: dbRow.completed_phases || [],
+              message: `Restart schematic generation for project ${dbRow.project_id}`,
+            },
+          });
+          return;
+        }
+      } catch (err) {
+        log.warn('Failed to look up DB operation for replay', { operationId, error: err instanceof Error ? err.message : err });
+      }
+
+      // Check Trigger.dev
       if (triggerService) {
         const newOperationId = await triggerService.replayOperation(operationId);
         res.json({ success: true, data: { operationId, newOperationId, status: 'queued' } });
