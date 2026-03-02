@@ -25,6 +25,8 @@ import { getSchematicWsManager } from './schematic-ws.js';
 import { createSymbolAssemblyRoutes } from './routes/symbol-assembly.js';
 import { createComplianceRoutes } from './routes/compliance.js';
 import { createArtifactBrowserRoutes } from './routes/artifact-browser.js';
+import { createOperationsRoutes } from './routes/operations.js';
+import { TriggerIntegrationService } from '../services/trigger-integration.js';
 
 // Repository imports
 import {
@@ -4159,6 +4161,16 @@ export function createApiRoutes(io: SocketIOServer): Router {
 
   router.use('/hil', createHILRoutes());
   log.info('HIL testing routes mounted');
+
+  // ============================================================================
+  // Operations Center Routes (unified operations management)
+  // ============================================================================
+
+  const triggerService = process.env.TRIGGER_API_URL
+    ? new TriggerIntegrationService(process.env.TRIGGER_API_URL, process.env.TRIGGER_API_KEY)
+    : undefined;
+  router.use('/operations', createOperationsRoutes(io, triggerService));
+  log.info('Operations center routes mounted', { triggerIntegration: !!triggerService });
 
   // ============================================================================
   // Skills Routes (mounted from skills-routes.ts)
