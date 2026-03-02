@@ -14,9 +14,7 @@
  *   TRIGGER_API_KEY  — API key for auth with the Trigger.dev plugin
  */
 
-import { createLogger } from '../utils/logger.js';
-
-const log = createLogger({ component: 'trigger-integration' });
+import log from '../utils/logger.js';
 
 const TRIGGER_API_URL = process.env.TRIGGER_API_URL || 'http://nexus-trigger.nexus.svc.cluster.local:3500';
 const TRIGGER_API_KEY = process.env.TRIGGER_API_KEY || '';
