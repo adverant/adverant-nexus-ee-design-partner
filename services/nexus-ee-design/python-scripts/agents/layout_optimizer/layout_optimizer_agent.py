@@ -387,6 +387,23 @@ class LayoutOptimizerAgent:
                 else:
                     passive_no_ic.append(p_ref)
 
+            # Bypass caps connect via power rails (VCC/GND), not signal nets, so they
+            # have no entries in the connectivity dict and land in passive_no_ic above.
+            # Distribute them across ICs in the same subsystem (load-balanced) so they
+            # are placed in the IC-connected rows below their logical IC, not in the
+            # distant fallback grid.
+            if passive_no_ic and sub_ics:
+                ic_load = {ic: len(ic_passive_groups.get(ic, [])) for ic in sub_ics}
+                for p_ref in passive_no_ic:
+                    least_loaded_ic = min(ic_load, key=ic_load.get)
+                    ic_passive_groups.setdefault(least_loaded_ic, []).append(p_ref)
+                    ic_load[least_loaded_ic] += 1
+                logger.debug(
+                    f"  {subsys_name}: Assigned {len(passive_no_ic)} unconnected passives "
+                    f"to ICs (bypass cap inference)"
+                )
+                passive_no_ic = []
+
             # For each IC, place its passives in rows below.
             # Row 1 starts at bypass_to_ic + 15mm below IC center (= 30mm with current rules).
             # When there are more than 4 passives, split into two rows to reduce horizontal
@@ -430,19 +447,23 @@ class LayoutOptimizerAgent:
                     f"{'1 row' if n <= 4 else '2 rows'} below IC"
                 )
 
-            # Place remaining passives (not connected to any IC) in a grid below ICs
+            # Place remaining passives (not connected to any IC) in a grid below ICs.
+            # These are truly unconnected passives (rare after bypass-cap IC inference above).
+            # Use a compact 12mm grid spacing to stay within the A3 canvas (297mm height).
             unplaced_passives = [p for p in sub_passives if p not in placed_passives]
             unplaced_passives.extend(passive_no_ic)
             if unplaced_passives:
+                fallback_row_spacing = 12.0  # Compact — avoids Y > CANVAS_HEIGHT
                 passive_y = ry + rh * 0.75
                 cols = max(int(len(unplaced_passives) ** 0.5) + 1, 3)
-                p_spacing_x = max(passive_row_spacing, rw / (cols + 1))
+                p_spacing_x = max(fallback_row_spacing, rw / (cols + 1))
+                canvas_max_y = self.CANVAS_HEIGHT - 5.0
                 for idx, p_ref in enumerate(unplaced_passives):
                     col = idx % cols
                     row = idx // cols
                     positions[p_ref] = (
                         rx + 15.0 + col * p_spacing_x,
-                        passive_y + row * passive_row_spacing
+                        min(passive_y + row * fallback_row_spacing, canvas_max_y),
                     )
 
             # Place other components (diodes, transistors) near related ICs
@@ -479,6 +500,19 @@ class LayoutOptimizerAgent:
             positions,
             analysis.critical_proximity_pairs
         )
+
+        # --- Step 7: Clamp all positions to canvas bounds (safety net) ---
+        clamped = []
+        for ref, (x, y) in positions.items():
+            nx = max(5.0, min(x, self.CANVAS_WIDTH - 5.0))
+            ny = max(5.0, min(y, self.CANVAS_HEIGHT - 5.0))
+            if nx != x or ny != y:
+                clamped.append(ref)
+                positions[ref] = (nx, ny)
+        if clamped:
+            logger.warning(
+                f"LAYOUT: Clamped {len(clamped)} components to canvas bounds: {clamped[:10]}"
+            )
 
         return positions
 
