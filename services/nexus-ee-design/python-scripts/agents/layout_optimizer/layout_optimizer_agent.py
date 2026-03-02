@@ -405,11 +405,14 @@ class LayoutOptimizerAgent:
                 passive_no_ic = []
 
             # For each IC, place its passives in rows below.
-            # Row 1 starts at bypass_to_ic + 15mm below IC center (= 30mm with current rules).
+            # Row 1 starts at 65mm below IC center to clear all IC pin extents.
+            # The STM32G431 (48-pin QFP) has pins up to 40.64mm from center, so 30mm was
+            # insufficient (bypass caps landed inside IC pin area → SHORT PREVENTION conflicts).
+            # 65mm ensures bypass caps are always below the IC body for any part in the BOM.
             # When there are more than 4 passives, split into two rows to reduce horizontal
             # spread and prevent pin positions of adjacent caps from coinciding on the grid.
             passive_row_spacing = self.SPACING_RULES["passive_to_passive"]
-            passive_row_offset_y = self.SPACING_RULES["bypass_to_ic"] + 15.0  # 30mm below IC
+            passive_row_offset_y = 65.0   # 65mm clears 48-pin IC bodies (max ~50mm half-extent)
             passive_row2_extra_y = 20.0  # second row this far below first row
             for ic_ref, passives_for_ic in ic_passive_groups.items():
                 ic_pos = positions[ic_ref]
