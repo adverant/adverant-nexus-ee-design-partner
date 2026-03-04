@@ -34,10 +34,50 @@ import {
 // ============================================================================
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_API_KEY = config.llm.openrouterApiKey;
 const DEFAULT_TIMEOUT = 600000; // 10 minutes — LLM calls for schematic gen can be long
 const MAX_RETRIES = 3;
 const RETRY_DELAY_BASE = 1000; // 1 second
 const TOKENS_PER_CHAR_ESTIMATE = 0.25; // Conservative estimate
+
+// ============================================================================
+// LLM Routing — Claude Code Max proxy support
+// ============================================================================
+
+const LLM_ANTHROPIC_ROUTE = (process.env.LLM_ANTHROPIC_ROUTE || process.env.AI_PROVIDER || 'openrouter');
+const LLM_CLAUDE_CODE_PROXY_URL = process.env.LLM_CLAUDE_CODE_PROXY_URL || process.env.CLAUDE_CODE_PROXY_URL || 'http://claude-code-proxy.nexus.svc.cluster.local:3100';
+
+const ANTHROPIC_MODEL_MAP: Record<string, string> = {
+  'anthropic/claude-opus-4.6': 'claude-opus-4-6',
+  'anthropic/claude-opus-4-6-20260206': 'claude-opus-4-6',
+  'anthropic/claude-sonnet-4-5': 'claude-sonnet-4-5',
+  'anthropic/claude-sonnet-4': 'claude-sonnet-4',
+  'anthropic/claude-3.5-sonnet': 'claude-3-5-sonnet-20241022',
+  'anthropic/claude-3.5-haiku': 'claude-3-5-haiku-20241022',
+  'anthropic/claude-3-haiku': 'claude-3-haiku-20240307',
+  'anthropic/claude-3-opus': 'claude-3-opus-20240229',
+};
+
+function resolveEndpoint(model: string): { url: string; headers: Record<string, string>; resolvedModel: string } {
+  const useProxy = LLM_ANTHROPIC_ROUTE === 'claude_code_max' && model.startsWith('anthropic/');
+  if (useProxy) {
+    return {
+      url: `${LLM_CLAUDE_CODE_PROXY_URL}/v1/chat/completions`,
+      headers: { 'Content-Type': 'application/json' },
+      resolvedModel: ANTHROPIC_MODEL_MAP[model] || model,
+    };
+  }
+  return {
+    url: OPENROUTER_API_URL,
+    headers: {
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://adverant.ai',
+      'X-Title': 'Nexus EE Design',
+      'Content-Type': 'application/json',
+    },
+    resolvedModel: model,
+  };
+}
 
 // ============================================================================
 // OpenRouter API Response Types
@@ -216,8 +256,11 @@ export async function callLLM(
   const timeout = options.timeout || DEFAULT_TIMEOUT;
   const startTime = Date.now();
 
-  // Validate API key
-  if (!config.llm.openrouterApiKey) {
+  // Resolve endpoint (proxy vs OpenRouter)
+  const endpoint = resolveEndpoint(model);
+
+  // Validate API key (only required for OpenRouter route)
+  if (endpoint.url === OPENROUTER_API_URL && !OPENROUTER_API_KEY) {
     throw new LLMServiceError('OpenRouter', 'API key not configured', {
       operation: 'callLLM',
       suggestion: 'Set OPENROUTER_API_KEY environment variable',
@@ -229,7 +272,7 @@ export async function callLLM(
   checkRateLimit(estimatedInputTokens);
 
   const requestBody = {
-    model,
+    model: endpoint.resolvedModel,
     messages: messages.map(m => ({
       role: m.role,
       content: m.content,
@@ -248,7 +291,8 @@ export async function callLLM(
   };
 
   log.debug('LLM request', {
-    model,
+    model: endpoint.resolvedModel,
+    route: endpoint.url === OPENROUTER_API_URL ? 'openrouter' : 'claude_code_max',
     messageCount: messages.length,
     estimatedTokens: estimatedInputTokens,
     operation: 'callLLM',
@@ -264,14 +308,9 @@ export async function callLLM(
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-      const response = await fetch(OPENROUTER_API_URL, {
+      const response = await fetch(endpoint.url, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.llm.openrouterApiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://adverant.ai',
-          'X-Title': 'EE Design Partner',
-        },
+        headers: endpoint.headers,
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
@@ -492,8 +531,11 @@ export async function callLLMStreaming(
   const timeout = options.timeout || DEFAULT_TIMEOUT;
   const startTime = Date.now();
 
-  // Validate API key
-  if (!config.llm.openrouterApiKey) {
+  // Resolve endpoint (proxy vs OpenRouter)
+  const endpoint = resolveEndpoint(model);
+
+  // Validate API key (only required for OpenRouter route)
+  if (endpoint.url === OPENROUTER_API_URL && !OPENROUTER_API_KEY) {
     throw new LLMServiceError('OpenRouter', 'API key not configured', {
       operation: 'callLLMStreaming',
       suggestion: 'Set OPENROUTER_API_KEY environment variable',
@@ -505,7 +547,7 @@ export async function callLLMStreaming(
   checkRateLimit(estimatedInputTokens);
 
   const requestBody = {
-    model,
+    model: endpoint.resolvedModel,
     messages: messages.map(m => ({
       role: m.role,
       content: m.content,
@@ -518,7 +560,8 @@ export async function callLLMStreaming(
   };
 
   log.debug('LLM streaming request', {
-    model,
+    model: endpoint.resolvedModel,
+    route: endpoint.url === OPENROUTER_API_URL ? 'openrouter' : 'claude_code_max',
     messageCount: messages.length,
     operation: 'callLLMStreaming',
   });
@@ -527,14 +570,9 @@ export async function callLLMStreaming(
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(OPENROUTER_API_URL, {
+    const response = await fetch(endpoint.url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.llm.openrouterApiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://adverant.ai',
-        'X-Title': 'EE Design Partner',
-      },
+      headers: endpoint.headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
