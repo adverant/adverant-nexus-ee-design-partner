@@ -12,6 +12,7 @@ import * as yaml from 'js-yaml';
 import { v4 as uuidv4 } from 'uuid';
 import { log as logger } from '../../utils/logger.js';
 import { Skill, SkillCapability, SkillParameter, SkillExecution } from '../../types';
+import { OPENROUTER_API_URL } from '../../llm/openrouter-client.js';
 
 // ============================================================================
 // Types
@@ -330,7 +331,8 @@ export class SkillsEngineClient extends EventEmitter {
     apiKey: string,
     texts: string[]
   ): Promise<number[][]> {
-    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+    const embeddingsUrl = OPENROUTER_API_URL.replace('/chat/completions', '/embeddings');
+    const response = await fetch(embeddingsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

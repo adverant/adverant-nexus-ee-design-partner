@@ -33,7 +33,7 @@ import {
 // Constants
 // ============================================================================
 
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_API_KEY = config.llm.openrouterApiKey;
 const DEFAULT_TIMEOUT = 600000; // 10 minutes — LLM calls for schematic gen can be long
 const MAX_RETRIES = 3;
@@ -58,7 +58,7 @@ const ANTHROPIC_MODEL_MAP: Record<string, string> = {
   'anthropic/claude-3-opus': 'claude-3-opus-20240229',
 };
 
-function resolveEndpoint(model: string): { url: string; headers: Record<string, string>; resolvedModel: string } {
+export function resolveEndpoint(model: string): { url: string; headers: Record<string, string>; resolvedModel: string } {
   const useProxy = LLM_ANTHROPIC_ROUTE === 'claude_code_max' && model.startsWith('anthropic/');
   if (useProxy) {
     return {

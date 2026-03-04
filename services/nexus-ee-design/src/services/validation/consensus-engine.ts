@@ -18,6 +18,7 @@ import {
 } from '../../types';
 import log from '../../utils/logger.js';
 import { config } from '../../config.js';
+import { resolveEndpoint } from '../../llm/openrouter-client.js';
 
 export interface ValidatorConfig {
   name: string;
@@ -295,16 +296,13 @@ export class ConsensusEngine extends EventEmitter {
     }
 
     try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const model = validator.model || 'google/gemini-2.5-pro-preview';
+      const { url, headers: endpointHeaders, resolvedModel } = resolveEndpoint(model);
+      const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${openRouterKey}`,
-          'HTTP-Referer': 'https://adverant.ai',
-          'X-Title': 'Nexus EE Design Partner'
-        },
+        headers: endpointHeaders,
         body: JSON.stringify({
-          model: validator.model || 'google/gemini-2.5-pro-preview',
+          model: resolvedModel,
           messages: [
             {
               role: 'system',

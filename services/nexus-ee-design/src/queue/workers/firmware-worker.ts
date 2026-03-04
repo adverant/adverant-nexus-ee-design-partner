@@ -11,6 +11,7 @@ import * as path from 'path';
 import axios from 'axios';
 import { config } from '../../config.js';
 import { log, Logger } from '../../utils/logger.js';
+import { resolveEndpoint } from '../../llm/openrouter-client.js';
 import * as FirmwareRepository from '../../database/repositories/firmware-repository.js';
 import type { FirmwareJobData } from '../queue-manager.js';
 import type {
@@ -1239,18 +1240,16 @@ async function generateCodeWithLLM(
   prompt: string,
   logger: Logger
 ): Promise<string> {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error('OpenRouter API key not configured');
-  }
+  const { url, headers: endpointHeaders, resolvedModel } = resolveEndpoint(FAST_MODEL);
 
   try {
     const response = await axios.post<{
       choices: Array<{ message: { content: string } }>;
       usage?: { prompt_tokens: number; completion_tokens: number };
     }>(
-      'https://openrouter.ai/api/v1/chat/completions',
+      url,
       {
-        model: FAST_MODEL,
+        model: resolvedModel,
         messages: [
           {
             role: 'system',
@@ -1265,12 +1264,7 @@ async function generateCodeWithLLM(
         temperature: 0.3,
       },
       {
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://adverant.ai',
-          'X-Title': 'Nexus EE Design Partner',
-        },
+        headers: endpointHeaders,
         timeout: 30000,
       }
     );
